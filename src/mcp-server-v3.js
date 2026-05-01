@@ -555,8 +555,8 @@ function checkDisabled(providerName) {
 server.tool(
     'proxima_deep_search',
     {
-        query: z.string().describe('Search query for deep research. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.'),
+        query: z.string().describe('Search query for deep research. Perplexity does not have context of your codebase - attach relevant code via files parameter. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.'),
         provider: z.string().optional().describe('AI provider to use: chatgpt, claude, gemini, perplexity. Default: auto-select best available')
     },
     async ({ query, files, provider: providerName }) => {
@@ -587,8 +587,8 @@ server.tool(
 server.tool(
     'deep_search',
     {
-        query: z.string().describe('Search query for deep research. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.'),
+        query: z.string().describe('Search query for deep research. Perplexity does not have context of your codebase - attach relevant code via files parameter. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.'),
         provider: z.string().optional().describe('AI provider to use: chatgpt, claude, gemini, perplexity. Default: auto-select best available')
     },
     async ({ query, files, provider: providerName }) => {
@@ -619,8 +619,8 @@ server.tool(
 server.tool(
     'proxima_pro_search',
     {
-        query: z.string().describe('Query for detailed Pro search. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.')
+        query: z.string().describe('Query for detailed Pro search. Perplexity does not have context of your codebase - attach relevant code via files parameter. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.')
     },
     async ({ query, files }) => {
         const disabled = checkDisabled('perplexity');
@@ -643,8 +643,8 @@ server.tool(
 server.tool(
     'pro_search',
     {
-        query: z.string().describe('Query for detailed Pro search. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.')
+        query: z.string().describe('Query for detailed Pro search. Perplexity does not have context of your codebase - attach relevant code via files parameter. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.')
     },
     async ({ query, files }) => {
         const disabled = checkDisabled('perplexity');
