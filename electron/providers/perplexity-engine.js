@@ -204,6 +204,7 @@
 
         // Resolve model_preference from options (if provided)
         var modelPref = _resolveModelPreference(options && options.modelPreference);
+        console.log('[Proxima Perplexity] send() called with options:', JSON.stringify(options), ' -> model_preference:', modelPref);
 
         var params = {
             last_backend_uuid: _lastBackendUuid || _uuid(),

@@ -503,6 +503,7 @@ async function handleMCPRequest(request) {
             case 'sendMessage':
                 // Extract options (including modelPreference)
                 const sendOptions = { modelPreference: data.modelPreference };
+                console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
                 // Check if file should be uploaded
                 if (data.filePath && fileReferenceEnabled) {
                     try {

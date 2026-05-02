@@ -340,7 +340,7 @@ class AIProvider {
             waitCount++;
         }
 
-        console.error(`[${this.name}] Sending message...`);
+        console.error(`[${this.name}] Sending message...options: ${JSON.stringify(options)}`);
         await this.ipc.send('sendMessage', this.name, { message, ...options });
 
         console.error(`[${this.name}] Waiting for response (with typing detection)...`);
