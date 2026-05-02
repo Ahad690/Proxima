@@ -1,44 +1,64 @@
 #!/usr/bin/env node
 // =============================================================================
-// Proxima Code Review Script
-// Usage: node cli/proxima-review.cjs [commit-ref]
-// Hook:  Runs in background as post-commit hook (non-blocking)
+// Proxima Code Review Script v2
+// Usage:  node cli/proxima-review.cjs [commit-sha]   ← manual run
+// Hook:   Triggered automatically by pre-push git hook (reads stdin)
+// =============================================================================
+//
+// Transport: Direct IPC socket (port 19222) — no REST API needed.
+// Hook mode: pre-push (fires on git push, not on every local commit).
+// Storage:   perplexity-reviews/<shortSha>.md in the repo root.
+//
 // =============================================================================
 
-const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 
-// ─── Config ───────────────────────────────────────────────────────────────
-const API_HOST = process.env.PROXIMA_HOST || '127.0.0.1';
-const API_PORT = parseInt(process.env.PROXIMA_REST_PORT) || 3210;
-const API_BASE = `http://${API_HOST}:${API_PORT}`;
-const REVIEW_DIR = 'perplexity-reviews';  // In CWD where git commit runs
-const MAX_DIFF_LINES = 800;
+// ─── Config ───────────────────────────────────────────────────────────────────
+const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
+const IPC_HOST = '127.0.0.1';
+const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || 'claude sonnet 4.6';
+const MAX_DIFF_LINES = parseInt(process.env.PROXIMA_REVIEW_MAX_DIFF) || 800;
+const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
 const LOCK_FILE = path.join(REVIEW_DIR, '.review-lock');
-const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min — stale if older
+const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min
 
-// ─── Lock (atomic, no TOCTOU race) ──────────────────────────────────────────
+// ─── Git root detection ───────────────────────────────────────────────────────
+function findGitRoot() {
+    try {
+        return execSync('git rev-parse --show-toplevel', { encoding: 'utf8' }).trim();
+    } catch {
+        return process.cwd();
+    }
+}
+
+// ─── Lock (atomic wx flag — no TOCTOU race) ──────────────────────────────────
 function tryAcquireLock(commitSha) {
     if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
 
-    // Clear stale lock — if lock is older than 15 min, last process likely crashed
     if (fs.existsSync(LOCK_FILE)) {
         try {
             const lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
             if (Date.now() - lock.time > STALE_LOCK_MS) {
-                console.log('\x1b[33m⚠\x1b[0m Stale lock found (from ' + lock.shortSha + '), clearing');
+                console.log(yellow('⚠') + ' Stale lock found (from ' + lock.shortSha + '), clearing');
                 fs.unlinkSync(LOCK_FILE);
+            } else {
+                return false; // Another review is actively running
             }
         } catch {
             fs.unlinkSync(LOCK_FILE);
         }
     }
 
-    // Atomic acquire: wx flag fails if file already exists (no TOCTOU)
     try {
-        fs.writeFileSync(LOCK_FILE, JSON.stringify({ sha: commitSha, shortSha: commitSha.substring(0, 8), pid: process.pid, time: Date.now() }), { encoding: 'utf8', flag: 'wx' });
+        const shortSha = commitSha.substring(0, 8);
+        fs.writeFileSync(
+            LOCK_FILE,
+            JSON.stringify({ sha: commitSha, shortSha, pid: process.pid, time: Date.now() }),
+            { encoding: 'utf8', flag: 'wx' }
+        );
         return true;
     } catch {
         return false;
@@ -49,68 +69,104 @@ function releaseLock() {
     try { fs.unlinkSync(LOCK_FILE); } catch {}
 }
 
-// ─── Colors ────────────────────────────────────────────────────────────────
-const c = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', cyan: '\x1b[36m' };
-const green = (t) => `${c.green}${t}${c.reset}`;
+// ─── Colors ───────────────────────────────────────────────────────────────────
+const c = {
+    reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
+    green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', cyan: '\x1b[36m'
+};
+const green  = (t) => `${c.green}${t}${c.reset}`;
 const yellow = (t) => `${c.yellow}${t}${c.reset}`;
-const red = (t) => `${c.red}${t}${c.reset}`;
-const cyan = (t) => `${c.cyan}${t}${c.reset}`;
-const bold = (t) => `${c.bold}${t}${c.reset}`;
-const dim = (t) => `${c.dim}${t}${c.reset}`;
+const red    = (t) => `${c.red}${t}${c.reset}`;
+const cyan   = (t) => `${c.cyan}${t}${c.reset}`;
+const dim    = (t) => `${c.dim}${t}${c.reset}`;
 
-// ─── API ───────────────────────────────────────────────────────────────────
-function apiRequest(method, endpoint, body = null) {
+// ─── IPC Client ───────────────────────────────────────────────────────────────
+// Talks directly to Proxima Agent Hub over TCP (same protocol as MCP server).
+// Sends: sendMessage → getResponseWithTyping, both newline-delimited JSON.
+function queryPerplexity(message, modelPreference) {
     return new Promise((resolve, reject) => {
-        const url = new URL(endpoint, API_BASE);
-        const options = {
-            hostname: url.hostname,
-            port: url.port,
-            path: url.pathname,
-            method,
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 600000
-        };
+        const socket = net.createConnection({ port: IPC_PORT, host: IPC_HOST });
+        let buffer = '';
+        let state = 'waitingSendAck';
+        let reqId = 0;
 
-        const req = http.request(options, (res) => {
-            let data = '';
-            res.on('data', chunk => { data += chunk; });
-            res.on('end', () => {
-                try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
-                catch { resolve({ status: res.statusCode, data: { error: data } }); }
-            });
+        socket.setTimeout(600000); // 10 min max
+
+        function send(action, data) {
+            reqId++;
+            socket.write(JSON.stringify({ requestId: reqId, action, provider: 'perplexity', data }) + '\n');
+            return reqId;
+        }
+
+        socket.on('connect', () => {
+            // Step 1: send the message with model preference
+            send('sendMessage', { message, modelPreference, deepSearch: false });
         });
 
-        req.on('error', (e) => {
+        socket.on('data', (chunk) => {
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const resp = JSON.parse(line);
+
+                    if (state === 'waitingSendAck' && resp.requestId === 1) {
+                        if (!resp.success) {
+                            socket.destroy();
+                            reject(new Error(resp.error || 'sendMessage failed'));
+                            return;
+                        }
+                        // Step 2: wait for the response
+                        state = 'waitingResponse';
+                        send('getResponseWithTyping', {});
+
+                    } else if (state === 'waitingResponse' && resp.requestId === 2) {
+                        state = 'done';
+                        socket.end();
+                        const text = resp.response || '';
+                        if (!text) {
+                            reject(new Error('Perplexity returned empty response'));
+                        } else {
+                            resolve(text);
+                        }
+                    }
+                } catch { /* ignore parse errors */ }
+            }
+        });
+
+        socket.on('error', (e) => {
             reject(e.code === 'ECONNREFUSED'
-                ? new Error('Cannot connect to Proxima. Is it running? (npm start)')
+                ? new Error('Cannot connect to Proxima Agent Hub on port ' + IPC_PORT + '. Is it running?')
                 : e);
         });
-        req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out (10min)')); });
-        if (body) req.write(JSON.stringify(body));
-        req.end();
+
+        socket.on('timeout', () => {
+            socket.destroy();
+            reject(new Error('IPC request timed out after 10 minutes'));
+        });
     });
 }
 
-// ─── Git ───────────────────────────────────────────────────────────────────
+// ─── Git helpers ──────────────────────────────────────────────────────────────
 function getCommitInfo(ref) {
-    try {
-        const sha = execSync('git rev-parse ' + ref, { encoding: 'utf8' }).trim();
-        const shortSha = sha.substring(0, 8);
-        const msg = execSync('git log -1 --pretty=%B ' + sha, { encoding: 'utf8' }).trim();
-        const author = execSync('git log -1 --pretty=%an ' + sha, { encoding: 'utf8' }).trim();
-        const date = execSync('git log -1 --pretty=%cd --date=short ' + sha, { encoding: 'utf8' }).trim();
-        return { sha, shortSha, msg, author, date };
-    } catch (e) {
-        throw new Error('Invalid commit reference: ' + ref);
-    }
+    const sha      = execSync('git rev-parse ' + ref, { encoding: 'utf8' }).trim();
+    const shortSha = sha.substring(0, 8);
+    const msg      = execSync('git log -1 --pretty=%B ' + sha, { encoding: 'utf8' }).trim();
+    const author   = execSync('git log -1 --pretty=%an ' + sha, { encoding: 'utf8' }).trim();
+    const date     = execSync('git log -1 --pretty=%cd --date=short ' + sha, { encoding: 'utf8' }).trim();
+    return { sha, shortSha, msg, author, date };
 }
 
-function getDiff(sha, maxLines) {
+function getDiff(sha) {
     try {
-        const diff = execSync('git show --no-color --unified=3 ' + sha, { encoding: 'utf8', maxBuffer: maxLines * 200 });
+        const diff  = execSync('git show --no-color --unified=3 ' + sha, { encoding: 'utf8', maxBuffer: MAX_DIFF_LINES * 300 });
         const lines = diff.split('\n');
-        if (lines.length > maxLines) {
-            return lines.slice(0, maxLines).join('\n') + '\n\n... (truncated, ' + (lines.length - maxLines) + ' more lines)';
+        if (lines.length > MAX_DIFF_LINES) {
+            return lines.slice(0, MAX_DIFF_LINES).join('\n')
+                + '\n\n... (truncated, ' + (lines.length - MAX_DIFF_LINES) + ' more lines)';
         }
         return diff;
     } catch {
@@ -118,135 +174,187 @@ function getDiff(sha, maxLines) {
     }
 }
 
-// ─── Review ───────────────────────────────────────────────────────────────
+// ─── Review runner ────────────────────────────────────────────────────────────
 async function runReview(commitRef) {
     console.log(cyan('🤖') + ' Starting Perplexity code review for: ' + yellow(commitRef));
 
-    const { sha, shortSha, msg, author, date } = getCommitInfo(commitRef);
-    console.log(cyan('📋') + ' Commit: ' + shortSha + ' by ' + author);
+    let info;
+    try {
+        info = getCommitInfo(commitRef);
+    } catch (e) {
+        console.error(red('❌') + ' Invalid commit: ' + e.message);
+        return;
+    }
 
-    // Atomic lock — fails instantly if another review is running
+    const { sha, shortSha, msg, author, date } = info;
+    console.log(cyan('📋') + ' Commit: ' + shortSha + ' — ' + dim(msg.split('\n')[0]));
+
     if (!tryAcquireLock(sha)) {
-        console.log(yellow('⏳') + ' Another review is already running. Skipping this commit.');
+        console.log(yellow('⏳') + ' Another review is already running. Skipping ' + shortSha);
         console.log(dim('   Run manually later: node cli/proxima-review.cjs ' + shortSha));
         return;
     }
     console.log(cyan('🔒') + ' Lock acquired');
 
-    const diff = getDiff(sha, MAX_DIFF_LINES);
-    if (!diff || diff.trim() === '') {
-        console.log(yellow('⚠') + ' No changes detected.');
+    // Check if review already exists
+    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    const reviewFile = path.join(REVIEW_DIR, shortSha + '.md');
+    if (fs.existsSync(reviewFile)) {
+        console.log(yellow('⏭') + '  Review already exists for ' + shortSha + ', skipping');
         releaseLock();
         return;
     }
 
-    const reviewPrompt = `You are a principal software engineer performing a high-quality code review.
+    const diff = getDiff(sha);
+    if (!diff || diff.trim() === '') {
+        console.log(yellow('⚠') + ' No diff found for ' + shortSha);
+        releaseLock();
+        return;
+    }
+
+    const prompt = `You are a principal software engineer performing a high-quality code review.
 
 ---
 Commit: ${shortSha}
 Author: ${author}
-Date: ${date}
+Date:   ${date}
 Message: ${msg}
 ---
 
 Full diff:
 ${diff}
 
-Provide a professional, constructive code review with the following structure:
+Provide a professional, constructive code review with this structure:
 
 ## Summary
-(One paragraph summary of what was changed)
+(One paragraph — what changed and why)
 
 ## What's Good
-- List strengths and good practices
+- Strengths and good practices observed
 
 ## Issues & Suggestions
-- List any bugs, code smells, performance issues, or improvements
-- Be specific with line references when possible
+- Bugs, code smells, performance issues, or improvements
+- Be specific with file/line references when possible
 
 ## Security & Performance
-- Any security concerns?
-- Performance implications?
-- Scalability notes?
+- Security concerns?
+- Performance or scalability implications?
 
 ## Overall Score: X/10
-(Include a brief justification for the score)
+(Brief justification)
 
 ## Recommendations
-(Prioritized list of next steps)
+(Prioritized next steps — most important first)
 
-Focus on correctness, maintainability, readability, and best practices.
-Be constructive and specific.`;
+Be constructive, specific, and actionable. Focus on correctness, maintainability, and best practices.`;
 
-    console.log(cyan('🚀') + ' Sending review request to Perplexity...');
+    console.log(cyan('🚀') + ' Sending to Perplexity (' + REVIEW_MODEL + ')...');
 
     try {
-        const { data } = await apiRequest('POST', '/v1/chat/completions', {
-            model: 'perplexity',
-            message: reviewPrompt
-        });
+        const response = await queryPerplexity(prompt, REVIEW_MODEL);
 
-        let response = '';
-        if (data.choices && data.choices.length > 0) {
-            response = data.choices[0].message?.content || '';
-        } else if (data.error) {
-            throw new Error(data.error.message || JSON.stringify(data.error));
-        } else {
-            throw new Error('Unknown response format');
-        }
-
-        if (!response) throw new Error('Empty response from AI');
-
-        if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
-
-        const reviewFile = path.join(REVIEW_DIR, `perplexity-${shortSha}.md`);
-        const metadata = `---
+        const content = `---
 commit: ${sha}
 short_sha: ${shortSha}
 author: ${author}
 date: ${date}
-message: ${msg}
+message: ${JSON.stringify(msg)}
+model: ${REVIEW_MODEL}
 reviewed_at: ${new Date().toISOString()}
 ---
 
+# Code Review: ${shortSha}
+
+> ${msg.split('\n')[0]}
+
 ${response}`;
 
-        fs.writeFileSync(reviewFile, metadata, 'utf8');
-
-        console.log(green('✅') + ' Review completed!');
-        console.log(cyan('📄') + ' Saved to: ' + yellow(reviewFile));
-        const timeMs = data.proxima?.responseTimeMs || 0;
-        console.log(dim(`   Response time: ${(timeMs / 1000).toFixed(1)}s`));
+        fs.writeFileSync(reviewFile, content, 'utf8');
+        console.log(green('✅') + ' Review saved → ' + yellow(reviewFile));
 
     } catch (e) {
         console.log(red('❌') + ' Review failed: ' + e.message);
 
-        if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
-        const errorFile = path.join(REVIEW_DIR, `error-${shortSha}.md`);
-        fs.writeFileSync(errorFile, `---\ncommit: ${sha}\nshort_sha: ${shortSha}\nauthor: ${author}\ndate: ${date}\nmessage: ${msg}\nerror: ${e.message}\nerror_at: ${new Date().toISOString()}\n---\n\n# Review Failed\n\n${e.message}\n`, 'utf8');
-        console.log(cyan('📄') + ' Error saved to: ' + yellow(errorFile));
+        const errorFile = path.join(REVIEW_DIR, 'error-' + shortSha + '.md');
+        fs.writeFileSync(errorFile,
+            `---\ncommit: ${sha}\nshort_sha: ${shortSha}\nauthor: ${author}\ndate: ${date}\nmessage: ${JSON.stringify(msg)}\nerror: ${e.message}\nerror_at: ${new Date().toISOString()}\n---\n\n# Review Failed\n\n**Error:** ${e.message}\n`,
+            'utf8'
+        );
+        console.log(cyan('📄') + ' Error saved → ' + yellow(errorFile));
     } finally {
         releaseLock();
         console.log(cyan('🔓') + ' Lock released');
     }
 }
 
-// ─── Main ──────────────────────────────────────────────────────────────────
-async function main() {
-    const commitRef = process.argv[2] || 'HEAD';
+// ─── Pre-push stdin parser ────────────────────────────────────────────────────
+// Git passes pushed refs on stdin:
+//   <local-ref> <local-sha> <remote-ref> <remote-sha>
+// remote-sha is 000...000 when the branch is brand new.
+async function getNewCommitsFromStdin() {
+    return new Promise((resolve) => {
+        let input = '';
+        process.stdin.setEncoding('utf8');
+        process.stdin.on('data', (d) => { input += d; });
+        process.stdin.on('end', () => {
+            const commits = [];
+            const NULL_SHA = '0000000000000000000000000000000000000000';
 
-    // If running as git hook (--hook flag), spawn in background so git doesn't block
-    if (process.argv.includes('--hook')) {
-        const { spawn } = require('child_process');
-        const child = spawn(process.execPath, [__filename, commitRef], {
-            detached: true,
-            stdio: 'ignore'
+            for (const line of input.trim().split('\n')) {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length < 4) continue;
+
+                const [, localSha, , remoteSha] = parts;
+                if (!localSha || localSha === NULL_SHA) continue; // deleted branch
+
+                try {
+                    const range = remoteSha === NULL_SHA
+                        ? localSha                          // new branch — review HEAD only
+                        : remoteSha + '..' + localSha;     // incremental push
+
+                    const shas = execSync('git rev-list --reverse ' + range, { encoding: 'utf8' })
+                        .trim().split('\n').filter(Boolean);
+                    commits.push(...shas);
+                } catch { /* empty push or detached HEAD, skip */ }
+            }
+
+            resolve([...new Set(commits)]); // deduplicate
         });
-        child.unref();
-        console.log(cyan('🤖') + ' Review queued for ' + yellow(commitRef.substring(0, 8)) + ' (running in background)');
-        return;
+        process.stdin.on('error', () => resolve([]));
+    });
+}
+
+// ─── Spawn background child ───────────────────────────────────────────────────
+function spawnBackground(sha) {
+    const child = spawn(process.execPath, [__filename, sha], {
+        detached: true,
+        stdio: 'ignore',
+        cwd: findGitRoot()
+    });
+    child.unref();
+    console.log(cyan('🤖') + ' Review queued for ' + yellow(sha.substring(0, 8)) + ' (background)');
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+async function main() {
+    const args = process.argv.slice(2);
+
+    // pre-push hook mode: no args, read stdin from git
+    if (args.length === 0 || args[0] === '--pre-push') {
+        const commits = await getNewCommitsFromStdin();
+        if (commits.length === 0) {
+            console.log(dim('proxima-review: no new commits to review'));
+            process.exit(0);
+        }
+        console.log(cyan('📦') + ' ' + commits.length + ' new commit(s) to review');
+        for (const sha of commits) {
+            spawnBackground(sha);
+        }
+        process.exit(0); // never block git push
     }
 
+    // Manual run: node cli/proxima-review.cjs <sha>
+    const commitRef = args[0];
     try {
         await runReview(commitRef);
     } catch (e) {

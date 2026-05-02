@@ -14,6 +14,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const IPC_PORT = process.env.AGENT_HUB_PORT || 19222;
+// Uncomment for debugging:
+// console.error('[MCP] Using IPC_PORT:', IPC_PORT);
 
 // ─── IPC Client ───────────────────────────────────────
 
@@ -389,8 +391,8 @@ class AIProvider {
 
 
 
-    async search(query, useCache = true) {
-        return await this.chat(query, useCache);
+    async search(query, useCache = true, options = {}) {
+        return await this.chat(query, useCache, options);
     }
 
     async executeScript(script) {
@@ -621,7 +623,7 @@ server.tool(
     {
         query: z.string().describe('Query for detailed Pro search. Perplexity does not have context of your codebase - attach relevant code via files parameter. Use for research across <=30 websites. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
         files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.'),
-        model: z.string().optional().describe('Model to use: "sonar 2", "claude sonnet 4.6", "gpt-5.4", "gemini 3.1 pro", "deep", "thinking". Default: sonar 2')
+        model: z.string().optional().describe('Model to use: "claude sonnet 4.6", "claude sonnet 4.6 thinking", "gpt-5.4", "gpt-5.4 thinking", "gemini 3.1 pro", "experimental", "best". Default: best')
     },
     async ({ query, files, model }) => {
         const disabled = checkDisabled('perplexity');
@@ -633,7 +635,7 @@ server.tool(
         const fullQuery = buildMessageWithFiles(query, files);
         
         try {
-            return toolResponse(await perplexity.search(`Provide a comprehensive, detailed answer with sources: ${fullQuery}`, true, { deepSearch: false, modelPreference: model })));
+            return toolResponse(await perplexity.search(`Provide a comprehensive, detailed answer with sources: ${fullQuery}`, true, { deepSearch: false, modelPreference: model }));
         } catch (apiErr) {
             console.error('[proxima_pro_search] API failed, falling back to DOM: ' + apiErr.message);
             return toolResponse(await perplexity.search(`Provide a comprehensive, detailed answer with sources: ${fullQuery}`, true, { deepSearch: false, modelPreference: model, forceDOM: true }));
@@ -646,7 +648,7 @@ server.tool(
     {
         query: z.string().describe('Query for detailed Pro search. Perplexity does not have context of your codebase - attach relevant code via files parameter. Use for research across <=30 websites. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
         files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.'),
-        model: z.string().optional().describe('Model to use: "sonar 2", "claude sonnet 4.6", "gpt-5.4", "gemini 3.1 pro", "deep", "thinking". Default: sonar 2')
+        model: z.string().optional().describe('Model to use: "claude sonnet 4.6", "claude sonnet 4.6 thinking", "gpt-5.4", "gpt-5.4 thinking", "gemini 3.1 pro", "experimental", "best". Default: best')
     },
     async ({ query, files, model }) => {
         const disabled = checkDisabled('perplexity');
@@ -658,7 +660,7 @@ server.tool(
         const fullQuery = buildMessageWithFiles(query, files);
         
         try {
-            return toolResponse(await perplexity.search(`Provide a comprehensive, detailed answer with sources: ${fullQuery}`, true, { deepSearch: false, modelPreference: model })));
+            return toolResponse(await perplexity.search(`Provide a comprehensive, detailed answer with sources: ${fullQuery}`, true, { deepSearch: false, modelPreference: model }));
         } catch (err) {
             return toolError(err);
         }

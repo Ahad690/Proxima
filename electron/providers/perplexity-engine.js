@@ -171,20 +171,30 @@
 
     // ─── Model Mapping ───────────────────────────────────────────
     // Map UI names to internal model_preference values for /rest/sse/perplexity_ask
-    // Using tier names observed in web app traffic
+    // All slugs confirmed via HAR analysis of Perplexity web app traffic
     var MODEL_MAP = {
+        // Default / Best — routes to Perplexity's auto-select
+        'best': 'pplx_pro',
+        'default': 'pplx_pro',
         'sonar 2': 'pplx_pro',
         'sonar': 'pplx_pro',
-        'claude sonnet 4.6': 'pplx_pro', // Routes to Pro tier which includes Sonnet
-        'claude sonnet 4': 'pplx_pro',
-        'claude': 'pplx_pro',
-        'gpt-5.4': 'pplx_pro',
-        'gpt-5': 'pplx_pro',
-        'gpt-5.5 max': 'pplx_pro',
-        'gemini 3.1 pro': 'pplx_pro',
-        'gemini': 'pplx_pro',
-        'best': 'pplx_pro',
-        'deep': 'pplx_alpha', // Deep Research mode
+        // Claude Sonnet 4.6 — confirmed slugs
+        'claude sonnet 4.6': 'claude46sonnet',
+        'claude sonnet 4.6 thinking': 'claude46sonnetthinking',
+        'claude sonnet 4': 'claude46sonnet',
+        'claude': 'claude46sonnet',
+        // GPT-5.4 — confirmed slugs
+        'gpt-5.4': 'gpt54',
+        'gpt-5.4 thinking': 'gpt54_thinking',
+        'gpt-5': 'gpt54',
+        'gpt': 'gpt54',
+        // Gemini 3.1 Pro — confirmed slug (note: _high suffix)
+        'gemini 3.1 pro': 'gemini31pro_high',
+        'gemini': 'gemini31pro_high',
+        // Experimental
+        'experimental': 'experimental',
+        // Special modes
+        'deep': 'pplx_alpha',
         'thinking': 'pplx_alpha'
     };
 
