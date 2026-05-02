@@ -169,11 +169,41 @@
         return answer;
     }
 
+    // ─── Model Mapping ───────────────────────────────────────────
+    // Map UI names to internal model_preference values for /rest/sse/perplexity_ask
+    // Using tier names observed in web app traffic
+    var MODEL_MAP = {
+        'sonar 2': 'pplx_pro',
+        'sonar': 'pplx_pro',
+        'claude sonnet 4.6': 'pplx_pro', // Routes to Pro tier which includes Sonnet
+        'claude sonnet 4': 'pplx_pro',
+        'claude': 'pplx_pro',
+        'gpt-5.4': 'pplx_pro',
+        'gpt-5': 'pplx_pro',
+        'gpt-5.5 max': 'pplx_pro',
+        'gemini 3.1 pro': 'pplx_pro',
+        'gemini': 'pplx_pro',
+        'best': 'pplx_pro',
+        'deep': 'pplx_alpha', // Deep Research mode
+        'thinking': 'pplx_alpha'
+    };
+
+    function _resolveModelPreference(modelName) {
+        if (!modelName) return 'pplx_pro';
+        var key = String(modelName).toLowerCase().trim();
+        var resolved = MODEL_MAP[key] || 'pplx_pro';
+        console.log('[Proxima] model_preference: ' + resolved + ' (input: ' + modelName + ')');
+        return resolved;
+    }
+
     // ─── Send Message ───────────────────────────────
 
-    async function send(message) {
+    async function send(message, options) {
         var sessionToken = _getSessionToken();
         var frontendUuid = _uuid();
+
+        // Resolve model_preference from options (if provided)
+        var modelPref = _resolveModelPreference(options && options.modelPreference);
 
         var params = {
             last_backend_uuid: _lastBackendUuid || _uuid(),
@@ -185,7 +215,7 @@
             sources: ['web'],
             frontend_uuid: frontendUuid,
             mode: 'copilot',
-            model_preference: 'turbo',
+            model_preference: modelPref,
             is_related_query: false,
             is_sponsored: false,
             prompt_source: 'user',

@@ -89,9 +89,10 @@ async function ensureAPI(provider, webContents) {
  * @param {string} provider
  * @param {object} webContents - Electron webContents
  * @param {string} message
+ * @param {object} options - Optional: { modelPreference, etc. }
  * @returns {string|null} Response text, or null if unavailable
  */
-async function sendViaAPI(provider, webContents, message) {
+async function sendViaAPI(provider, webContents, message, options = {}) {
     // Ensure API is injected
     const ready = await ensureAPI(provider, webContents);
     if (!ready) {
@@ -111,13 +112,14 @@ async function sendViaAPI(provider, webContents, message) {
 
     // Escape message for safe JS injection
     const escapedMessage = JSON.stringify(message);
+    const escapedOptions = JSON.stringify(options);
 
     try {
-        console.log(`[ProviderAPI] Sending via ${provider} API...`);
+        console.log(`[ProviderAPI] Sending via ${provider} API...options: ${escapedOptions}`);
         const startTime = Date.now();
 
         const result = await webContents.executeJavaScript(
-            `window.${apiObj}.send(${escapedMessage})`
+            `window.${apiObj}.send(${escapedMessage}, ${escapedOptions})`
         );
 
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

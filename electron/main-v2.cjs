@@ -501,22 +501,24 @@ async function handleMCPRequest(request) {
                 return { success: true, provider, loggedIn };
 
             case 'sendMessage':
+                // Extract options (including modelPreference)
+                const sendOptions = { modelPreference: data.modelPreference };
                 // Check if file should be uploaded
                 if (data.filePath && fileReferenceEnabled) {
                     try {
 
                         const uploadResult = await uploadFileToProvider(provider, data.filePath);
                         await sleep(1000); // Wait for file to attach
-                        const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false);
+                        const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
                         return { success: true, provider, result, fileUploaded: uploadResult };
                     } catch (fileErr) {
                         console.error('[MCP] File upload failed:', fileErr.message);
                         // Still send message even if file upload fails
-                        const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false);
+                        const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
                         return { success: true, provider, result, fileError: fileErr.message };
                     }
                 } else {
-                    const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false);
+                    const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
                     return { success: true, provider, result };
                 }
 
@@ -729,10 +731,30 @@ async function handleMCPRequest(request) {
 
 // Provider-Specific Interaction Functions
 
-async function sendMessageToProvider(provider, message, forceDOM = false) {
+async function sendMessageToProvider(provider, message, forceDOM = false, options = {}) {
     const webContents = browserManager.getWebContents(provider);
     if (!webContents) {
         throw new Error(`Provider ${provider} not initialized`);
+    }
+
+    // API-first approach — direct fetch + SSE, skip when forceDOM=true
+    if (!forceDOM) {
+        try {
+            console.log(`[${provider}] Trying API-first approach...options: ${JSON.stringify(options)}`);
+            const apiResponse = await providerAPI.sendViaAPI(provider, webContents, message, options);
+            if (apiResponse && apiResponse.length > 0) {
+                console.log(`[${provider}] ✔ API response captured (${apiResponse.length} chars)`);
+                _apiResponseCache[provider] = apiResponse;
+                return { response: apiResponse };
+            }
+            console.log(`[${provider}] API returned empty — falling back to DOM`);
+            delete _apiResponseCache[provider];
+        } catch (apiErr) {
+            console.log(`[${provider}] API failed: ${apiErr.message} — falling back to DOM`);
+            delete _apiResponseCache[provider];
+        }
+    } else {
+        console.log(`[${provider}] forceDOM=true — skipping API, typing into open conversation`);
     }
 
     // API-first approach — direct fetch + SSE, skip when forceDOM=true
