@@ -558,19 +558,20 @@ server.tool(
     'proxima_deep_search',
     {
         query: z.string().describe('Search query for deep research. Perplexity does not have context of your codebase - attach relevant code via files parameter. Use for research across >=50 websites. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant code ranges - the AI needs actual code to reference, not just filenames.'),
         provider: z.string().optional().describe('AI provider to use: chatgpt, claude, gemini, perplexity. Default: auto-select best available')
     },
     async ({ query, files, provider: providerName }) => {
         const p = resolveProvider(providerName, 'research');
         if (!p) return toolResponse('No providers available. Enable at least one provider.');
         
-        // If using Perplexity, enable Deep Research mode and wait for previous responses
+// If using Perplexity, enable Deep Research mode and wait for previous responses
         if (p.name === 'perplexity') {
             await new Promise(r => setTimeout(r, 5000));
             const fullQuery = buildMessageWithFiles(query, files);
             try {
-                return toolResponse(await p.instance.chat(fullQuery, false, { deepSearch: true }));
+                const result = await p.instance.chat(fullQuery, false, { deepSearch: true });
+                return toolResponse(result);
             } catch (apiErr) {
                 console.error('[proxima_deep_search] API failed, falling back to DOM: ' + apiErr.message);
                 return toolResponse(await p.instance.chat(fullQuery, false, { deepSearch: true, forceDOM: true }));
@@ -590,7 +591,7 @@ server.tool(
     'deep_search',
     {
         query: z.string().describe('Search query for deep research. Perplexity does not have context of your codebase - attach relevant code via files parameter. Use for research across >=50 websites. IMPORTANT: Perplexity does not support parallelization - combine all queries into one prompt, or call sequentially and wait for each response before calling again.'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant line ranges - the AI needs actual code to reference, not just filenames.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". Always specify relevant code ranges - the AI needs actual code to reference, not just filenames.'),
         provider: z.string().optional().describe('AI provider to use: chatgpt, claude, gemini, perplexity. Default: auto-select best available')
     },
     async ({ query, files, provider: providerName }) => {
@@ -603,7 +604,8 @@ server.tool(
         if (p.name === 'perplexity') {
             await new Promise(r => setTimeout(r, 5000));
             try {
-                return toolResponse(await p.instance.chat(fullQuery, false, { deepSearch: true }));
+                const result = await p.instance.chat(fullQuery, false, { deepSearch: true });
+                return toolResponse(result);
             } catch (apiErr) {
                 console.error('[deep_search] API failed, falling back to DOM: ' + apiErr.message);
                 return toolResponse(await p.instance.chat(fullQuery, false, { deepSearch: true, forceDOM: true }));

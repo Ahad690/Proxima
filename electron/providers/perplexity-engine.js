@@ -70,6 +70,56 @@
         return crypto.randomUUID();
     }
 
+    // ─── Rate Limit Checker ────────────────────────────────────────
+
+    async function _checkDeepResearchQuota() {
+        try {
+            var res = await fetch(
+                'https://www.perplexity.ai/rest/rate-limit/status?version=2.18&source=default',
+                {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: {
+                        'Accept': 'application/json',
+                        'x-perplexity-request-endpoint':
+                            'https://www.perplexity.ai/rest/rate-limit/status?version=2.18&source=default',
+                        'x-perplexity-request-reason':
+                            'submit-query-gate'
+                    }
+                }
+            );
+
+            if (!res.ok) {
+                console.warn(
+                    '[Proxima] Failed to fetch rate limit status. HTTP ' +
+                    res.status
+                );
+                return { available: true, remaining: -1 };
+            }
+
+            var data = await res.json();
+            var agenticData = data.modes && data.modes.agentic_research;
+
+            if (agenticData) {
+                return {
+                    available: agenticData.available,
+                    remaining: agenticData.remaining_detail
+                        ? agenticData.remaining_detail.remaining
+                        : 0
+                };
+            }
+
+            return { available: true, remaining: -1 };
+
+        } catch (e) {
+            console.error(
+                '[Proxima] Error checking Deep Research quota:',
+                e.message
+            );
+            return { available: true, remaining: -1 };
+        }
+    }
+
     // ─── SSE Stream Parser ──────────────────────────
 
     async function _parseStream(response) {
@@ -96,6 +146,9 @@
                 try {
                     var parsed = JSON.parse(data);
 
+                    // STEP 7: Raw SSE logging for reverse engineering
+                    console.log('[RAW SSE]', data.substring(0, 500));
+
 
                     if (parsed.backend_uuid) {
                         backendUuid = parsed.backend_uuid;
@@ -105,6 +158,10 @@
                     if (parsed.blocks && Array.isArray(parsed.blocks)) {
                         for (var bi = 0; bi < parsed.blocks.length; bi++) {
                             var block = parsed.blocks[bi];
+
+
+                            // STEP 8: Log unknown block types for reverse engineering
+                            console.log('[Perplexity block]', Object.keys(block));
 
 
                             if (block.markdown_block && block.markdown_block.answer &&
@@ -216,7 +273,39 @@
         var modelPref = _resolveModelPreference(options && options.modelPreference);
         console.log('[Proxima Perplexity] send() called with options:', JSON.stringify(options), ' -> model_preference:', modelPref);
 
-        var params = {
+        // Deep Research mode logic with quota check
+        var isDeepSearch = options && options.deepSearch === true;
+        var finalMode = 'copilot';
+
+        // --- Deep Research quota gate ---
+        if (isDeepSearch) {
+            var quota = await _checkDeepResearchQuota();
+            
+            if (quota.available === false || quota.remaining === 0) {
+                console.log('[Proxima] Deep Research quota exhausted. Falling back to Pro Search.');
+                isDeepSearch = false;
+                finalMode = 'copilot';
+            } else {
+                console.log('[Proxima] Deep Research initiated. Remaining quota: ' + quota.remaining);
+                finalMode = 'agentic_research';
+            }
+        }
+
+        // Dynamic supported_block_use_cases based on finalMode
+        var supportedBlocks = [
+            'answer_modes', 'media_items', 'knowledge_cards', 'inline_entity_cards',
+            'place_widgets', 'finance_widgets', 'prediction_market_widgets', 'sports_widgets',
+            'flight_status_widgets', 'news_widgets', 'shopping_widgets', 'search_result_widgets',
+            'inline_images', 'inline_assets', 'placeholder_cards', 'diff_blocks',
+            'inline_knowledge_cards', 'entity_group_v2', 'refinement_filters',
+            'answer_tabs', 'preserve_latex', 'in_context_suggestions',
+            'pending_followups', 'inline_claims', 'unified_assets'
+        ];
+        if (finalMode === 'agentic_research') {
+            supportedBlocks.push('workflow_steps', 'background_agents');
+        }
+
+var params = {
             last_backend_uuid: _lastBackendUuid || _uuid(),
             read_write_token: sessionToken || '',
             attachments: [],
@@ -225,7 +314,8 @@
             search_focus: 'internet',
             sources: ['web'],
             frontend_uuid: frontendUuid,
-            mode: 'copilot',
+            // STEP 3: Use dynamic mode in params
+            mode: finalMode,
             model_preference: modelPref,
             is_related_query: false,
             is_sponsored: false,
@@ -236,25 +326,25 @@
             local_search_enabled: false,
             use_schematized_api: true,
             send_back_text_in_streaming_api: true,
-            supported_block_use_cases: [
-                'answer_modes', 'media_items', 'knowledge_cards', 'inline_entity_cards',
-                'place_widgets', 'finance_widgets', 'prediction_market_widgets', 'sports_widgets',
-                'flight_status_widgets', 'news_widgets', 'shopping_widgets', 'search_result_widgets',
-                'inline_images', 'inline_assets', 'placeholder_cards', 'diff_blocks',
-                'inline_knowledge_cards', 'entity_group_v2', 'refinement_filters',
-                'answer_tabs', 'preserve_latex', 'in_context_suggestions',
-                'pending_followups', 'inline_claims', 'unified_assets'
-            ],
+            // STEP 4: Dynamic supported_block_use_cases
+            supported_block_use_cases: supportedBlocks,
             client_coordinates: null,
             mentions: [],
-            skip_search_enabled: true,
+            // STEP 5: Enable Deep Research-specific search behavior
+            skip_search_enabled: finalMode === 'agentic_research' ? false : true,
             is_nav_suggestions_disabled: false,
             source: 'default',
-            always_search_override: false,
-            override_no_search: false,
-            extended_context: false,
-            version: '2.18'
+            always_search_override: finalMode === 'agentic_research',
+            override_no_search: finalMode === 'agentic_research',
+            extended_context: finalMode === 'agentic_research',
+            // STEP 6: Add experimental search_mode field
+            search_mode: finalMode === 'agentic_research' ? 'research' : 'pro',
+version: '2.18'
         };
+
+        if (finalMode === 'agentic_research') {
+            console.log('[Proxima Perplexity] Using DEEP RESEARCH mode (agentic_research)');
+        }
 
         var body = JSON.stringify({
             params: params,
