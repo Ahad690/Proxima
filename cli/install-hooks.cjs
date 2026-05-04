@@ -49,6 +49,7 @@ function toUnixPath(p) {
 // ─── Hook content ─────────────────────────────────────────────────────────────
 function buildHookScript(reviewScriptPath) {
     const unixPath = toUnixPath(reviewScriptPath);
+    const unixNodePath = toUnixPath(process.execPath);
     return `#!/bin/sh
 # =============================================================================
 # Proxima pre-push hook — auto code review via Perplexity AI
@@ -62,15 +63,16 @@ function buildHookScript(reviewScriptPath) {
 # =============================================================================
 
 REVIEW_SCRIPT="${unixPath}"
+NODE_EXE="${unixNodePath}"
 
 if [ ! -f "$REVIEW_SCRIPT" ]; then
-  echo "⚠ proxima-review: script not found at $REVIEW_SCRIPT — skipping"
+  echo "⚠ proxima-review: script not found at \$REVIEW_SCRIPT — skipping"
   exit 0
 fi
 
 # Pass stdin (pushed refs) to the review script
 # Node reads stdin to know which commits were pushed
-cat - | node "$REVIEW_SCRIPT" --pre-push
+cat - | "\$NODE_EXE" "\$REVIEW_SCRIPT" --pre-push
 
 # Always exit 0 — never block git push
 exit 0

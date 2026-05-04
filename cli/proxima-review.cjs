@@ -174,40 +174,54 @@ function getDiff(sha) {
     }
 }
 
+function logToFile(msg) {
+    try {
+        if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+        const logFile = path.join(REVIEW_DIR, 'background.log');
+        fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+    } catch {}
+}
+
 // ─── Review runner ────────────────────────────────────────────────────────────
 async function runReview(commitRef) {
-    console.log(cyan('🤖') + ' Starting Perplexity code review for: ' + yellow(commitRef));
+    const isBg = process.env.PROXIMA_BACKGROUND_REVIEW === '1';
+    const log = (msg) => {
+        console.log(msg);
+        if (isBg) logToFile(msg);
+    };
+
+    log(cyan('🤖') + ' Starting Perplexity code review for: ' + yellow(commitRef));
 
     let info;
     try {
         info = getCommitInfo(commitRef);
     } catch (e) {
-        console.error(red('❌') + ' Invalid commit: ' + e.message);
+        log(red('❌') + ' Invalid commit: ' + e.message);
         return;
     }
 
     const { sha, shortSha, msg, author, date } = info;
-    console.log(cyan('📋') + ' Commit: ' + shortSha + ' — ' + dim(msg.split('\n')[0]));
+    log(cyan('📋') + ' Commit: ' + shortSha + ' — ' + dim(msg.split('\n')[0]));
 
     if (!tryAcquireLock(sha)) {
-        console.log(yellow('⏳') + ' Another review is already running. Skipping ' + shortSha);
-        console.log(dim('   Run manually later: node cli/proxima-review.cjs ' + shortSha));
+        log(yellow('⏳') + ' Another review is already running. Skipping ' + shortSha);
+        log(dim('   Run manually later: node cli/proxima-review.cjs ' + shortSha));
         return;
     }
-    console.log(cyan('🔒') + ' Lock acquired');
+    log(cyan('🔒') + ' Lock acquired');
 
     // Check if review already exists
     if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
     const reviewFile = path.join(REVIEW_DIR, shortSha + '.md');
     if (fs.existsSync(reviewFile)) {
-        console.log(yellow('⏭') + '  Review already exists for ' + shortSha + ', skipping');
+        log(yellow('⏭') + '  Review already exists for ' + shortSha + ', skipping');
         releaseLock();
         return;
     }
 
     const diff = getDiff(sha);
     if (!diff || diff.trim() === '') {
-        console.log(yellow('⚠') + ' No diff found for ' + shortSha);
+        log(yellow('⚠') + ' No diff found for ' + shortSha);
         releaseLock();
         return;
     }
@@ -248,7 +262,7 @@ Provide a professional, constructive code review with this structure:
 
 Be constructive, specific, and actionable. Focus on correctness, maintainability, and best practices.`;
 
-    console.log(cyan('🚀') + ' Sending to Perplexity (' + REVIEW_MODEL + ')...');
+    log(cyan('🚀') + ' Sending to Perplexity (' + REVIEW_MODEL + ')...');
 
     try {
         const response = await queryPerplexity(prompt, REVIEW_MODEL);
@@ -270,20 +284,20 @@ reviewed_at: ${new Date().toISOString()}
 ${response}`;
 
         fs.writeFileSync(reviewFile, content, 'utf8');
-        console.log(green('✅') + ' Review saved → ' + yellow(reviewFile));
+        log(green('✅') + ' Review saved → ' + yellow(reviewFile));
 
     } catch (e) {
-        console.log(red('❌') + ' Review failed: ' + e.message);
+        log(red('❌') + ' Review failed: ' + e.message);
 
         const errorFile = path.join(REVIEW_DIR, 'error-' + shortSha + '.md');
         fs.writeFileSync(errorFile,
             `---\ncommit: ${sha}\nshort_sha: ${shortSha}\nauthor: ${author}\ndate: ${date}\nmessage: ${JSON.stringify(msg)}\nerror: ${e.message}\nerror_at: ${new Date().toISOString()}\n---\n\n# Review Failed\n\n**Error:** ${e.message}\n`,
             'utf8'
         );
-        console.log(cyan('📄') + ' Error saved → ' + yellow(errorFile));
+        log(cyan('📄') + ' Error saved → ' + yellow(errorFile));
     } finally {
         releaseLock();
-        console.log(cyan('🔓') + ' Lock released');
+        log(cyan('🔓') + ' Lock released');
     }
 }
 
@@ -309,7 +323,7 @@ async function getNewCommitsFromStdin() {
 
                 try {
                     const range = remoteSha === NULL_SHA
-                        ? localSha                          // new branch — review HEAD only
+                        ? '-n 1 ' + localSha                          // new branch — review HEAD only
                         : remoteSha + '..' + localSha;     // incremental push
 
                     const shas = execSync('git rev-list --reverse ' + range, { encoding: 'utf8' })
@@ -326,11 +340,34 @@ async function getNewCommitsFromStdin() {
 
 // ─── Spawn background child ───────────────────────────────────────────────────
 function spawnBackground(sha) {
-    const child = spawn(process.execPath, [__filename, sha], {
-        detached: true,
-        stdio: 'ignore',
-        cwd: findGitRoot()
-    });
+    const isWin = process.platform === 'win32';
+
+    // Strip GIT_* environment variables to prevent git commands from failing
+    const cleanEnv = {};
+    for (const key in process.env) {
+        if (!key.startsWith('GIT_')) {
+            cleanEnv[key] = process.env[key];
+        }
+    }
+    cleanEnv['PROXIMA_BACKGROUND_REVIEW'] = '1';
+
+    // Prepare custom stdout/stderr append to log file inside background.log
+    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    const logFile = path.join(REVIEW_DIR, 'background.log');
+    const out = fs.openSync(logFile, 'a');
+
+    // On Windows, use cmd.exe to start /b so that it completely detaches
+    const child = spawn(
+        isWin ? 'cmd.exe' : process.execPath,
+        isWin ? ['/c', 'start', '""', '/b', process.execPath, __filename, sha] : [__filename, sha],
+        {
+            detached: true,
+            stdio: ['ignore', out, out],
+            cwd: findGitRoot(),
+            env: cleanEnv,
+            windowsHide: true
+        }
+    );
     child.unref();
     console.log(cyan('🤖') + ' Review queued for ' + yellow(sha.substring(0, 8)) + ' (background)');
 }
