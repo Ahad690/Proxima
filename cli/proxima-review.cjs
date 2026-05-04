@@ -370,6 +370,7 @@ function spawnBackground(sha) {
     );
     child.unref();
     console.log(cyan('🤖') + ' Review queued for ' + yellow(sha.substring(0, 8)) + ' (background)');
+    console.log(cyan('💡') + ' Background reviews may take 1-2 minutes to complete.');
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
