@@ -130,7 +130,7 @@ function install(repoRoot) {
     console.log('');
     console.log('  ' + yellow('Tips:'));
     console.log('  ' + dim('  Set PROXIMA_REVIEW_MODEL env var to change the model'));
-    console.log('  ' + dim('  Run manually: node cli/proxima-review.cjs <sha>'));
+    console.log('  ' + dim('  Run manually: node "' + reviewScript + '" <sha>'));
     console.log('  ' + dim('  Uninstall:    node cli/install-hooks.cjs --remove'));
     console.log('');
 }
