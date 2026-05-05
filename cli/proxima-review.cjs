@@ -100,6 +100,7 @@ function queryPerplexity(message, modelPreference) {
 
         socket.on('connect', () => {
             // Step 1: send the message with model preference
+            // Normal Pro Search (deepSearch: false) still allows research across up to 30 sites.
             send('sendMessage', { message, modelPreference, deepSearch: false });
         });
 
@@ -226,8 +227,8 @@ async function runReview(commitRef) {
         return;
     }
 
-    const prompt = `You are a principal software engineer performing a high-quality code review.
-
+    const prompt = `You are a principal software engineer performing a high-quality, technical code review.
+    
 ---
 Commit: ${shortSha}
 Author: ${author}
@@ -238,27 +239,32 @@ Message: ${msg}
 Full diff:
 ${diff}
 
+Instructions:
+1. **Research Capability:** You have full access to web search. Use it to verify official documentation, API schemas, or library best practices if you encounter unfamiliar code, external API calls, or complex patterns in the diff.
+2. **Line Numbers:** For EVERY issue, suggestion, or positive observation, you MUST include the exact file and line number(s) in the format 'filename:L[number]' (e.g., 'src/utils.js:L42').
+3. **Be Specific:** Do not give generic advice. Address the specific code in the diff.
+
 Provide a professional, constructive code review with this structure:
 
 ## Summary
-(One paragraph — what changed and why)
+(One paragraph — what changed and why. Explicitly mention any research you did to verify schemas or practices.)
 
 ## What's Good
-- Strengths and good practices observed
+- Strengths and good practices observed (with file/line references)
 
 ## Issues & Suggestions
 - Bugs, code smells, performance issues, or improvements
-- Be specific with file/line references when possible
+- **CRITICAL:** Include exact file and line numbers for every point.
 
 ## Security & Performance
-- Security concerns?
+- Security concerns? (Include line references)
 - Performance or scalability implications?
 
 ## Overall Score: X/10
 (Brief justification)
 
 ## Recommendations
-(Prioritized next steps — most important first)
+(Prioritized next steps — most important first. Include line references for where to apply changes.)
 
 Be constructive, specific, and actionable. Focus on correctness, maintainability, and best practices.`;
 
@@ -356,21 +362,34 @@ function spawnBackground(sha) {
     const logFile = path.join(REVIEW_DIR, 'background.log');
     const out = fs.openSync(logFile, 'a');
 
-    // On Windows, use cmd.exe to start /b so that it completely detaches
-    const child = spawn(
-        isWin ? 'cmd.exe' : process.execPath,
-        isWin ? ['/c', 'start', '""', '/b', process.execPath, __filename, sha] : [__filename, sha],
-        {
+    let child;
+    if (isWin) {
+        // On Windows, use cmd.exe /c start /b to detach. 
+        // We also use windowsHide: true and ensure stdio is redirected to file.
+        child = spawn('cmd.exe', ['/c', 'start', '""', '/b', process.execPath, __filename, sha], {
             detached: true,
             stdio: ['ignore', out, out],
             cwd: findGitRoot(),
             env: cleanEnv,
             windowsHide: true
-        }
-    );
+        });
+    } else {
+        child = spawn(process.execPath, [__filename, sha], {
+            detached: true,
+            stdio: ['ignore', out, out],
+            cwd: findGitRoot(),
+            env: cleanEnv
+        });
+    }
+
     child.unref();
-    console.log(cyan('🤖') + ' Review queued for ' + yellow(sha.substring(0, 8)) + ' (background)');
+    
+    const shortSha = sha.substring(0, 8);
+    console.log(cyan('🤖') + ' Review queued for ' + yellow(shortSha) + ' (background)');
     console.log(cyan('💡') + ' Background reviews may take 1-2 minutes to complete.');
+    
+    // Log spawn event to background.log
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [SPAWN] Queued review for ${shortSha} (PID: ${child.pid})\n`, 'utf8');
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────

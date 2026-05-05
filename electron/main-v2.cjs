@@ -8,6 +8,13 @@ const BrowserManager = require('./browser-manager.cjs');
 const { initRestAPI, startRestAPI, stopRestAPI, isRestAPIRunning } = require('./rest-api.cjs');
 const providerAPI = require('./provider-api.cjs');
 
+// Add timestamps to console logs
+const originalLog = console.log;
+const originalError = console.error;
+const getTimestamp = () => new Date().toLocaleTimeString('en-US', { hour12: false });
+console.log = (...args) => originalLog(`[${getTimestamp()}]`, ...args);
+console.error = (...args) => originalError(`[${getTimestamp()}]`, ...args);
+
 // Cache for API responses — when API captures response, DOM scraping is skipped
 const _apiResponseCache = {};
 
@@ -415,7 +422,8 @@ function startIPCServer() {
     const DEFAULT_IPC_PORT = 19222;
 
     ipcServer = net.createServer((socket) => {
-
+        const clientAddr = socket.remoteAddress + ':' + socket.remotePort;
+        console.log(`[IPC] Client connected: ${clientAddr}`);
 
         let buffer = '';
 
