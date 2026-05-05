@@ -242,6 +242,16 @@ async function runReview(commitRef) {
         return;
     }
 
+    // Check if review already exists (in root or resolved folder)
+    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    const exists = fs.existsSync(path.join(REVIEW_DIR, shortSha + '.md')) || 
+                   fs.existsSync(path.join(REVIEW_DIR, 'resolved', shortSha + '.md'));
+
+    if (exists) {
+        log(yellow('⏭') + '  Review already exists for ' + shortSha + ', skipping');
+        return;
+    }
+
     try {
         await acquireLockWithRetry(sha, log);
     } catch (e) {
@@ -250,14 +260,7 @@ async function runReview(commitRef) {
     }
     log(cyan('🔒') + ' Lock acquired');
 
-    // Check if review already exists
-    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
     const reviewFile = path.join(REVIEW_DIR, shortSha + '.md');
-    if (fs.existsSync(reviewFile)) {
-        log(yellow('⏭') + '  Review already exists for ' + shortSha + ', skipping');
-        releaseLock();
-        return;
-    }
 
     const diff = getDiff(sha);
     if (diff === '__TOO_LARGE__') {
