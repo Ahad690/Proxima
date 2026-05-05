@@ -393,7 +393,10 @@ async function getNewCommitsFromStdin() {
 
 // ─── Spawn background child ───────────────────────────────────────────────────
 function spawnBackground(sha) {
-    // Strip GIT_* environment variables to prevent git commands from failing
+    const isWin = process.platform === 'win32';
+    const gitRoot = findGitRoot();
+
+    // Strip GIT_* environment variables to prevent git commands from failing inside the child
     const cleanEnv = {};
     for (const key in process.env) {
         if (!key.startsWith('GIT_')) {
@@ -402,20 +405,31 @@ function spawnBackground(sha) {
     }
     cleanEnv['PROXIMA_BACKGROUND_REVIEW'] = '1';
 
-    // Ensure logs are captured
+    // Prepare custom stdout/stderr append to log file inside background.log
     if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
     const logFile = path.join(REVIEW_DIR, 'background.log');
     const out = fs.openSync(logFile, 'a');
 
-    // Spawning process.execPath directly with detached: true and windowsHide: true 
-    // is the most robust way to run silently on all platforms.
-    const child = spawn(process.execPath, [__filename, sha], {
-        detached: true,
-        stdio: ['ignore', out, out],
-        cwd: findGitRoot(),
-        env: cleanEnv,
-        windowsHide: true
-    });
+    let child;
+    if (isWin) {
+        // On Windows, 'windowsHide' is ignored when 'detached: true' is set for console apps.
+        // Using 'cmd.exe /c start /b' is the standard way to run a truly detached 
+        // background process that suppresses a new console window.
+        child = spawn('cmd.exe', ['/c', 'start', '""', '/b', process.execPath, __filename, sha], {
+            detached: true,
+            stdio: ['ignore', out, out],
+            cwd: gitRoot,
+            env: cleanEnv,
+            windowsHide: true
+        });
+    } else {
+        child = spawn(process.execPath, [__filename, sha], {
+            detached: true,
+            stdio: ['ignore', out, out],
+            cwd: gitRoot,
+            env: cleanEnv
+        });
+    }
 
     child.unref();
     
