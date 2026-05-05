@@ -390,8 +390,6 @@ async function getNewCommitsFromStdin() {
 
 // ─── Spawn background child ───────────────────────────────────────────────────
 function spawnBackground(sha) {
-    const isWin = process.platform === 'win32';
-
     // Strip GIT_* environment variables to prevent git commands from failing
     const cleanEnv = {};
     for (const key in process.env) {
@@ -401,30 +399,20 @@ function spawnBackground(sha) {
     }
     cleanEnv['PROXIMA_BACKGROUND_REVIEW'] = '1';
 
-    // Prepare custom stdout/stderr append to log file inside background.log
+    // Ensure logs are captured
     if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
     const logFile = path.join(REVIEW_DIR, 'background.log');
     const out = fs.openSync(logFile, 'a');
 
-    let child;
-    if (isWin) {
-        // On Windows, use cmd.exe /c start /b to detach. 
-        // We also use windowsHide: true and ensure stdio is redirected to file.
-        child = spawn('cmd.exe', ['/c', 'start', '""', '/b', process.execPath, __filename, sha], {
-            detached: true,
-            stdio: ['ignore', out, out],
-            cwd: findGitRoot(),
-            env: cleanEnv,
-            windowsHide: true
-        });
-    } else {
-        child = spawn(process.execPath, [__filename, sha], {
-            detached: true,
-            stdio: ['ignore', out, out],
-            cwd: findGitRoot(),
-            env: cleanEnv
-        });
-    }
+    // Spawning process.execPath directly with detached: true and windowsHide: true 
+    // is the most robust way to run silently on all platforms.
+    const child = spawn(process.execPath, [__filename, sha], {
+        detached: true,
+        stdio: ['ignore', out, out],
+        cwd: findGitRoot(),
+        env: cleanEnv,
+        windowsHide: true
+    });
 
     child.unref();
     
