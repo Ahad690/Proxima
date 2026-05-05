@@ -164,7 +164,9 @@ function getCommitInfo(ref) {
 function getDiff(sha) {
     try {
         // Limit to 2MB to avoid clogging Perplexity or hitting memory limits
-        const diff  = execSync('git show --no-color --unified=3 ' + sha, { 
+        // -M100% + --diff-filter=r: Detect 100% similarity moves as "Renames" and then EXCLUDE them from the diff.
+        // This ensures moved files are ignored, but moved-and-modified files are still reviewed.
+        const diff  = execSync('git show --no-color --unified=3 -M100% --diff-filter=r ' + sha, { 
             encoding: 'utf8', 
             maxBuffer: 2 * 1024 * 1024 
         });
