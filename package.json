@@ -1,6 +1,6 @@
 {
     "name": "proxima",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "description": "Proxima - Local MCP Server (requires localhost network access for AI coding tools)",
     "license": "SEE LICENSE IN LICENSE",
     "author": "Zen4-bit",
