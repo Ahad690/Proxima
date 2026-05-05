@@ -163,14 +163,22 @@ function getCommitInfo(ref) {
 
 function getDiff(sha) {
     try {
-        const diff  = execSync('git show --no-color --unified=3 ' + sha, { encoding: 'utf8', maxBuffer: MAX_DIFF_LINES * 300 });
+        // Limit to 2MB to avoid clogging Perplexity or hitting memory limits
+        const diff  = execSync('git show --no-color --unified=3 ' + sha, { 
+            encoding: 'utf8', 
+            maxBuffer: 2 * 1024 * 1024 
+        });
         const lines = diff.split('\n');
         if (lines.length > MAX_DIFF_LINES) {
             return lines.slice(0, MAX_DIFF_LINES).join('\n')
                 + '\n\n... (truncated, ' + (lines.length - MAX_DIFF_LINES) + ' more lines)';
         }
         return diff;
-    } catch {
+    } catch (e) {
+        if (e.message && e.message.includes('maxBuffer')) {
+            return '__TOO_LARGE__';
+        }
+        logToFile('getDiff error: ' + e.message);
         return '';
     }
 }
@@ -204,6 +212,12 @@ async function runReview(commitRef) {
     const { sha, shortSha, msg, author, date } = info;
     log(cyan('📋') + ' Commit: ' + shortSha + ' — ' + dim(msg.split('\n')[0]));
 
+    // Skip maintenance/chore commits to save Perplexity quota
+    if (msg.toLowerCase().startsWith('chore:') || msg.toLowerCase().startsWith('docs:')) {
+        log(yellow('⏭') + ' Skipping maintenance commit: ' + shortSha);
+        return;
+    }
+
     if (!tryAcquireLock(sha)) {
         log(yellow('⏳') + ' Another review is already running. Skipping ' + shortSha);
         log(dim('   Run manually later: node cli/proxima-review.cjs ' + shortSha));
@@ -221,6 +235,11 @@ async function runReview(commitRef) {
     }
 
     const diff = getDiff(sha);
+    if (diff === '__TOO_LARGE__') {
+        log(yellow('⏭') + ' Skipping ' + shortSha + ': diff is too large (> 2MB)');
+        releaseLock();
+        return;
+    }
     if (!diff || diff.trim() === '') {
         log(yellow('⚠') + ' No diff found for ' + shortSha);
         releaseLock();
