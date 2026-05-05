@@ -14,6 +14,7 @@
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { execSync, spawn } = require('child_process');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -22,7 +23,8 @@ const IPC_HOST = '127.0.0.1';
 const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || 'claude sonnet 4.6 thinking';
 const MAX_DIFF_LINES = parseInt(process.env.PROXIMA_REVIEW_MAX_DIFF) || 800;
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
-const LOCK_FILE = path.join(REVIEW_DIR, '.review-lock');
+// Universal lock file in the home directory to prevent cross-project Hub overloading
+const LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
 const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min
 
 // ─── Git root detection ───────────────────────────────────────────────────────
@@ -36,19 +38,16 @@ function findGitRoot() {
 
 // ─── Lock (atomic wx flag — no TOCTOU race) ──────────────────────────────────
 function tryAcquireLock(commitSha) {
-    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
-
     if (fs.existsSync(LOCK_FILE)) {
         try {
             const lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
             if (Date.now() - lock.time > STALE_LOCK_MS) {
-                console.log(yellow('⚠') + ' Stale lock found (from ' + lock.shortSha + '), clearing');
                 fs.unlinkSync(LOCK_FILE);
             } else {
                 return false; // Another review is actively running
             }
         } catch {
-            fs.unlinkSync(LOCK_FILE);
+            try { fs.unlinkSync(LOCK_FILE); } catch {}
         }
     }
 
@@ -56,13 +55,36 @@ function tryAcquireLock(commitSha) {
         const shortSha = commitSha.substring(0, 8);
         fs.writeFileSync(
             LOCK_FILE,
-            JSON.stringify({ sha: commitSha, shortSha, pid: process.pid, time: Date.now() }),
+            JSON.stringify({ sha: commitSha, shortSha, pid: process.pid, time: Date.now(), repo: findGitRoot() }),
             { encoding: 'utf8', flag: 'wx' }
         );
         return true;
     } catch {
         return false;
     }
+}
+
+async function acquireLockWithRetry(commitSha, log, maxWaitMs = 60 * 60 * 1000) {
+    const start = Date.now();
+    const shortSha = commitSha.substring(0, 8);
+    let firstWait = true;
+
+    while (Date.now() - start < maxWaitMs) {
+        if (tryAcquireLock(commitSha)) {
+            if (!firstWait) log(cyan('🔓') + ' Lock finally acquired for ' + yellow(shortSha));
+            return true;
+        }
+
+        if (firstWait) {
+            log(yellow('⏳') + ' Another review is running. Waiting in line for ' + yellow(shortSha) + '...');
+            firstWait = false;
+        }
+
+        // Wait 10 seconds before polling again
+        await new Promise(r => setTimeout(r, 10000));
+    }
+
+    throw new Error('Timed out waiting for lock after 60 minutes');
 }
 
 function releaseLock() {
@@ -220,9 +242,10 @@ async function runReview(commitRef) {
         return;
     }
 
-    if (!tryAcquireLock(sha)) {
-        log(yellow('⏳') + ' Another review is already running. Skipping ' + shortSha);
-        log(dim('   Run manually later: node cli/proxima-review.cjs ' + shortSha));
+    try {
+        await acquireLockWithRetry(sha, log);
+    } catch (e) {
+        log(red('❌') + ' ' + e.message);
         return;
     }
     log(cyan('🔒') + ' Lock acquired');
