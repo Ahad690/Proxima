@@ -274,8 +274,8 @@ async function runReview(commitRef) {
         return;
     }
 
-    const prompt = `You are a principal software engineer performing a high-quality, technical code review.
-    
+const prompt = `You are an automated code analysis engine. Output is consumed by an LLM like Cursor.
+
 ---
 Commit: ${shortSha}
 Author: ${author}
@@ -288,20 +288,19 @@ ${diff}
 
 Instructions:
 1. **Research Capability:** You have full access to web search. Use it to verify official documentation, API schemas, or library best practices if you encounter unfamiliar code, external API calls, or complex patterns in the diff.
-2. **Line Numbers:** For EVERY issue, suggestion, or positive observation, you MUST include the exact file and line number(s) in the format 'filename:L[number]' (e.g., 'src/utils.js:L42').
+2. **Line Numbers:** For EVERY issue or recommendation, you MUST include the exact file and line number(s) in the format 'filename:L[number]' (e.g., 'src/utils.js:L42').
 3. **Be Specific:** Do not give generic advice. Address the specific code in the diff.
 
-Provide a professional, constructive code review with this structure:
+Provide a professional, technical code review with this structure:
 
 ## Summary
 (One paragraph — what changed and why. Explicitly mention any research you did to verify schemas or practices.)
 
-## What's Good
-- Strengths and good practices observed (with file/line references)
-
-## Issues & Suggestions
-- Bugs, code smells, performance issues, or improvements
-- **CRITICAL:** Include exact file and line numbers for every point.
+## Issues & Fixes
+| File:Line | Severity | Issue | Fix |
+|---------|----------|-------|------|
+| src/file.js:L42 | ⚠️ | Missing null check | Add \`if (!x) return;\` |
+| lib/db.js:L89 | 🔴 | SQL injection risk | Use parameterized query |
 
 ## Security & Performance
 - Security concerns? (Include line references)
@@ -313,7 +312,7 @@ Provide a professional, constructive code review with this structure:
 ## Recommendations
 (Prioritized next steps — most important first. Include line references for where to apply changes.)
 
-Be constructive, specific, and actionable. Focus on correctness, maintainability, and best practices.`;
+OUTPUT IS ALSO CONSUMED BY AUTOMATED SYSTEMS. Keep sections and formatting consistent. Use the table format for all issues.`;
 
     log(cyan('🚀') + ' Sending to Perplexity (' + REVIEW_MODEL + ')...');
 
