@@ -509,8 +509,8 @@ async function handleMCPRequest(request) {
                 return { success: true, provider, loggedIn };
 
             case 'sendMessage':
-                // Extract options (including modelPreference)
-                const sendOptions = { modelPreference: data.modelPreference };
+                // Extract options — Perplexity uses modelPreference, ChatGPT uses model
+                const sendOptions = { modelPreference: data.modelPreference, model: data.model };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
                 // Check if file should be uploaded
                 if (data.filePath && fileReferenceEnabled) {
