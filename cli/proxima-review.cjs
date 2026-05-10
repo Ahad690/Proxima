@@ -27,7 +27,7 @@ const IPC_HOST = '127.0.0.1';
 //   'claude *'           → perplexity via claude46sonnet/claude46sonnetthinking
 //   anything else        → perplexity
 // Override via env: PROXIMA_REVIEW_MODEL=claude sonnet 4.6 thinking
-const REVIEW_MODEL    = process.env.PROXIMA_REVIEW_MODEL    || 'gpt-5-5-thinking';
+const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || 'gpt-5-5-thinking';
 const REVIEW_PROVIDER = process.env.PROXIMA_REVIEW_PROVIDER || resolveProvider(REVIEW_MODEL);
 
 function resolveProvider(model) {
@@ -36,11 +36,20 @@ function resolveProvider(model) {
     return 'perplexity';
 }
 
+// Human-readable display names for log messages
+const PROVIDER_DISPLAY = {
+    'chatgpt': 'ChatGPT',
+    'perplexity': 'Perplexity',
+    'claude': 'Claude',
+    'gemini': 'Gemini'
+};
+const PROVIDER_LABEL = PROVIDER_DISPLAY[REVIEW_PROVIDER] || REVIEW_PROVIDER;
+
 const MAX_DIFF_LINES = parseInt(process.env.PROXIMA_REVIEW_MAX_DIFF) || 800;
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
 // Universal lock file in the home directory to prevent cross-project Hub overloading
 const LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
-const LOCK_STALE_AFTER_MS = 15 * 60 * 1000; // 15 min — lock is considered stale after this
+const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min
 
 // ─── Git root detection ───────────────────────────────────────────────────────
 function findGitRoot() {
@@ -62,7 +71,7 @@ function tryAcquireLock(commitSha) {
                 return false; // Another review is actively running
             }
         } catch {
-            try { fs.unlinkSync(LOCK_FILE); } catch {}
+            try { fs.unlinkSync(LOCK_FILE); } catch { }
         }
     }
 
@@ -103,7 +112,7 @@ async function acquireLockWithRetry(commitSha, log, maxWaitMs = 60 * 60 * 1000) 
 }
 
 function releaseLock() {
-    try { fs.unlinkSync(LOCK_FILE); } catch {}
+    try { fs.unlinkSync(LOCK_FILE); } catch { }
 }
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
@@ -111,11 +120,11 @@ const c = {
     reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
     green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', cyan: '\x1b[36m'
 };
-const green  = (t) => `${c.green}${t}${c.reset}`;
+const green = (t) => `${c.green}${t}${c.reset}`;
 const yellow = (t) => `${c.yellow}${t}${c.reset}`;
-const red    = (t) => `${c.red}${t}${c.reset}`;
-const cyan   = (t) => `${c.cyan}${t}${c.reset}`;
-const dim    = (t) => `${c.dim}${t}${c.reset}`;
+const red = (t) => `${c.red}${t}${c.reset}`;
+const cyan = (t) => `${c.cyan}${t}${c.reset}`;
+const dim = (t) => `${c.dim}${t}${c.reset}`;
 
 // ─── IPC Client ───────────────────────────────────────────────────────────────
 // Talks directly to Proxima Agent Hub over TCP (same protocol as MCP server).
@@ -198,11 +207,11 @@ function queryAI(message, model, provider) {
 
 // ─── Git helpers ──────────────────────────────────────────────────────────────
 function getCommitInfo(ref) {
-    const sha      = execSync('git rev-parse ' + ref, { encoding: 'utf8' }).trim();
+    const sha = execSync('git rev-parse ' + ref, { encoding: 'utf8' }).trim();
     const shortSha = sha.substring(0, 8);
-    const msg      = execSync('git log -1 --pretty=%B ' + sha, { encoding: 'utf8' }).trim();
-    const author   = execSync('git log -1 --pretty=%an ' + sha, { encoding: 'utf8' }).trim();
-    const date     = execSync('git log -1 --pretty=%cd --date=short ' + sha, { encoding: 'utf8' }).trim();
+    const msg = execSync('git log -1 --pretty=%B ' + sha, { encoding: 'utf8' }).trim();
+    const author = execSync('git log -1 --pretty=%an ' + sha, { encoding: 'utf8' }).trim();
+    const date = execSync('git log -1 --pretty=%cd --date=short ' + sha, { encoding: 'utf8' }).trim();
     return { sha, shortSha, msg, author, date };
 }
 
@@ -211,9 +220,9 @@ function getDiff(sha) {
         // Limit to 2MB to avoid clogging Perplexity or hitting memory limits
         // -M100% + --diff-filter=r: Detect 100% similarity moves as "Renames" and then EXCLUDE them from the diff.
         // This ensures moved files are ignored, but moved-and-modified files are still reviewed.
-        const diff  = execSync('git show --no-color --unified=3 -M100% --diff-filter=r ' + sha, { 
-            encoding: 'utf8', 
-            maxBuffer: 2 * 1024 * 1024 
+        const diff = execSync('git show --no-color --unified=3 -M100% --diff-filter=r ' + sha, {
+            encoding: 'utf8',
+            maxBuffer: 2 * 1024 * 1024
         });
         const lines = diff.split('\n');
         if (lines.length > MAX_DIFF_LINES) {
@@ -235,7 +244,7 @@ function logToFile(msg) {
         if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
         const logFile = path.join(REVIEW_DIR, 'background.log');
         fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
-    } catch {}
+    } catch { }
 }
 
 // ─── Review runner ────────────────────────────────────────────────────────────
@@ -246,7 +255,7 @@ async function runReview(commitRef) {
         if (isBg) logToFile(msg);
     };
 
-    log(cyan('🤖') + ' Starting Perplexity code review for: ' + yellow(commitRef));
+    log(cyan('🤖') + ' Starting ' + PROVIDER_LABEL + ' code review for: ' + yellow(commitRef));
 
     let info;
     try {
@@ -267,8 +276,8 @@ async function runReview(commitRef) {
 
     // Check if review already exists (in root or resolved folder)
     if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
-    const exists = fs.existsSync(path.join(REVIEW_DIR, shortSha + '.md')) || 
-                   fs.existsSync(path.join(REVIEW_DIR, 'resolved', shortSha + '.md'));
+    const exists = fs.existsSync(path.join(REVIEW_DIR, shortSha + '.md')) ||
+        fs.existsSync(path.join(REVIEW_DIR, 'resolved', shortSha + '.md'));
 
     if (exists) {
         log(yellow('⏭') + '  Review already exists for ' + shortSha + ', skipping');
@@ -297,7 +306,7 @@ async function runReview(commitRef) {
         return;
     }
 
-const prompt = `You are an automated code analysis engine. Output is consumed by an LLM like Cursor.
+    const prompt = `You are an automated code analysis engine. Output is consumed by an LLM like Cursor.
 
 ---
 Commit: ${shortSha}
@@ -337,7 +346,7 @@ Provide a professional, technical code review with this structure:
 
 OUTPUT IS ALSO CONSUMED BY AUTOMATED SYSTEMS. Keep sections and formatting consistent. Use the table format for all issues.`;
 
-    log(cyan('🚀') + ' Sending to ' + REVIEW_PROVIDER + ' (' + REVIEW_MODEL + ')...');
+    log(cyan('🚀') + ' Sending to ' + PROVIDER_LABEL + ' (' + REVIEW_MODEL + ')...');
 
     try {
         const response = await queryAI(prompt, REVIEW_MODEL, REVIEW_PROVIDER);
@@ -455,11 +464,11 @@ function spawnBackground(sha) {
     }
 
     child.unref();
-    
+
     const shortSha = sha.substring(0, 8);
     console.log(cyan('🤖') + ' Review queued for ' + yellow(shortSha) + ' (background)');
     console.log(cyan('💡') + ' Background reviews may take 1-2 minutes to complete.');
-    
+
     // Log spawn event to background.log
     fs.appendFileSync(logFile, `[${new Date().toISOString()}] [SPAWN] Queued review for ${shortSha} (PID: ${child.pid})\n`, 'utf8');
 }
