@@ -257,7 +257,7 @@
 
     // ─── Send Message ───────────────────────────────
 
-    async function send(message) {
+    async function send(message, options) {
         var token = await _getToken();
 
         // OAI-Device-Id header required for API auth
@@ -291,7 +291,7 @@
                 content: { content_type: 'text', parts: [message] },
                 metadata: {}
             }],
-            model: 'auto',
+            model: (options && options.model) ? options.model : 'gpt-5-5-thinking',
 
             parent_message_id: _parentMessageId || crypto.randomUUID(),
             timezone_offset_min: new Date().getTimezoneOffset(),
@@ -302,6 +302,15 @@
             force_rate_limit: false,
             websocket_request_id: crypto.randomUUID()
         };
+
+        // Add model config for extended reasoning models
+        if (options && options.model && options.model.includes('thinking')) {
+            payload['oai-last-model-config'] = JSON.stringify({
+                model: options.model,
+                effort: 'extended'
+            });
+            console.log('[Proxima ChatGPT] Using extended reasoning model:', options.model);
+        }
 
 
         if (_conversationId) {

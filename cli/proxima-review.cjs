@@ -20,7 +20,7 @@ const { execSync, spawn } = require('child_process');
 // ─── Config ───────────────────────────────────────────────────────────────────
 const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
 const IPC_HOST = '127.0.0.1';
-const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || 'claude sonnet 4.6 thinking';
+const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || 'gpt-5-5-thinking';
 const MAX_DIFF_LINES = parseInt(process.env.PROXIMA_REVIEW_MAX_DIFF) || 800;
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
 // Universal lock file in the home directory to prevent cross-project Hub overloading

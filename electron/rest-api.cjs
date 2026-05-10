@@ -15,7 +15,7 @@ const API_PREFIX = '/v1';
 const MODEL_ALIASES = {
     
     'chatgpt': 'chatgpt', 'gpt': 'chatgpt', 'gpt-4': 'chatgpt', 'gpt-4o': 'chatgpt',
-    'gpt-4.5': 'chatgpt', 'openai': 'chatgpt',
+    'gpt-4.5': 'chatgpt', 'openai': 'chatgpt', 'gpt-5-5': 'chatgpt', 'gpt-5-5-thinking': 'chatgpt',
 
     
     'claude': 'claude', 'claude-3': 'claude', 'claude-3.5': 'claude', 'claude-4': 'claude',
