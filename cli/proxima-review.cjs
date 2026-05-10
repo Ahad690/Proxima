@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // =============================================================================
-// Proxima Code Review Script v2
+// Proxima Code Review Script v2.1
 // Usage:  node cli/proxima-review.cjs [commit-sha]   ← manual run
 // Hook:   Triggered automatically by pre-push git hook (reads stdin)
 // =============================================================================
