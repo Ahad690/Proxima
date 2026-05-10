@@ -6,8 +6,8 @@
 // =============================================================================
 //
 // Transport: Direct IPC socket (port 19222) — no REST API needed.
-// Hook mode: pre-push (fires on git push, not on every local commit).
-// Storage:   perplexity-reviews/<shortSha>.md in the repo root.
+// Hook mode: pre-push (fires on git push, reads commits from stdin).
+// Storage:   <repo-root>/perplexity-reviews/<shortSha>.md
 //
 // =============================================================================
 
