@@ -20,7 +20,22 @@ const { execSync, spawn } = require('child_process');
 // ─── Config ───────────────────────────────────────────────────────────────────
 const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
 const IPC_HOST = '127.0.0.1';
-const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || 'gpt-5-5-thinking';
+
+// ─── Hybrid model config ──────────────────────────────────────────────────────
+// Change REVIEW_MODEL to switch providers. Prefix determines routing:
+//   'gpt-*'              → chatgpt   (e.g. 'gpt-5-5-thinking', 'gpt-4o')
+//   'claude *'           → perplexity via claude46sonnet/claude46sonnetthinking
+//   anything else        → perplexity
+// Override via env: PROXIMA_REVIEW_MODEL=claude sonnet 4.6 thinking
+const REVIEW_MODEL    = process.env.PROXIMA_REVIEW_MODEL    || 'gpt-5-5-thinking';
+const REVIEW_PROVIDER = process.env.PROXIMA_REVIEW_PROVIDER || resolveProvider(REVIEW_MODEL);
+
+function resolveProvider(model) {
+    const m = model.toLowerCase();
+    if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
+    return 'perplexity';
+}
+
 const MAX_DIFF_LINES = parseInt(process.env.PROXIMA_REVIEW_MAX_DIFF) || 800;
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
 // Universal lock file in the home directory to prevent cross-project Hub overloading
@@ -104,8 +119,10 @@ const dim    = (t) => `${c.dim}${t}${c.reset}`;
 
 // ─── IPC Client ───────────────────────────────────────────────────────────────
 // Talks directly to Proxima Agent Hub over TCP (same protocol as MCP server).
-// Sends: sendMessage → getResponseWithTyping, both newline-delimited JSON.
-function queryPerplexity(message, modelPreference) {
+// Routes to the correct provider (chatgpt or perplexity) based on REVIEW_PROVIDER.
+// ChatGPT:    sendMessage with { message, model }
+// Perplexity: sendMessage with { message, modelPreference, deepSearch: false }
+function queryAI(message, model, provider) {
     return new Promise((resolve, reject) => {
         const socket = net.createConnection({ port: IPC_PORT, host: IPC_HOST });
         let buffer = '';
@@ -114,16 +131,23 @@ function queryPerplexity(message, modelPreference) {
 
         socket.setTimeout(600000); // 10 min max
 
-        function send(action, data) {
+        function ipcSend(action, data) {
             reqId++;
-            socket.write(JSON.stringify({ requestId: reqId, action, provider: 'perplexity', data }) + '\n');
+            socket.write(JSON.stringify({ requestId: reqId, action, provider, data }) + '\n');
             return reqId;
         }
 
+        // Build the correct payload for each provider
+        function buildSendPayload() {
+            if (provider === 'chatgpt') {
+                return { message, model };
+            }
+            // perplexity (and any future provider)
+            return { message, modelPreference: model, deepSearch: false };
+        }
+
         socket.on('connect', () => {
-            // Step 1: send the message with model preference
-            // Normal Pro Search (deepSearch: false) still allows research across up to 30 sites.
-            send('sendMessage', { message, modelPreference, deepSearch: false });
+            ipcSend('sendMessage', buildSendPayload());
         });
 
         socket.on('data', (chunk) => {
@@ -142,16 +166,15 @@ function queryPerplexity(message, modelPreference) {
                             reject(new Error(resp.error || 'sendMessage failed'));
                             return;
                         }
-                        // Step 2: wait for the response
                         state = 'waitingResponse';
-                        send('getResponseWithTyping', {});
+                        ipcSend('getResponseWithTyping', {});
 
                     } else if (state === 'waitingResponse' && resp.requestId === 2) {
                         state = 'done';
                         socket.end();
                         const text = resp.response || '';
                         if (!text) {
-                            reject(new Error('Perplexity returned empty response'));
+                            reject(new Error(provider + ' returned empty response'));
                         } else {
                             resolve(text);
                         }
@@ -314,10 +337,10 @@ Provide a professional, technical code review with this structure:
 
 OUTPUT IS ALSO CONSUMED BY AUTOMATED SYSTEMS. Keep sections and formatting consistent. Use the table format for all issues.`;
 
-    log(cyan('🚀') + ' Sending to Perplexity (' + REVIEW_MODEL + ')...');
+    log(cyan('🚀') + ' Sending to ' + REVIEW_PROVIDER + ' (' + REVIEW_MODEL + ')...');
 
     try {
-        const response = await queryPerplexity(prompt, REVIEW_MODEL);
+        const response = await queryAI(prompt, REVIEW_MODEL, REVIEW_PROVIDER);
 
         const content = `---
 commit: ${sha}
@@ -326,6 +349,7 @@ author: ${author}
 date: ${date}
 message: ${JSON.stringify(msg)}
 model: ${REVIEW_MODEL}
+provider: ${REVIEW_PROVIDER}
 reviewed_at: ${new Date().toISOString()}
 ---
 
