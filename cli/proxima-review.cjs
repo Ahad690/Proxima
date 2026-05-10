@@ -40,7 +40,7 @@ const MAX_DIFF_LINES = parseInt(process.env.PROXIMA_REVIEW_MAX_DIFF) || 800;
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
 // Universal lock file in the home directory to prevent cross-project Hub overloading
 const LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
-const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min
+const LOCK_STALE_AFTER_MS = 15 * 60 * 1000; // 15 min — lock is considered stale after this
 
 // ─── Git root detection ───────────────────────────────────────────────────────
 function findGitRoot() {
