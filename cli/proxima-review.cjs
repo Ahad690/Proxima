@@ -45,7 +45,6 @@ const PROVIDER_DISPLAY = {
 };
 const PROVIDER_LABEL = PROVIDER_DISPLAY[REVIEW_PROVIDER] || REVIEW_PROVIDER;
 
-const MAX_DIFF_LINES = parseInt(process.env.PROXIMA_REVIEW_MAX_DIFF) || 800;
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
 // Universal lock file in the home directory to prevent cross-project Hub overloading
 const LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
@@ -224,11 +223,6 @@ function getDiff(sha) {
             encoding: 'utf8',
             maxBuffer: 2 * 1024 * 1024
         });
-        const lines = diff.split('\n');
-        if (lines.length > MAX_DIFF_LINES) {
-            return lines.slice(0, MAX_DIFF_LINES).join('\n')
-                + '\n\n... (truncated, ' + (lines.length - MAX_DIFF_LINES) + ' more lines)';
-        }
         return diff;
     } catch (e) {
         if (e.message && e.message.includes('maxBuffer')) {
