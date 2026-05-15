@@ -191,23 +191,8 @@ async function main() {
         const repairDir = path.join(iterReviewDir, 'repair');
         if (!fs.existsSync(repairDir)) fs.mkdirSync(repairDir, { recursive: true });
 
-        // Bounding the prompt context
-        const MAX_REVIEW_CHARS = 80000;
-        const MAX_DIFF_CHARS = 120000;
-
-        let boundedReview = reviewContent;
-        if (boundedReview.length > MAX_REVIEW_CHARS) {
-            boundedReview = boundedReview.substring(0, MAX_REVIEW_CHARS) + '\n\n[TRUNCATED]';
-        }
-
         const diffRes = git.runCommand('git', ['show', '--no-color', currentSha]);
-        let rawDiff = diffRes.stdout;
-        if (rawDiff.length > MAX_DIFF_CHARS) {
-            const err = 'Diff too large for safe automatic repair';
-            console.error(`❌ ${err}`);
-            updateStatus({ status: "repair-context-too-large", error: err });
-            break;
-        }
+        const rawDiff = diffRes.stdout;
 
         const prompt = `You are an expert software engineer. Based on the following code review and the original diff, generate a unified diff patch to fix the Critical and High findings.
 
@@ -220,7 +205,7 @@ RULES:
 6. Ensure the patch is compatible with 'git apply'.
 
 --- REVIEW ---
-${boundedReview}
+${reviewContent}
 
 --- ORIGINAL DIFF ---
 ${rawDiff}
