@@ -141,8 +141,6 @@ async function main() {
             const cmdArgs = typeof testCmd === 'string' ? [] : (testCmd.args || []);
             const timeout = typeof testCmd === 'string' ? 60000 : (testCmd.timeoutMs || 60000);
             
-            // If it's a string with spaces and no args, it might need shell splitting or shell: true
-            // To support complex strings, we'll use shell: true for string commands
             const options = { timeout, shell: typeof testCmd === 'string' };
             const res = git.runCommand(cmdStr, cmdArgs, options);
             
@@ -193,6 +191,24 @@ async function main() {
         const repairDir = path.join(iterReviewDir, 'repair');
         if (!fs.existsSync(repairDir)) fs.mkdirSync(repairDir, { recursive: true });
 
+        // Bounding the prompt context
+        const MAX_REVIEW_CHARS = 80000;
+        const MAX_DIFF_CHARS = 120000;
+
+        let boundedReview = reviewContent;
+        if (boundedReview.length > MAX_REVIEW_CHARS) {
+            boundedReview = boundedReview.substring(0, MAX_REVIEW_CHARS) + '\n\n[TRUNCATED]';
+        }
+
+        const diffRes = git.runCommand('git', ['show', '--no-color', currentSha]);
+        let rawDiff = diffRes.stdout;
+        if (rawDiff.length > MAX_DIFF_CHARS) {
+            const err = 'Diff too large for safe automatic repair';
+            console.error(`❌ ${err}`);
+            updateStatus({ status: "repair-context-too-large", error: err });
+            break;
+        }
+
         const prompt = `You are an expert software engineer. Based on the following code review and the original diff, generate a unified diff patch to fix the Critical and High findings.
 
 RULES:
@@ -204,10 +220,10 @@ RULES:
 6. Ensure the patch is compatible with 'git apply'.
 
 --- REVIEW ---
-${reviewContent}
+${boundedReview}
 
 --- ORIGINAL DIFF ---
-${git.runCommand('git', ['show', '--no-color', currentSha]).stdout}
+${rawDiff}
 
 PATCH:`;
 
@@ -251,6 +267,7 @@ PATCH:`;
                     updateStatus({ 
                         status: "dirty-overlap-needs-human-review", 
                         error: err,
+                        overlappingFiles: overlap,
                         recoveryInstructions: "Manual merge or cleanup required. The patch targets files you already have modified."
                     });
                     break;
@@ -321,8 +338,8 @@ PATCH:`;
                 console.error('❌ Tests failed after repair.');
                 updateStatus({ 
                     status: "repair-tests-failed", 
-                    error: "Tests failed after applying patch.",
-                    recoveryInstructions: `The failed patch remains UNCOMMITTED on branch '${botBranchName}' for your inspection. Inspect changes with git diff. To discard: git checkout -- . && git clean -fd && git checkout ${sourceBranch}`
+                    error: "Tests failed after applying patch. The failed patch remains uncommitted on the bot branch for inspection.",
+                    recoveryInstructions: `Inspect with git diff. To discard: git checkout -- . && git clean -fd && git checkout ${sourceBranch}`
                 });
                 break; 
             }

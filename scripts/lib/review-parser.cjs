@@ -1,10 +1,10 @@
 function parseSeverityCounts(markdown) {
     const counts = { 
         parsed: false,
-        critical: 0, 
-        high: 0, 
-        medium: 0, 
-        low: 0 
+        critical: null, 
+        high: null, 
+        medium: null, 
+        low: null 
     };
     
     // Target the "Bugs & Failure Modes" table specifically
@@ -14,8 +14,19 @@ function parseSeverityCounts(markdown) {
     }
 
     counts.parsed = true;
-    const table = tableMatch[1];
+    counts.critical = 0;
+    counts.high = 0;
+    counts.medium = 0;
+    counts.low = 0;
+
+    const table = tableMatch[1].trim();
+    if (!table) {
+        counts.parsed = false; // Empty table is treated as unparsed
+        return counts;
+    }
+
     const lines = table.split('\n');
+    let dataLineFound = false;
     
     for (const line of lines) {
         if (!line.includes('|')) continue;
@@ -27,8 +38,7 @@ function parseSeverityCounts(markdown) {
         const columns = line.split('|').map(c => c.trim()).filter(Boolean);
         if (columns.length < 2) continue;
         
-        // Severity is usually the second column in our structure
-        // | File:Line | Severity | Finding | Evidence |
+        dataLineFound = true;
         const severity = columns[1].toLowerCase();
         
         // Support text and emojis
@@ -36,6 +46,10 @@ function parseSeverityCounts(markdown) {
         else if (severity.includes('high') || severity.includes('🟠')) counts.high++;
         else if (severity.includes('medium') || severity.includes('🟡')) counts.medium++;
         else if (severity.includes('low') || severity.includes('🟢')) counts.low++;
+    }
+
+    if (!dataLineFound) {
+        counts.parsed = false; // No data lines found in table
     }
 
     return counts;
@@ -50,7 +64,7 @@ function parseScore(markdown) {
 function hasCriticalOrHigh(markdown) {
     const counts = parseSeverityCounts(markdown);
     if (!counts.parsed) return true; // Assume danger if we can't parse
-    return counts.critical > 0 || counts.high > 0;
+    return (counts.critical || 0) > 0 || (counts.high || 0) > 0;
 }
 
 module.exports = {
