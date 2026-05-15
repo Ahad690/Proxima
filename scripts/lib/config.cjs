@@ -11,7 +11,7 @@ function findGitRoot() {
 }
 
 const DEFAULT_CONFIG = {
-    reviewDir: "/root/review",
+    reviewDir: "perplexity-reviews",
     baseUrl: "http://localhost:3210",
 
 

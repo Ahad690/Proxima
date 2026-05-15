@@ -1,5 +1,5 @@
 {
-  "reviewDir": "/root/review",
+  "reviewDir": "perplexity-reviews",
   "baseUrl": "http://localhost:3210",
   "reviewModel": "chatgpt",
   "repairModel": "claude",
