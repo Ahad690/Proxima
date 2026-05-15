@@ -525,15 +525,16 @@ function spawnBackground(sha) {
     const logFile = path.join(REVIEW_DIR, 'background.log');
     const out = fs.openSync(logFile, 'a');
 
-    const loopScript = path.join(gitRoot, 'scripts/proxima-loop.cjs');
+    // Loop script is always relative to this review script, not the target project
+    const loopScript = path.resolve(__dirname, '../scripts/proxima-loop.cjs');
 
     let child;
     if (isWin) {
-        // On Windows, pop up a visible PowerShell window. 
-        // It stays open for 5 minutes after finishing, then auto-closes.
+        const escapedLoopScript = loopScript.replace(/\/g, '\\');
+        const escapedGitRoot = gitRoot.replace(/\/g, '\\');
         child = spawn('powershell.exe', [
-            '-NoProfile', '-Command', 
-            `Start-Process powershell -ArgumentList "-Command", "node ${loopScript}; Write-Host '--- Automation Finished. Window will auto-close in 5 minutes. ---'; Start-Sleep -s 300; Exit"`
+            '-NoProfile', '-Command',
+            `Start-Process powershell -ArgumentList "-NoExit", "-Command", "try { Set-Location '${escapedGitRoot}'; node '${escapedLoopScript}'; Write-Host '--- Automation Finished. Window will auto-close in 5 minutes. ---'; Start-Sleep -s 300; Exit } catch { Write-Error $_; Write-Host 'Press any key to exit...'; [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') }"`
         ], {
             detached: true,
             stdio: 'ignore'
