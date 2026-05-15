@@ -21,19 +21,22 @@ const { execSync, spawn } = require('child_process');
 const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
 const IPC_HOST = '127.0.0.1';
 
+// Load automation config if available
+let automationConfig = {};
+try {
+    const configModule = require('../scripts/lib/config.cjs');
+    automationConfig = configModule.loadConfig();
+} catch (e) {
+    // Fallback if loop scripts aren't present
+}
+
 const SKIP_REVIEW = process.env.PROXIMA_SKIP_REVIEW === '1';
-const SKIP_BRANCH_PREFIX = 'proxima/fix-';
+const SKIP_BRANCH_PREFIX = automationConfig.repairBranchPrefix || 'proxima/fix-';
 const SKIP_COMMIT_MARKER = '[proxima-auto-fix]';
 
-
-// ─── Hybrid model config ──────────────────────────────────────────────────────
-// Change REVIEW_MODEL to switch providers. Prefix determines routing:
-//   'gpt-*'              → chatgpt   (e.g. 'gpt-5-5-thinking', 'gpt-4o')
-//   'claude *'           → perplexity via claude46sonnet/claude46sonnetthinking
-//   anything else        → perplexity
-// Override via env: PROXIMA_REVIEW_MODEL=claude sonnet 4.6 thinking
-const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || 'gpt-5-5-thinking';
+const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || automationConfig.reviewModel || 'gpt-5-5-thinking';
 const REVIEW_PROVIDER = process.env.PROXIMA_REVIEW_PROVIDER || resolveProvider(REVIEW_MODEL);
+const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || automationConfig.reviewDir || path.join(findGitRoot(), 'perplexity-reviews');
 
 function resolveProvider(model) {
     const m = model.toLowerCase();
@@ -41,7 +44,6 @@ function resolveProvider(model) {
     return 'perplexity';
 }
 
-// Human-readable display names for log messages
 const PROVIDER_DISPLAY = {
     'chatgpt': 'ChatGPT',
     'perplexity': 'Perplexity',
@@ -50,7 +52,6 @@ const PROVIDER_DISPLAY = {
 };
 const PROVIDER_LABEL = PROVIDER_DISPLAY[REVIEW_PROVIDER] || REVIEW_PROVIDER;
 
-const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || path.join(findGitRoot(), 'perplexity-reviews');
 // Universal lock file in the home directory to prevent cross-project Hub overloading
 const LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
 const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min

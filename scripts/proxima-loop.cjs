@@ -50,6 +50,11 @@ async function main() {
         recoveryInstructions: "To recover, checkout your source branch: git checkout " + sourceBranch
     };
 
+    const log = (msg) => {
+        console.log(msg);
+        fs.appendFileSync(path.join(sessionDir, 'loop.log'), `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+    };
+
     const updateStatus = (updates) => {
         status = { ...status, ...updates };
         fs.writeFileSync(path.join(sessionDir, 'status.json'), JSON.stringify(status, null, 2), 'utf8');
@@ -59,7 +64,7 @@ async function main() {
 
     if (git.isProtectedBranch(sourceBranch, config.protectedBranches)) {
         const err = `Refusing to run on protected branch: ${sourceBranch}`;
-        console.error(`❌ ${err}`);
+        log(`❌ ${err}`);
         updateStatus({ status: "protected-branch", error: err });
         process.exit(1);
     }
@@ -68,19 +73,19 @@ async function main() {
     const initialDirtyFiles = git.getDirtyFiles();
     if (!allowDirty && initialDirtyFiles.length > 0) {
         const err = 'Working tree is dirty. Commit your changes or use --allow-dirty.';
-        console.error(`❌ ${err}`);
+        log(`❌ ${err}`);
         updateStatus({ status: "dirty-tree", error: err });
         process.exit(1);
     }
 
     if (git.isBotCommit(commitMsg, config.skipReviewCommitMarkers)) {
-        console.log('⏭ Skipping bot commit.');
+        log('⏭ Skipping bot commit.');
         updateStatus({ status: "skipped", reason: "bot-commit" });
         process.exit(0);
     }
 
     if (git.isBotBranch(sourceBranch, config.repairBranchPrefix)) {
-        console.log('⏭ Skipping bot branch.');
+        log('⏭ Skipping bot branch.');
         updateStatus({ status: "skipped", reason: "bot-branch" });
         process.exit(0);
     }
@@ -92,20 +97,20 @@ async function main() {
     let botBranchName = '';
 
     while (iteration <= maxIterations) {
-        console.log(`\n🔄 Iteration ${iteration}/${maxIterations}...`);
+        log(`\n🔄 Iteration ${iteration}/${maxIterations}...`);
         updateStatus({ iteration });
         
         // 1. Run Review
         const iterReviewDir = path.join(sessionDir, 'reviews', `iter-${iteration}`);
         if (!fs.existsSync(iterReviewDir)) fs.mkdirSync(iterReviewDir, { recursive: true });
         
-        console.log(`🤖 Running Proxima review for ${git.getShortSha(currentSha)}...`);
+        log(`🤖 Running Proxima review for ${git.getShortSha(currentSha)}...`);
         await runReview(currentSha, { outputDir: iterReviewDir, force: true, fileName: "review.md" });
         
         const reviewFile = path.join(iterReviewDir, 'review.md');
         if (!fs.existsSync(reviewFile)) {
             const err = 'Review file was not generated.';
-            console.error(`❌ ${err}`);
+            log(`❌ ${err}`);
             updateStatus({ status: "proxima-unavailable", error: err });
             process.exit(1);
         }
@@ -115,13 +120,13 @@ async function main() {
         
         if (!counts.parsed) {
             const err = 'Malformed review: ## Bugs & Failure Modes table not found.';
-            console.error(`❌ ${err}`);
+            log(`❌ ${err}`);
             updateStatus({ status: "review-parse-failed-needs-human-review", error: err });
             process.exit(1);
         }
 
         const score = parser.parseScore(reviewContent);
-        console.log(`📊 Score: ${score}/10 | Critical: ${counts.critical} | High: ${counts.high}`);
+        log(`📊 Score: ${score}/10 | Critical: ${counts.critical} | High: ${counts.high}`);
 
         updateStatus({
             score,
@@ -132,7 +137,7 @@ async function main() {
         });
 
         // 2. Check if clean
-        console.log('🧪 Running tests...');
+        log('🧪 Running tests...');
         let testsPassed = true;
         const testLogPath = path.join(iterReviewDir, 'tests.log');
         
@@ -160,22 +165,22 @@ async function main() {
         updateStatus({ testsPassed });
 
         if (testsPassed && counts.critical === 0 && counts.high === 0) {
-            console.log('✅ Clean state reached (Tests pass, no Critical/High findings).');
+            log('✅ Clean state reached (Tests pass, no Critical/High findings).');
             updateStatus({ status: "clean-local" });
             
             if (botBranchCreated && pushRequested) {
-                console.log(`🚀 Pushing branch ${botBranchName}...`);
+                log(`🚀 Pushing branch ${botBranchName}...`);
                 const pushRes = git.pushBranch(botBranchName);
                 if (pushRes.success) {
                     updateStatus({ status: "clean-pushed", branchPushed: true });
                 } else {
-                    console.error(`⚠️ Push failed: ${pushRes.stderr}`);
+                    log(`⚠️ Push failed: ${pushRes.stderr}`);
                     updateStatus({ status: "push-failed", error: pushRes.stderr });
                 }
             }
 
             if (botBranchCreated && prRequested) {
-                const prRes = await createPR(botBranchName, shortSha, originalHeadSha, sourceBranch, score, counts, sessionDir, config, updateStatus);
+                const prRes = await createPR(botBranchName, shortSha, originalHeadSha, sourceBranch, score, counts, sessionDir, config, updateStatus, log);
                 if (prRes.success) {
                     updateStatus({ status: "clean-pr-created", prCreated: true });
                 } else {
@@ -187,7 +192,7 @@ async function main() {
         }
 
         // 3. Generate Repair
-        console.log(`🛠 Attempting repair (Iteration ${iteration})...`);
+        log(`🛠 Attempting repair (Iteration ${iteration})...`);
         const repairDir = path.join(iterReviewDir, 'repair');
         if (!fs.existsSync(repairDir)) fs.mkdirSync(repairDir, { recursive: true });
 
@@ -248,7 +253,7 @@ PATCH:`;
                 const overlap = touchedFiles.filter(f => initialDirtyFiles.includes(f));
                 if (overlap.length > 0) {
                     const err = `Patch overlaps with pre-existing dirty files: ${overlap.join(', ')}`;
-                    console.error(`❌ ${err}`);
+                    log(`❌ ${err}`);
                     updateStatus({ 
                         status: "dirty-overlap-needs-human-review", 
                         error: err,
@@ -262,10 +267,10 @@ PATCH:`;
             // 4. Branch and Apply
             if (!botBranchCreated) {
                 botBranchName = `${config.repairBranchPrefix}-${shortSha}-iter-${iteration}`;
-                console.log(`🌿 Creating branch ${botBranchName}...`);
+                log(`🌿 Creating branch ${botBranchName}...`);
                 const branchRes = git.createBranch(botBranchName);
                 if (!branchRes.success) {
-                    console.error(`❌ Failed to create branch: ${branchRes.stderr}`);
+                    log(`❌ Failed to create branch: ${branchRes.stderr}`);
                     updateStatus({ 
                         status: "branch-creation-failed", 
                         error: branchRes.stderr,
@@ -277,28 +282,28 @@ PATCH:`;
                 updateStatus({ botBranch: botBranchName, recoveryInstructions: `Repair in progress. To reset, git checkout ${sourceBranch} && git branch -D ${botBranchName}` });
             }
 
-            console.log('🔍 Validating patch (git apply --check)...');
+            log('🔍 Validating patch (git apply --check)...');
             const checkRes = git.applyPatchCheck(patchPath);
             if (!checkRes.success) {
-                console.error(`❌ Patch validation failed: ${checkRes.stderr}`);
+                log(`❌ Patch validation failed: ${checkRes.stderr}`);
                 fs.writeFileSync(path.join(repairDir, 'apply.log'), `Validation failed:\n${checkRes.stderr}`, 'utf8');
                 updateStatus({ status: "patch-check-failed", error: checkRes.stderr });
                 break;
             }
 
-            console.log('🩹 Applying patch...');
+            log('🩹 Applying patch...');
             const applyRes = git.applyPatch(patchPath);
             fs.writeFileSync(path.join(repairDir, 'apply.log'), (applyRes.stdout + applyRes.stderr) || 'Applied successfully', 'utf8');
             
             if (!applyRes.success) {
-                console.error(`❌ Patch application failed: ${applyRes.stderr}`);
+                log(`❌ Patch application failed: ${applyRes.stderr}`);
                 updateStatus({ status: "patch-apply-failed", error: applyRes.stderr });
                 break;
             }
             updateStatus({ patchApplied: true });
 
             // 5. Test Repair before committing
-            console.log('🧪 Running tests on repair...');
+            log('🧪 Running tests on repair...');
             let repairTestsPassed = true;
             const repairTestLogPath = path.join(repairDir, 'repair_tests.log');
             
@@ -320,7 +325,7 @@ PATCH:`;
             }
 
             if (!repairTestsPassed) {
-                console.error('❌ Tests failed after repair.');
+                log('❌ Tests failed after repair.');
                 updateStatus({ 
                     status: "repair-tests-failed", 
                     error: "Tests failed after applying patch. The failed patch remains uncommitted on the bot branch for inspection.",
@@ -329,19 +334,19 @@ PATCH:`;
                 break; 
             }
 
-            console.log('📝 Committing fix...');
+            log('📝 Committing fix...');
             const commitRes = git.commitPatchFiles(`fix: address Proxima review ${shortSha} [proxima-auto-fix]`, touchedFiles);
             if (!commitRes.success) {
-                console.error(`❌ Commit failed: ${commitRes.stderr}`);
+                log(`❌ Commit failed: ${commitRes.stderr}`);
                 updateStatus({ status: "commit-failed", error: commitRes.stderr });
                 break;
             }
 
             currentSha = git.getHeadSha();
-            console.log(`✅ Repair committed: ${git.getShortSha(currentSha)}`);
+            log(`✅ Repair committed: ${git.getShortSha(currentSha)}`);
 
         } catch (e) {
-            console.error(`❌ Repair failed: ${e.message}`);
+            log(`❌ Repair failed: ${e.message}`);
             updateStatus({ status: "error", error: e.message });
             break;
         }
@@ -355,8 +360,8 @@ PATCH:`;
     }
 }
 
-async function createPR(botBranch, shortSha, originalSha, sourceBranch, score, counts, sessionDir, config, updateStatus) {
-    console.log('📝 Creating Pull Request...');
+async function createPR(botBranch, shortSha, originalSha, sourceBranch, score, counts, sessionDir, config, updateStatus, log) {
+    log('📝 Creating Pull Request...');
     const prBody = `
 Proxima auto-fix for ${shortSha}
 
@@ -382,10 +387,10 @@ Review artifacts were saved locally by Proxima automation.
     });
 
     if (prRes.success) {
-        console.log('✅ PR created.');
+        log('✅ PR created.');
         updateStatus({ prCreated: true });
     } else {
-        console.error(`⚠️ PR creation failed: ${prRes.stderr}`);
+        log(`⚠️ PR creation failed: ${prRes.stderr}`);
     }
     return prRes;
 }
