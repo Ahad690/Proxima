@@ -31,6 +31,7 @@
         "loop:local:pr": "node scripts/proxima-loop.cjs --push --create-pr",
         "hooks:install": "node cli/install-hooks.cjs",
         "hooks:remove": "node cli/install-hooks.cjs --remove",
+        "test:automation": "node scripts/tests/automation-tests.cjs",
         "build": "electron-builder --win --x64",
         "build:installer": "electron-builder --win --x64 -c.win.target=nsis"
     },

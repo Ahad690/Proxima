@@ -1,5 +1,11 @@
 function parseSeverityCounts(markdown) {
-    const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+    const counts = { 
+        parsed: false,
+        critical: 0, 
+        high: 0, 
+        medium: 0, 
+        low: 0 
+    };
     
     // Target the "Bugs & Failure Modes" table specifically
     const tableMatch = markdown.match(/## Bugs & Failure Modes\s*?\n([\s\S]*?)(?:\n##|$)/);
@@ -7,6 +13,7 @@ function parseSeverityCounts(markdown) {
         return counts;
     }
 
+    counts.parsed = true;
     const table = tableMatch[1];
     const lines = table.split('\n');
     
@@ -20,26 +27,29 @@ function parseSeverityCounts(markdown) {
         const columns = line.split('|').map(c => c.trim()).filter(Boolean);
         if (columns.length < 2) continue;
         
-        // Severity is usually the second column in the provided structure
+        // Severity is usually the second column in our structure
         // | File:Line | Severity | Finding | Evidence |
         const severity = columns[1].toLowerCase();
         
-        if (severity.includes('critical')) counts.critical++;
-        else if (severity.includes('high')) counts.high++;
-        else if (severity.includes('medium')) counts.medium++;
-        else if (severity.includes('low')) counts.low++;
+        // Support text and emojis
+        if (severity.includes('critical') || severity.includes('🔴')) counts.critical++;
+        else if (severity.includes('high') || severity.includes('🟠')) counts.high++;
+        else if (severity.includes('medium') || severity.includes('🟡')) counts.medium++;
+        else if (severity.includes('low') || severity.includes('🟢')) counts.low++;
     }
 
     return counts;
 }
 
 function parseScore(markdown) {
-    const match = markdown.match(/## Score: (\d+)\/10/);
-    return match ? parseInt(match[1]) : null;
+    // Support ## Score: 7/10, ## Score: 7.5/10, ## Score: **7/10**
+    const match = markdown.match(/## Score: \**(\d+(\.\d+)?)\**\/10/);
+    return match ? parseFloat(match[1]) : null;
 }
 
 function hasCriticalOrHigh(markdown) {
     const counts = parseSeverityCounts(markdown);
+    if (!counts.parsed) return true; // Assume danger if we can't parse
     return counts.critical > 0 || counts.high > 0;
 }
 

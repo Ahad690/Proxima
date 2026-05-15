@@ -3,19 +3,28 @@ const fs = require('fs');
 const path = require('path');
 
 function runCommand(cmd, args = [], options = {}) {
+    const timeout = options.timeout || 60000; // Default 1 minute
+    
     const res = spawnSync(cmd, args, { 
         encoding: 'utf8', 
+        timeout,
         ...options 
     });
     
     if (res.error) {
-        return { success: false, stdout: '', stderr: res.error.message };
+        return { 
+            success: false, 
+            stdout: '', 
+            stderr: res.error.message,
+            timedOut: res.error.code === 'ETIMEDOUT' || res.status === null 
+        };
     }
     
     return { 
         success: res.status === 0, 
         stdout: res.stdout ? res.stdout.trim() : '', 
-        stderr: res.stderr ? res.stderr.trim() : '' 
+        stderr: res.stderr ? res.stderr.trim() : '',
+        status: res.status
     };
 }
 
@@ -43,6 +52,14 @@ function ensureInsideGitRepo() {
 function ensureCleanWorkingTree() {
     const res = runCommand('git', ['status', '--porcelain']);
     return res.success && res.stdout === '';
+}
+
+function getDirtyFiles() {
+    const res = runCommand('git', ['status', '--porcelain']);
+    if (!res.success) return [];
+    return res.stdout.split('\n')
+        .map(line => line.slice(3).trim())
+        .filter(Boolean);
 }
 
 function createBranch(branchName) {
@@ -76,9 +93,40 @@ function applyPatch(patchPath) {
     return runCommand('git', ['apply', patchPath]);
 }
 
-function commitAll(message) {
-    const addRes = runCommand('git', ['add', '.']);
+/**
+ * Parses touched file paths from a unified diff patch.
+ */
+function getFilesFromPatch(patchPath) {
+    try {
+        const content = fs.readFileSync(patchPath, 'utf8');
+        const files = new Set();
+        const lines = content.split('\n');
+        for (const line of lines) {
+            if (line.startsWith('+++ b/')) {
+                files.add(line.slice(6).trim());
+            } else if (line.startsWith('--- a/')) {
+                // Also track deletions/modifications
+                const file = line.slice(6).trim();
+                if (file !== '/dev/null') files.add(file);
+            }
+        }
+        return Array.from(files);
+    } catch (e) {
+        return [];
+    }
+}
+
+/**
+ * Stages only specific files and commits them.
+ */
+function commitPatchFiles(message, files) {
+    if (!files || files.length === 0) {
+        return { success: false, stderr: 'No files to commit' };
+    }
+    
+    const addRes = runCommand('git', ['add', ...files]);
     if (!addRes.success) return addRes;
+    
     return runCommand('git', ['commit', '-m', message]);
 }
 
@@ -111,6 +159,7 @@ module.exports = {
     getCommitMessage,
     ensureInsideGitRepo,
     ensureCleanWorkingTree,
+    getDirtyFiles,
     createBranch,
     checkoutBranch,
     isProtectedBranch,
@@ -118,7 +167,8 @@ module.exports = {
     isBotCommit,
     applyPatchCheck,
     applyPatch,
-    commitAll,
+    getFilesFromPatch,
+    commitPatchFiles,
     pushBranch,
     createPullRequest
 };

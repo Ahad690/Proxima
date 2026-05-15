@@ -15,13 +15,14 @@ async function main() {
     }
     
     const shortSha = args[0];
-    const reviewDir = path.join(config.gitRoot, config.reviewDir, shortSha);
+    const reviewDir = path.join(config.reviewDir, shortSha);
     
     // Check for review.md in the shortSha directory or shortSha.md in the root
     let reviewFile = path.join(reviewDir, 'review.md');
     if (!fs.existsSync(reviewFile)) {
-        reviewFile = path.join(config.gitRoot, config.reviewDir, `${shortSha}.md`);
+        reviewFile = path.join(config.reviewDir, `${shortSha}.md`);
     }
+
     
     if (!fs.existsSync(reviewFile)) {
         console.error(`Review file not found: ${reviewFile}`);

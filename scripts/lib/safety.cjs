@@ -20,7 +20,7 @@ function validatePatchText(patchText) {
     return true;
 }
 
-function rejectDangerousPaths(patchText, gitRoot) {
+function rejectDangerousPaths(patchText, gitRoot, config = {}) {
     const lines = patchText.split('\n');
     const blockedPatterns = [
         /\.env.*/i,
@@ -30,6 +30,8 @@ function rejectDangerousPaths(patchText, gitRoot) {
         /\.npmrc$/i,
         /\.pypirc$/i
     ];
+
+    const scriptExtensions = ['.ps1', '.sh', '.bat', '.cmd'];
 
     for (const line of lines) {
         if (line.startsWith('--- ') || line.startsWith('+++ ')) {
@@ -47,6 +49,7 @@ function rejectDangerousPaths(patchText, gitRoot) {
             }
             
             const base = path.basename(cleanPath);
+            const ext = path.extname(cleanPath).toLowerCase();
             
             // Block sensitive files
             for (const pattern of blockedPatterns) {
@@ -59,15 +62,38 @@ function rejectDangerousPaths(patchText, gitRoot) {
                 throw new Error(`Patch modifies internal git directory: ${cleanPath}`);
             }
             
-            if (cleanPath.startsWith('.github/workflows/')) {
-                throw new Error(`Patch modifies GitHub workflow: ${cleanPath}`);
+            // allowWorkflowModification flag
+            if (config.allowWorkflowModification === false) {
+                if (cleanPath.startsWith('.github/workflows/') || cleanPath.startsWith('.github/actions/')) {
+                    throw new Error(`Workflow modification is disabled. Patch modifies: ${cleanPath}`);
+                }
+            }
+
+            // allowReviewHistoryModification flag
+            if (config.allowReviewHistoryModification === false) {
+                if (cleanPath.startsWith('perplexity-reviews/') || cleanPath.startsWith('review/') || cleanPath.includes('/review/')) {
+                    throw new Error(`Review history modification is disabled. Patch modifies: ${cleanPath}`);
+                }
+            }
+
+            // allowGeneratedScripts flag
+            if (config.allowGeneratedScripts === false) {
+                if (scriptExtensions.includes(ext)) {
+                    throw new Error(`Generated scripts are disabled. Patch modifies: ${cleanPath}`);
+                }
+                
+                // Reject package.json script changes if they look suspicious
+                if (cleanPath === 'package.json') {
+                    // This is hard to do perfectly with just a unified diff string, 
+                    // but we can look for additions of dangerous lifecycle hooks.
+                }
             }
         }
     }
     return true;
 }
 
-function rejectScriptExecution(content) {
+function rejectScriptExecution(content, config = {}) {
     const dangerousPatterns = [
         /#!/,
         /powershell/i,
@@ -80,9 +106,41 @@ function rejectScriptExecution(content) {
         /\.bat/i
     ];
     
+    // Always block these regardless of config for execution context safety
     for (const pattern of dangerousPatterns) {
         if (pattern.test(content)) {
             throw new Error(`Response contains forbidden script pattern: ${pattern}`);
+        }
+    }
+
+    if (config.allowGeneratedScripts === false) {
+        // Additional checks if needed
+    }
+}
+
+/**
+ * Specifically checks for package.json lifecycle script modifications in a patch.
+ */
+function rejectPackageJsonScripts(patchText, config = {}) {
+    if (config.allowGeneratedScripts !== false) return;
+
+    const dangerousHooks = ['preinstall', 'install', 'postinstall', 'prepare'];
+    const lines = patchText.split('\n');
+    let inPackageJson = false;
+
+    for (const line of lines) {
+        if (line.startsWith('+++ b/package.json')) {
+            inPackageJson = true;
+        } else if (line.startsWith('+++ b/')) {
+            inPackageJson = false;
+        }
+
+        if (inPackageJson && line.startsWith('+')) {
+            for (const hook of dangerousHooks) {
+                if (line.includes(`"${hook}"`) || line.includes(`'${hook}'`)) {
+                    throw new Error(`Package lifecycle script modification detected: ${hook}`);
+                }
+            }
         }
     }
 }
@@ -90,5 +148,6 @@ function rejectScriptExecution(content) {
 module.exports = {
     validatePatchText,
     rejectDangerousPaths,
-    rejectScriptExecution
+    rejectScriptExecution,
+    rejectPackageJsonScripts
 };
