@@ -530,8 +530,8 @@ function spawnBackground(sha) {
 
     let child;
     if (isWin) {
-        const escapedLoopScript = loopScript.replace(/\/g, '\\');
-        const escapedGitRoot = gitRoot.replace(/\/g, '\\');
+        const escapedLoopScript = loopScript.split('\\').join('\\\\');
+        const escapedGitRoot = gitRoot.split('\\').join('\\\\');
         child = spawn('powershell.exe', [
             '-NoProfile', '-Command',
             `Start-Process powershell -ArgumentList "-NoExit", "-Command", "try { Set-Location '${escapedGitRoot}'; node '${escapedLoopScript}'; Write-Host '--- Automation Finished. Window will auto-close in 5 minutes. ---'; Start-Sleep -s 300; Exit } catch { Write-Error $_; Write-Host 'Press any key to exit...'; [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') }"`
