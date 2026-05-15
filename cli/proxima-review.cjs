@@ -21,6 +21,11 @@ const { execSync, spawn } = require('child_process');
 const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
 const IPC_HOST = '127.0.0.1';
 
+const SKIP_REVIEW = process.env.PROXIMA_SKIP_REVIEW === '1';
+const SKIP_BRANCH_PREFIX = 'proxima/fix-';
+const SKIP_COMMIT_MARKER = '[proxima-auto-fix]';
+
+
 // ─── Hybrid model config ──────────────────────────────────────────────────────
 // Change REVIEW_MODEL to switch providers. Prefix determines routing:
 //   'gpt-*'              → chatgpt   (e.g. 'gpt-5-5-thinking', 'gpt-4o')
@@ -233,23 +238,44 @@ function getDiff(sha) {
     }
 }
 
-function logToFile(msg) {
+function logToFile(msg, dir) {
     try {
-        if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
-        const logFile = path.join(REVIEW_DIR, 'background.log');
+        const targetDir = dir || REVIEW_DIR;
+        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+        const logFile = path.join(targetDir, 'background.log');
         fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
     } catch { }
 }
 
+function writeSkipStatus(shortSha, reason, dir) {
+    try {
+        const targetDir = dir || REVIEW_DIR;
+        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+        const skipFile = path.join(targetDir, `skip-${shortSha}.json`);
+        fs.writeFileSync(skipFile, JSON.stringify({ status: "skipped", reason }, null, 2), 'utf8');
+    } catch { }
+}
+
+
+
 // ─── Review runner ────────────────────────────────────────────────────────────
-async function runReview(commitRef) {
+async function runReview(commitRef, options = {}) {
     const isBg = process.env.PROXIMA_BACKGROUND_REVIEW === '1';
+    const outputDir = options.outputDir || REVIEW_DIR;
+    const force = options.force === true;
+    
     const log = (msg) => {
         console.log(msg);
-        if (isBg) logToFile(msg);
+        if (isBg) logToFile(msg, outputDir);
     };
 
-    log(cyan('🤖') + ' Starting ' + PROVIDER_LABEL + ' code review for: ' + yellow(commitRef));
+    if (SKIP_REVIEW && !force) {
+        log(yellow('⏭') + ' Skipping review (PROXIMA_SKIP_REVIEW=1)');
+        writeSkipStatus(commitRef, 'PROXIMA_SKIP_REVIEW=1', outputDir);
+        return;
+    }
+
+
 
     let info;
     try {
@@ -260,6 +286,25 @@ async function runReview(commitRef) {
     }
 
     const { sha, shortSha, msg, author, date } = info;
+
+    // Skip rules
+    try {
+        const branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim();
+        if (branch.startsWith(SKIP_BRANCH_PREFIX) && !force) {
+            log(yellow('⏭') + ' Skipping bot branch: ' + branch);
+            writeSkipStatus(shortSha, 'bot-branch', outputDir);
+            return;
+        }
+    } catch { }
+
+    if (msg.includes(SKIP_COMMIT_MARKER) && !force) {
+        log(yellow('⏭') + ' Skipping auto-fix commit: ' + shortSha);
+        writeSkipStatus(shortSha, 'auto-fix-commit', outputDir);
+        return;
+    }
+
+
+
     log(cyan('📋') + ' Commit: ' + shortSha + ' — ' + dim(msg.split('\n')[0]));
 
     // Skip maintenance/chore commits to save Perplexity quota
@@ -269,14 +314,30 @@ async function runReview(commitRef) {
     }
 
     // Check if review already exists (in root or resolved folder)
-    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
-    const exists = fs.existsSync(path.join(REVIEW_DIR, shortSha + '.md')) ||
-        fs.existsSync(path.join(REVIEW_DIR, 'resolved', shortSha + '.md'));
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+    
+    // Determine filename
+    const isCanonical = outputDir.endsWith(shortSha) || outputDir.endsWith(shortSha + '/');
+    let reviewFile;
+    if (options.fileName) {
+        reviewFile = path.join(outputDir, options.fileName);
+    } else {
+        // If outputDir is the canonical /root/review/<shortSha>/, use review.md
+        reviewFile = isCanonical 
+            ? path.join(outputDir, 'review.md')
+            : path.join(outputDir, shortSha + '.md');
+    }
 
-    if (exists) {
+
+    const resolvedFile = path.join(outputDir, 'resolved', shortSha + '.md');
+    
+    if ((fs.existsSync(reviewFile) || fs.existsSync(resolvedFile)) && !force) {
         log(yellow('⏭') + '  Review already exists for ' + shortSha + ', skipping');
         return;
     }
+
+
+
 
     try {
         await acquireLockWithRetry(sha, log);
@@ -286,9 +347,8 @@ async function runReview(commitRef) {
     }
     log(cyan('🔒') + ' Lock acquired');
 
-    const reviewFile = path.join(REVIEW_DIR, shortSha + '.md');
-
     const diff = getDiff(sha);
+
     if (diff === '__TOO_LARGE__') {
         log(yellow('⏭') + ' Skipping ' + shortSha + ': diff is too large (> 2MB)');
         releaseLock();
@@ -386,13 +446,23 @@ ${response}`;
     } catch (e) {
         log(red('❌') + ' Review failed: ' + e.message);
 
-        const errorFile = path.join(REVIEW_DIR, 'error-' + shortSha + '.md');
+        let errorFile;
+        if (options.fileName) {
+            errorFile = path.join(outputDir, 'error-' + options.fileName);
+        } else {
+            errorFile = isCanonical
+                ? path.join(outputDir, 'review-error.md')
+                : path.join(outputDir, 'error-' + shortSha + '.md');
+        }
+
+            
         fs.writeFileSync(errorFile,
             `---\ncommit: ${sha}\nshort_sha: ${shortSha}\nauthor: ${author}\ndate: ${date}\nmessage: ${JSON.stringify(msg)}\nerror: ${e.message}\nerror_at: ${new Date().toISOString()}\n---\n\n# Review Failed\n\n**Error:** ${e.message}\n`,
             'utf8'
         );
         log(cyan('📄') + ' Error saved → ' + yellow(errorFile));
     } finally {
+
         releaseLock();
         log(cyan('🔓') + ' Lock released');
     }
@@ -513,4 +583,13 @@ async function main() {
     }
 }
 
-main();
+if (require.main === module) {
+    main();
+}
+
+module.exports = {
+    runReview,
+    getCommitInfo,
+    getDiff,
+    queryAI
+};

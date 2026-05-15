@@ -1,0 +1,21 @@
+{
+  "reviewDir": "/root/review",
+  "baseUrl": "http://localhost:3210",
+  "reviewModel": "chatgpt",
+  "repairModel": "claude",
+  "maxIterations": 3,
+  "pushBotBranches": false,
+  "createPullRequest": false,
+  "pullRequestDraft": true,
+  "pullRequestLabels": ["proxima-auto-fix"],
+  "protectedBranches": ["main", "master", "develop"],
+  "skipReviewBranches": ["proxima/fix-*"],
+  "skipReviewCommitMarkers": ["[proxima-auto-fix]"],
+  "testCommands": ["npm test"],
+  "stopOnTestFailure": true,
+  "allowGeneratedScripts": false,
+  "allowWorkflowModification": false,
+  "allowReviewHistoryModification": false,
+  "repairBranchPrefix": "proxima/fix",
+  "autoMerge": false
+}
