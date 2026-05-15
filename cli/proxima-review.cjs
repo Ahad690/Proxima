@@ -510,17 +510,11 @@ async function getNewCommitsFromStdin() {
 function spawnBackground(sha) {
     const isWin = process.platform === 'win32';
     const gitRoot = findGitRoot();
-
-    // Strip GIT_* environment variables to prevent git commands from failing inside the child
     const cleanEnv = {};
     for (const key in process.env) {
-        if (!key.startsWith('GIT_')) {
-            cleanEnv[key] = process.env[key];
-        }
+        if (!key.startsWith('GIT_')) cleanEnv[key] = process.env[key];
     }
     cleanEnv['PROXIMA_BACKGROUND_REVIEW'] = '1';
-
-    // Prepare custom stdout/stderr append to log file inside background.log
     if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
     const logFile = path.join(REVIEW_DIR, 'background.log');
     const out = fs.openSync(logFile, 'a');
@@ -530,15 +524,22 @@ function spawnBackground(sha) {
 
     let child;
     if (isWin) {
-        const escapedLoopScript = loopScript.split('\\').join('\\\\');
-        const escapedGitRoot = gitRoot.split('\\').join('\\\\');
-        child = spawn('powershell.exe', [
-            '-NoProfile', '-Command',
-            `Start-Process powershell -ArgumentList "-NoExit", "-Command", "try { Set-Location '${escapedGitRoot}'; node '${escapedLoopScript}'; Write-Host '--- Automation Finished. Window will auto-close in 5 minutes. ---'; Start-Sleep -s 300; Exit } catch { Write-Error $_; Write-Host 'Press any key to exit...'; [void]$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') }"`
-        ], {
-            detached: true,
-            stdio: 'ignore'
-        });
+        // Write a temp .ps1 to avoid all nested-quote escaping issues
+        const tmpScript = path.join(os.tmpdir(), 'proxima-loop-' + Date.now() + '.ps1');
+        const safeRoot = gitRoot.replace(/'/g, "''");
+        const safeLoop = loopScript.replace(/'/g, "''");
+        const ps1Lines = [
+            "Set-Location '" + safeRoot + "'",
+            "node '" + safeLoop + "'",
+            "Write-Host ''",
+            "Write-Host '--- Automation finished. Auto-closing in 5 minutes ---'",
+            "Start-Sleep -Seconds 300",
+        ];
+        fs.writeFileSync(tmpScript, ps1Lines.join('\r\n'), 'utf8');
+        child = spawn('cmd.exe', [
+            '/c', 'start', 'Proxima Automation',
+            'powershell.exe', '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpScript
+        ], { detached: true, stdio: 'ignore' });
     } else {
         child = spawn(process.execPath, [loopScript], {
             detached: true,
@@ -549,14 +550,11 @@ function spawnBackground(sha) {
     }
 
     child.unref();
-
     const shortSha = sha.substring(0, 8);
-    console.log(cyan('🤖') + ' Review queued for ' + yellow(shortSha) + ' (background)');
-    console.log(cyan('💡') + ' Background reviews may take 1-2 minutes to complete.');
-
-    // Log spawn event to background.log
-    fs.appendFileSync(logFile, `[${new Date().toISOString()}] [SPAWN] Queued review for ${shortSha} (PID: ${child.pid})\n`, 'utf8');
+    console.log(cyan('\u{1F916}') + ' Automation loop starting for ' + yellow(shortSha) + ' (new window)');
+    fs.appendFileSync(logFile, '[' + new Date().toISOString() + '] [SPAWN] Loop started for ' + shortSha + ' (PID: ' + child.pid + ')\n', 'utf8');
 }
+
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
