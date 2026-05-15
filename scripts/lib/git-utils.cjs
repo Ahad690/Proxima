@@ -86,11 +86,11 @@ function isBotCommit(message, markers) {
 }
 
 function applyPatchCheck(patchPath) {
-    return runCommand('git', ['apply', '--check', patchPath]);
+    return runCommand('git', ['apply', '--check', '--recount', '--ignore-whitespace', patchPath]);
 }
 
 function applyPatch(patchPath) {
-    return runCommand('git', ['apply', patchPath]);
+    return runCommand('git', ['apply', '--recount', '--ignore-whitespace', patchPath]);
 }
 
 /**
