@@ -1,63 +1,97 @@
-const http = require('http');
-const url = require('url');
+/**
+ * proxima-client.cjs
+ * Sends repair prompts to Proxima Agent Hub via IPC TCP socket (port 19222).
+ * Uses the same protocol as proxima-review.cjs — no REST API required.
+ */
+const net = require('net');
 
-async function askProxima(message, model, baseUrl = 'http://localhost:3210') {
-    const targetUrl = new url.URL('/v1/chat/completions', baseUrl);
-    
-    // Using the shape suggested by user: { model, message, stream: false }
-    const payload = JSON.stringify({
-        model: model,
-        message: message,
-        stream: false
-    });
+const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
+const IPC_HOST = '127.0.0.1';
+
+function resolveProvider(model) {
+    if (!model) return 'chatgpt';
+    const m = model.toLowerCase();
+    if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
+    return 'perplexity';
+}
+
+/**
+ * Send a prompt to Proxima via IPC and return the text response.
+ * @param {string} message  - The full prompt text
+ * @param {string} model    - Model name (e.g. "chatgpt", "claude", "gpt-5-5-thinking")
+ * @param {string} _baseUrl - Ignored; kept for API compatibility
+ */
+async function askProxima(message, model, _baseUrl) {
+    const provider = resolveProvider(model);
 
     return new Promise((resolve, reject) => {
-        const req = http.request(targetUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload)
-            },
-            timeout: 300000 // 5 minutes
-        }, (res) => {
-            let data = '';
-            res.on('data', (chunk) => data += chunk);
-            res.on('end', () => {
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                    try {
-                        const json = JSON.parse(data);
-                        // Support both OpenAI format and potential custom format
-                        if (json.choices && json.choices[0] && json.choices[0].message) {
-                            resolve(json.choices[0].message.content);
-                        } else if (json.response) {
-                            resolve(json.response);
-                        } else {
-                            reject(new Error('Unexpected response format from Proxima'));
-                        }
-                    } catch (e) {
-                        reject(new Error(`Failed to parse Proxima response: ${e.message}`));
-                    }
-                } else {
-                    reject(new Error(`Proxima returned status ${res.statusCode}: ${data}`));
-                }
-            });
+        const socket = net.createConnection({ port: IPC_PORT, host: IPC_HOST });
+        let buffer = '';
+        let state = 'waitingSendAck';
+        let reqId = 0;
+
+        socket.setTimeout(600000); // 10 min max
+
+        function ipcSend(action, data) {
+            reqId++;
+            socket.write(JSON.stringify({ requestId: reqId, action, provider, data }) + '\n');
+            return reqId;
+        }
+
+        function buildSendPayload() {
+            if (provider === 'chatgpt') {
+                return { message, model };
+            }
+            return { message, modelPreference: model, deepSearch: false };
+        }
+
+        socket.on('connect', () => {
+            ipcSend('sendMessage', buildSendPayload());
         });
 
-        req.on('error', (e) => {
-            if (e.code === 'ECONNREFUSED') {
-                reject(new Error(`Proxima is unavailable at ${baseUrl}. Is it running?`));
-            } else {
-                reject(e);
+        socket.on('data', (chunk) => {
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const resp = JSON.parse(line);
+
+                    if (state === 'waitingSendAck' && resp.requestId === 1) {
+                        if (!resp.success) {
+                            socket.destroy();
+                            reject(new Error(resp.error || 'sendMessage failed'));
+                            return;
+                        }
+                        state = 'waitingResponse';
+                        ipcSend('getResponseWithTyping', {});
+
+                    } else if (state === 'waitingResponse' && resp.requestId === 2) {
+                        state = 'done';
+                        socket.end();
+                        const text = resp.response || '';
+                        if (!text) {
+                            reject(new Error(provider + ' returned empty response'));
+                        } else {
+                            resolve(text);
+                        }
+                    }
+                } catch { /* ignore parse errors */ }
             }
         });
 
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('Request to Proxima timed out'));
+        socket.on('error', (e) => {
+            reject(e.code === 'ECONNREFUSED'
+                ? new Error(`Cannot connect to Proxima Agent Hub on port ${IPC_PORT}. Is Proxima running?`)
+                : e);
         });
 
-        req.write(payload);
-        req.end();
+        socket.on('timeout', () => {
+            socket.destroy();
+            reject(new Error('IPC request to Proxima timed out after 10 minutes'));
+        });
     });
 }
 

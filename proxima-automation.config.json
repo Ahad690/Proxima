@@ -11,7 +11,7 @@
   "protectedBranches": ["main", "master", "develop"],
   "skipReviewBranches": ["proxima/fix-*"],
   "skipReviewCommitMarkers": ["[proxima-auto-fix]"],
-  "testCommands": ["npm test"],
+    "testCommands": ["node scripts/tests/automation-tests.cjs"],
   "stopOnTestFailure": true,
   "allowGeneratedScripts": false,
   "allowWorkflowModification": false,
