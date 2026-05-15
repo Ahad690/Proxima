@@ -38,6 +38,10 @@ cookies-backup/
 *.tmp
 *.temp
 
-# Dev audit files
-Version_4.1.0.txt
-installer.nsh
+# Automation & Diffs
+*.txt
+perplexity-reviews/
+review/
+reviews/
+status.json
+loop.log
