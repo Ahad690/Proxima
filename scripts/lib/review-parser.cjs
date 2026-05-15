@@ -39,13 +39,18 @@ function parseSeverityCounts(markdown) {
         if (columns.length < 2) continue;
         
         dataLineFound = true;
-        const severity = columns[1].toLowerCase();
-        
-        // Support text and emojis
-        if (severity.includes('critical') || severity.includes('🔴')) counts.critical++;
-        else if (severity.includes('high') || severity.includes('🟠')) counts.high++;
-        else if (severity.includes('medium') || severity.includes('🟡')) counts.medium++;
-        else if (severity.includes('low') || severity.includes('🟢')) counts.low++;
+        const sev = columns[1].toLowerCase();
+
+        // Text label takes priority over emoji color
+        if (sev.includes('critical')) counts.critical++;
+        else if (sev.includes('high')) counts.high++;
+        else if (sev.includes('medium')) counts.medium++;
+        else if (sev.includes('low')) counts.low++;
+        // Emoji-only fallback (when no text label present)
+        else if (sev.includes('🔴')) counts.critical++;
+        else if (sev.includes('🟠')) counts.high++;
+        else if (sev.includes('🟡')) counts.medium++;
+        else if (sev.includes('🟢')) counts.low++;
     }
 
     if (!dataLineFound) {
