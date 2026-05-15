@@ -1,0 +1,498 @@
+﻿diff --git a/cli/proxima-review.cjs b/cli/proxima-review.cjs
+index 206935e..24da164 100644
+--- a/cli/proxima-review.cjs
++++ b/cli/proxima-review.cjs
+@@ -21,6 +21,11 @@ const { execSync, spawn } = require('child_process');
+ const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
+ const IPC_HOST = '127.0.0.1';
+ 
++const SKIP_REVIEW = process.env.PROXIMA_SKIP_REVIEW === '1';
++const SKIP_BRANCH_PREFIX = 'proxima/fix-';
++const SKIP_COMMIT_MARKER = '[proxima-auto-fix]';
++
++
+ // ΓöÇΓöÇΓöÇ Hybrid model config ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+ // Change REVIEW_MODEL to switch providers. Prefix determines routing:
+ //   'gpt-*'              ΓåÆ chatgpt   (e.g. 'gpt-5-5-thinking', 'gpt-4o')
+@@ -233,23 +238,44 @@ function getDiff(sha) {
+     }
+ }
+ 
+-function logToFile(msg) {
++function logToFile(msg, dir) {
+     try {
+-        if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+-        const logFile = path.join(REVIEW_DIR, 'background.log');
++        const targetDir = dir || REVIEW_DIR;
++        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
++        const logFile = path.join(targetDir, 'background.log');
+         fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+     } catch { }
+ }
+ 
++function writeSkipStatus(shortSha, reason, dir) {
++    try {
++        const targetDir = dir || REVIEW_DIR;
++        if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
++        const skipFile = path.join(targetDir, `skip-${shortSha}.json`);
++        fs.writeFileSync(skipFile, JSON.stringify({ status: "skipped", reason }, null, 2), 'utf8');
++    } catch { }
++}
++
++
++
+ // ΓöÇΓöÇΓöÇ Review runner ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+-async function runReview(commitRef) {
++async function runReview(commitRef, options = {}) {
+     const isBg = process.env.PROXIMA_BACKGROUND_REVIEW === '1';
++    const outputDir = options.outputDir || REVIEW_DIR;
++    const force = options.force === true;
++    
+     const log = (msg) => {
+         console.log(msg);
+-        if (isBg) logToFile(msg);
++        if (isBg) logToFile(msg, outputDir);
+     };
+ 
+-    log(cyan('≡ƒñû') + ' Starting ' + PROVIDER_LABEL + ' code review for: ' + yellow(commitRef));
++    if (SKIP_REVIEW && !force) {
++        log(yellow('ΓÅ¡') + ' Skipping review (PROXIMA_SKIP_REVIEW=1)');
++        writeSkipStatus(commitRef, 'PROXIMA_SKIP_REVIEW=1', outputDir);
++        return;
++    }
++
++
+ 
+     let info;
+     try {
+@@ -260,6 +286,25 @@ async function runReview(commitRef) {
+     }
+ 
+     const { sha, shortSha, msg, author, date } = info;
++
++    // Skip rules
++    try {
++        const branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim();
++        if (branch.startsWith(SKIP_BRANCH_PREFIX) && !force) {
++            log(yellow('ΓÅ¡') + ' Skipping bot branch: ' + branch);
++            writeSkipStatus(shortSha, 'bot-branch', outputDir);
++            return;
++        }
++    } catch { }
++
++    if (msg.includes(SKIP_COMMIT_MARKER) && !force) {
++        log(yellow('ΓÅ¡') + ' Skipping auto-fix commit: ' + shortSha);
++        writeSkipStatus(shortSha, 'auto-fix-commit', outputDir);
++        return;
++    }
++
++
++
+     log(cyan('≡ƒôï') + ' Commit: ' + shortSha + ' ΓÇö ' + dim(msg.split('\n')[0]));
+ 
+     // Skip maintenance/chore commits to save Perplexity quota
+@@ -269,15 +314,31 @@ async function runReview(commitRef) {
+     }
+ 
+     // Check if review already exists (in root or resolved folder)
+-    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+-    const exists = fs.existsSync(path.join(REVIEW_DIR, shortSha + '.md')) ||
+-        fs.existsSync(path.join(REVIEW_DIR, 'resolved', shortSha + '.md'));
++    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
++    
++    // Determine filename
++    const isCanonical = outputDir.endsWith(shortSha) || outputDir.endsWith(shortSha + '/');
++    let reviewFile;
++    if (options.fileName) {
++        reviewFile = path.join(outputDir, options.fileName);
++    } else {
++        // If outputDir is the canonical /root/review/<shortSha>/, use review.md
++        reviewFile = isCanonical 
++            ? path.join(outputDir, 'review.md')
++            : path.join(outputDir, shortSha + '.md');
++    }
+ 
+-    if (exists) {
++
++    const resolvedFile = path.join(outputDir, 'resolved', shortSha + '.md');
++    
++    if ((fs.existsSync(reviewFile) || fs.existsSync(resolvedFile)) && !force) {
+         log(yellow('ΓÅ¡') + '  Review already exists for ' + shortSha + ', skipping');
+         return;
+     }
+ 
++
++
++
+     try {
+         await acquireLockWithRetry(sha, log);
+     } catch (e) {
+@@ -286,9 +347,8 @@ async function runReview(commitRef) {
+     }
+     log(cyan('≡ƒöÆ') + ' Lock acquired');
+ 
+-    const reviewFile = path.join(REVIEW_DIR, shortSha + '.md');
+-
+     const diff = getDiff(sha);
++
+     if (diff === '__TOO_LARGE__') {
+         log(yellow('ΓÅ¡') + ' Skipping ' + shortSha + ': diff is too large (> 2MB)');
+         releaseLock();
+@@ -386,13 +446,23 @@ ${response}`;
+     } catch (e) {
+         log(red('Γ¥î') + ' Review failed: ' + e.message);
+ 
+-        const errorFile = path.join(REVIEW_DIR, 'error-' + shortSha + '.md');
++        let errorFile;
++        if (options.fileName) {
++            errorFile = path.join(outputDir, 'error-' + options.fileName);
++        } else {
++            errorFile = isCanonical
++                ? path.join(outputDir, 'review-error.md')
++                : path.join(outputDir, 'error-' + shortSha + '.md');
++        }
++
++            
+         fs.writeFileSync(errorFile,
+             `---\ncommit: ${sha}\nshort_sha: ${shortSha}\nauthor: ${author}\ndate: ${date}\nmessage: ${JSON.stringify(msg)}\nerror: ${e.message}\nerror_at: ${new Date().toISOString()}\n---\n\n# Review Failed\n\n**Error:** ${e.message}\n`,
+             'utf8'
+         );
+         log(cyan('≡ƒôä') + ' Error saved ΓåÆ ' + yellow(errorFile));
+     } finally {
++
+         releaseLock();
+         log(cyan('≡ƒöô') + ' Lock released');
+     }
+@@ -513,4 +583,13 @@ async function main() {
+     }
+ }
+ 
+-main();
+\ No newline at end of file
++if (require.main === module) {
++    main();
++}
++
++module.exports = {
++    runReview,
++    getCommitInfo,
++    getDiff,
++    queryAI
++};
+\ No newline at end of file
+diff --git a/scripts/proxima-loop.cjs b/scripts/proxima-loop.cjs
+new file mode 100644
+index 0000000..3208fca
+--- /dev/null
++++ b/scripts/proxima-loop.cjs
+@@ -0,0 +1,310 @@
++const fs = require('fs');
++const path = require('path');
++const { loadConfig } = require('./lib/config.cjs');
++const git = require('./lib/git-utils.cjs');
++const parser = require('./lib/review-parser.cjs');
++const { askProxima } = require('./lib/proxima-client.cjs');
++const { validatePatchText, rejectDangerousPaths, rejectScriptExecution } = require('./lib/safety.cjs');
++
++// Import the existing review logic
++const { runReview } = require('../cli/proxima-review.cjs');
++
++async function main() {
++    const config = loadConfig();
++    const args = process.argv.slice(2);
++    
++    const pushRequested = args.includes('--push') || config.pushBotBranches;
++    const prRequested = args.includes('--create-pr') || config.createPullRequest;
++    const allowDirty = args.includes('--allow-dirty');
++
++    git.ensureInsideGitRepo();
++    
++    const originalHeadSha = git.getHeadSha();
++    const shortSha = git.getShortSha(originalHeadSha);
++    const sourceBranch = git.getCurrentBranch();
++    const commitMsg = git.getCommitMessage(originalHeadSha);
++
++    if (git.isProtectedBranch(sourceBranch, config.protectedBranches)) {
++        console.error(`Γ¥î Refusing to run on protected branch: ${sourceBranch}`);
++        process.exit(1);
++    }
++
++    if (!allowDirty && !git.ensureCleanWorkingTree()) {
++        console.error('Γ¥î Working tree is dirty. Commit your changes or use --allow-dirty.');
++        process.exit(1);
++    }
++
++    if (git.isBotCommit(commitMsg, config.skipReviewCommitMarkers)) {
++        console.log('ΓÅ¡ Skipping bot commit.');
++        process.exit(0);
++    }
++
++    if (git.isBotBranch(sourceBranch, config.repairBranchPrefix)) {
++        console.log('ΓÅ¡ Skipping bot branch.');
++        process.exit(0);
++    }
++
++    const sessionDir = path.join(config.reviewDir, shortSha);
++    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
++
++    let status = {
++        commit: originalHeadSha,
++        shortSha: shortSha,
++        sourceBranch: sourceBranch,
++        botBranch: null,
++        status: "starting",
++        iteration: 0,
++        testsPassed: false,
++        patchApplied: false,
++        branchPushed: false,
++        prCreated: false,
++        error: null,
++        recoveryInstructions: "To recover, checkout your source branch: git checkout " + sourceBranch
++    };
++
++    const updateStatus = (updates) => {
++        status = { ...status, ...updates };
++        fs.writeFileSync(path.join(sessionDir, 'status.json'), JSON.stringify(status, null, 2), 'utf8');
++    };
++
++    updateStatus({});
++
++    let currentSha = originalHeadSha;
++    let iteration = 1;
++    const maxIterations = config.maxIterations || 3;
++    let botBranchCreated = false;
++    let botBranchName = '';
++
++    while (iteration <= maxIterations) {
++        console.log(`\n≡ƒöä Iteration ${iteration}/${maxIterations}...`);
++        updateStatus({ iteration });
++        
++        // 1. Run Review
++        const iterReviewDir = path.join(sessionDir, 'reviews', `iter-${iteration}`);
++        if (!fs.existsSync(iterReviewDir)) fs.mkdirSync(iterReviewDir, { recursive: true });
++        
++        console.log(`≡ƒñû Running Proxima review for ${git.getShortSha(currentSha)}...`);
++        // Use force: true to bypass bot skip rules during intentional re-reviews
++        // Use fileName: "review.md" for deterministic output
++        await runReview(currentSha, { outputDir: iterReviewDir, force: true, fileName: "review.md" });
++        
++        const reviewFile = path.join(iterReviewDir, 'review.md');
++        if (!fs.existsSync(reviewFile)) {
++            const err = 'Review file was not generated.';
++            console.error(`Γ¥î ${err}`);
++            updateStatus({ status: "proxima-unavailable", error: err });
++            process.exit(1);
++        }
++
++        const reviewContent = fs.readFileSync(reviewFile, 'utf8');
++        const counts = parser.parseSeverityCounts(reviewContent);
++        const score = parser.parseScore(reviewContent);
++
++        console.log(`≡ƒôè Score: ${score}/10 | Critical: ${counts.critical} | High: ${counts.high}`);
++
++        updateStatus({
++            score,
++            critical: counts.critical,
++            high: counts.high,
++            medium: counts.medium,
++            low: counts.low
++        });
++
++        // 2. Check if clean (if tests passed in previous iteration and now review is clean)
++        console.log('≡ƒº¬ Running tests...');
++        let testsPassed = true;
++        const testLogPath = path.join(iterReviewDir, 'tests.log');
++        
++        for (const cmd of config.testCommands) {
++            const [baseCmd, ...cmdArgs] = cmd.split(' ');
++            const res = git.runCommand(baseCmd, cmdArgs);
++            fs.appendFileSync(testLogPath, (res.stdout + res.stderr) || 'No output', 'utf8');
++            if (!res.success) {
++                testsPassed = false;
++                if (config.stopOnTestFailure) break;
++            }
++        }
++        updateStatus({ testsPassed });
++
++        if (testsPassed && counts.critical === 0 && counts.high === 0) {
++            console.log('Γ£à Clean state reached (Tests pass, no Critical/High findings).');
++            updateStatus({ status: "clean" });
++            
++            if (botBranchCreated && pushRequested) {
++                console.log(`≡ƒÜÇ Pushing branch ${botBranchName}...`);
++                const pushRes = git.pushBranch(botBranchName);
++                if (pushRes.success) {
++                    updateStatus({ branchPushed: true });
++                } else {
++                    console.error(`ΓÜá∩╕Å Push failed: ${pushRes.stderr}`);
++                    updateStatus({ error: pushRes.stderr });
++                }
++            }
++
++            if (botBranchCreated && prRequested) {
++                await createPR(botBranchName, shortSha, originalHeadSha, sourceBranch, score, counts, sessionDir, config, updateStatus);
++            }
++
++            process.exit(0);
++        }
++
++        // 3. Generate Repair
++        console.log(`≡ƒ¢á Attempting repair (Iteration ${iteration})...`);
++        const repairDir = path.join(iterReviewDir, 'repair');
++        if (!fs.existsSync(repairDir)) fs.mkdirSync(repairDir, { recursive: true });
++
++        const prompt = `You are an expert software engineer. Based on the following code review and the original diff, generate a unified diff patch to fix the Critical and High findings.
++
++RULES:
++1. Output ONLY a valid git-compatible unified diff.
++2. NO markdown fences (e.g., \`\`\`diff).
++3. NO prose, explanations, or introductory text.
++4. NO shell scripts, PowerShell, or Bash commands.
++5. Fix ONLY the issues identified in the review.
++6. Ensure the patch is compatible with 'git apply'.
++
++--- REVIEW ---
++${reviewContent}
++
++--- ORIGINAL DIFF ---
++${git.runCommand('git', ['show', '--no-color', currentSha]).stdout}
++
++PATCH:`;
++
++        fs.writeFileSync(path.join(repairDir, 'repair.prompt.txt'), prompt, 'utf8');
++
++        try {
++            const patch = await askProxima(prompt, config.repairModel, config.baseUrl);
++            validatePatchText(patch);
++            rejectDangerousPaths(patch, config.gitRoot);
++            rejectScriptExecution(patch);
++
++            const patchPath = path.join(repairDir, 'fix.patch');
++            fs.writeFileSync(patchPath, patch, 'utf8');
++
++            // 4. Branch and Apply
++            if (!botBranchCreated) {
++                botBranchName = `${config.repairBranchPrefix}-${shortSha}-iter-${iteration}`;
++                console.log(`≡ƒî┐ Creating branch ${botBranchName}...`);
++                const branchRes = git.createBranch(botBranchName);
++                if (!branchRes.success) {
++                    console.error(`Γ¥î Failed to create branch: ${branchRes.stderr}`);
++                    updateStatus({ 
++                        status: "branch-creation-failed", 
++                        error: branchRes.stderr,
++                        recoveryInstructions: `Branch creation failed. You are likely still on '${sourceBranch}'. Check stderr for details.`
++                    });
++                    process.exit(1);
++                }
++                botBranchCreated = true;
++                updateStatus({ botBranch: botBranchName, recoveryInstructions: `Repair in progress. To reset, git checkout ${sourceBranch} && git branch -D ${botBranchName}` });
++            }
++
++            console.log('≡ƒöì Validating patch (git apply --check)...');
++            const checkRes = git.applyPatchCheck(patchPath);
++            if (!checkRes.success) {
++                console.error(`Γ¥î Patch validation failed: ${checkRes.stderr}`);
++                fs.writeFileSync(path.join(repairDir, 'apply.log'), `Validation failed:\n${checkRes.stderr}`, 'utf8');
++                updateStatus({ status: "patch-check-failed", error: checkRes.stderr });
++                break;
++            }
++
++            console.log('≡ƒ⌐╣ Applying patch...');
++            const applyRes = git.applyPatch(patchPath);
++            fs.writeFileSync(path.join(repairDir, 'apply.log'), (applyRes.stdout + applyRes.stderr) || 'Applied successfully', 'utf8');
++            
++            if (!applyRes.success) {
++                console.error(`Γ¥î Patch application failed: ${applyRes.stderr}`);
++                updateStatus({ status: "patch-apply-failed", error: applyRes.stderr });
++                break;
++            }
++            updateStatus({ patchApplied: true });
++
++            // 5. Test Repair before committing
++            console.log('≡ƒº¬ Running tests on repair...');
++            let repairTestsPassed = true;
++            const repairTestLogPath = path.join(repairDir, 'repair_tests.log');
++            
++            for (const cmd of config.testCommands) {
++                const [baseCmd, ...cmdArgs] = cmd.split(' ');
++                const res = git.runCommand(baseCmd, cmdArgs);
++                fs.appendFileSync(repairTestLogPath, (res.stdout + res.stderr) || 'No output', 'utf8');
++                if (!res.success) {
++                    repairTestsPassed = false;
++                    if (config.stopOnTestFailure) break;
++                }
++            }
++
++            if (!repairTestsPassed) {
++                console.error('Γ¥î Tests failed after repair.');
++                updateStatus({ 
++                    status: "repair-tests-failed", 
++                    error: "Tests failed after applying patch.",
++                    recoveryInstructions: `The failed patch remains UNCOMMITTED on branch '${botBranchName}' for your inspection. Inspect changes with git diff. To discard: git checkout -- . && git clean -fd && git checkout ${sourceBranch}`
++                });
++                break; 
++            }
++
++            console.log('≡ƒô¥ Committing fix...');
++            const commitRes = git.commitAll(`fix: address Proxima review ${shortSha} [proxima-auto-fix]`);
++            if (!commitRes.success) {
++                console.error(`Γ¥î Commit failed: ${commitRes.stderr}`);
++                updateStatus({ status: "commit-failed", error: commitRes.stderr });
++                break;
++            }
++
++            currentSha = git.getHeadSha();
++            console.log(`Γ£à Repair committed: ${git.getShortSha(currentSha)}`);
++
++        } catch (e) {
++            console.error(`Γ¥î Repair failed: ${e.message}`);
++            updateStatus({ status: "error", error: e.message });
++            break;
++        }
++
++        iteration++;
++    }
++
++    if (iteration > maxIterations) {
++        console.log('ΓÅ╣ Max iterations reached.');
++        updateStatus({ status: "max-iterations-reached" });
++    }
++}
++
++async function createPR(botBranch, shortSha, originalSha, sourceBranch, score, counts, sessionDir, config, updateStatus) {
++    console.log('≡ƒô¥ Creating Pull Request...');
++    const prBody = `
++Proxima auto-fix for ${shortSha}
++
++- Reviewed commit: ${originalSha}
++- Source branch: ${sourceBranch}
++- Bot branch: ${botBranch}
++- Score: ${score}/10
++- Critical: ${counts.critical}
++- High: ${counts.high}
++- Test results: Passed
++
++Note: This patch was AI-generated and applied after \`git apply --check\`.
++Local review folder: ${sessionDir}
++`;
++    const bodyFile = path.join(sessionDir, 'pr-body.txt');
++    fs.writeFileSync(bodyFile, prBody, 'utf8');
++
++    const prRes = git.createPullRequest({
++        title: `Proxima auto-fix for ${shortSha}`,
++        bodyFile: bodyFile,
++        labels: config.pullRequestLabels,
++        draft: config.pullRequestDraft
++    });
++
++    if (prRes.success) {
++        console.log('Γ£à PR created.');
++        updateStatus({ prCreated: true });
++    } else {
++        console.error(`ΓÜá∩╕Å PR creation failed: ${prRes.stderr}`);
++    }
++}
++
++if (require.main === module) {
++    main();
++}

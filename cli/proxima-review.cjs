@@ -525,20 +525,21 @@ function spawnBackground(sha) {
     const logFile = path.join(REVIEW_DIR, 'background.log');
     const out = fs.openSync(logFile, 'a');
 
+    const loopScript = path.join(gitRoot, 'scripts/proxima-loop.cjs');
+
     let child;
     if (isWin) {
-        // On Windows, 'windowsHide' is ignored when 'detached: true' is set for console apps.
-        // Using 'cmd.exe /c start /b' is the standard way to run a truly detached 
-        // background process that suppresses a new console window.
-        child = spawn('cmd.exe', ['/c', 'start', '""', '/b', process.execPath, __filename, sha], {
+        // On Windows, pop up a visible PowerShell window. 
+        // It stays open for 5 minutes after finishing, then auto-closes.
+        child = spawn('powershell.exe', [
+            '-NoProfile', '-Command', 
+            `Start-Process powershell -ArgumentList "-Command", "node ${loopScript}; Write-Host '--- Automation Finished. Window will auto-close in 5 minutes. ---'; Start-Sleep -s 300; Exit"`
+        ], {
             detached: true,
-            stdio: ['ignore', out, out],
-            cwd: gitRoot,
-            env: cleanEnv,
-            windowsHide: true
+            stdio: 'ignore'
         });
     } else {
-        child = spawn(process.execPath, [__filename, sha], {
+        child = spawn(process.execPath, [loopScript], {
             detached: true,
             stdio: ['ignore', out, out],
             cwd: gitRoot,

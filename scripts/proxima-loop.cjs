@@ -16,6 +16,12 @@ const { runReview } = require('../cli/proxima-review.cjs');
 
 let globalSessionDir = null;
 
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const green = (s) => `\x1b[32m${s}\x1b[0m`;
+const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
+const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
+const dim = (s) => `\x1b[2m${s}\x1b[22m`;
+
 async function main() {
     const config = loadConfig();
     const args = process.argv.slice(2);
@@ -51,9 +57,12 @@ async function main() {
     };
 
     const log = (msg) => {
-        console.log(msg);
+        process.stdout.write(`[${new Date().toLocaleTimeString()}] ${msg}\n`);
         fs.appendFileSync(path.join(sessionDir, 'loop.log'), `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
     };
+
+    log(`🚀 Proxima Automation Loop Initiated for ${shortSha}`);
+    log(`📂 Session directory: ${sessionDir}`);
 
     const updateStatus = (updates) => {
         status = { ...status, ...updates };
@@ -148,6 +157,9 @@ async function main() {
             
             const options = { timeout, shell: typeof testCmd === 'string' };
             const res = git.runCommand(cmdStr, cmdArgs, options);
+            
+            if (res.stdout) log(dim(res.stdout));
+            if (res.stderr) log(red(res.stderr));
             
             const logEntry = `\n--- Command: ${cmdStr} ${cmdArgs.join(' ')} ---\n` + (res.stdout + res.stderr) || 'No output';
             fs.appendFileSync(testLogPath, logEntry, 'utf8');
@@ -315,6 +327,9 @@ PATCH:`;
                 const options = { timeout, shell: typeof testCmd === 'string' };
                 const res = git.runCommand(cmdStr, cmdArgs, options);
                 
+                if (res.stdout) log(dim(res.stdout));
+                if (res.stderr) log(red(res.stderr));
+
                 const logEntry = `\n--- Command: ${cmdStr} ${cmdArgs.join(' ')} ---\n` + (res.stdout + res.stderr) || 'No output';
                 fs.appendFileSync(repairTestLogPath, logEntry, 'utf8');
                 
