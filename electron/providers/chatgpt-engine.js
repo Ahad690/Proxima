@@ -8,8 +8,8 @@
     if (window.__proximaChatGPT) return;
 
     var CHATGPT_BASE = 'https://chatgpt.com';
-    var CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/conversation';
-    var CHATGPT_ALT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
+    var CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
+    var CHATGPT_ALT_CONVERSATION_ENDPOINT = '/backend-api/conversation';
     var CHATGPT_PREPARE_ENDPOINT = '/backend-api/f/conversation/prepare';
     var TIMEOUT = 360000;
 
@@ -212,13 +212,69 @@
         return result;
     }
 
+    function _extractAssistantTextFromMessage(message) {
+        if (!message || !message.author || message.author.role !== 'assistant') return '';
+        var content = message.content || {};
+        if (Array.isArray(content.parts) && content.parts.length > 0) {
+            return content.parts.join('');
+        }
+        if (typeof content.text === 'string') return content.text;
+        if (Array.isArray(content.text) && content.text.length > 0) {
+            return content.text.join('');
+        }
+        return '';
+    }
+
+    function _extractAssistantDelta(parsed) {
+        if (!parsed || typeof parsed !== 'object') return '';
+        if (typeof parsed.delta === 'string') return parsed.delta;
+        if (parsed.delta && typeof parsed.delta.text === 'string') return parsed.delta.text;
+        if (typeof parsed.text === 'string') return parsed.text;
+        if (parsed.message_delta && typeof parsed.message_delta === 'string') return parsed.message_delta;
+        return '';
+    }
+
     // ─── SSE Stream Parser ──────────────────────────
 
     async function _parseSSEStream(response) {
         var reader = response.body.getReader();
         var decoder = new TextDecoder();
         var fullText = '';
+        var streamText = '';
         var buffer = '';
+        var sawAssistantEvent = false;
+
+        function processLine(line) {
+            if (!line.startsWith('data: ')) return;
+            var data = line.slice(6).trim();
+            if (!data || data === '[DONE]') return;
+
+            try {
+                var parsed = JSON.parse(data);
+
+                // Persist conversation context for follow-up messages
+                if (parsed.conversation_id) {
+                    _conversationId = parsed.conversation_id;
+                }
+
+                if (parsed.message && parsed.message.id) {
+                    _parentMessageId = parsed.message.id;
+                }
+
+                var assistantText = _extractAssistantTextFromMessage(parsed.message);
+                if (assistantText) {
+                    fullText = assistantText;
+                    sawAssistantEvent = true;
+                }
+
+                // Some ChatGPT responses stream deltas rather than full parts snapshots.
+                var deltaText = _extractAssistantDelta(parsed);
+                if (deltaText) {
+                    streamText += deltaText;
+                    sawAssistantEvent = true;
+                }
+            } catch (e) {}
+        }
 
         while (true) {
             var chunk = await reader.read();
@@ -229,33 +285,63 @@
             buffer = lines.pop() || '';
 
             for (var i = 0; i < lines.length; i++) {
-                var line = lines[i];
-                if (!line.startsWith('data: ')) continue;
-                var data = line.slice(6).trim();
-                if (data === '[DONE]') continue;
-
-                try {
-                    var parsed = JSON.parse(data);
-
-                    // Persist conversation context for follow-up messages
-                    if (parsed.conversation_id) {
-                        _conversationId = parsed.conversation_id;
-                    }
-
-                    var parts = parsed && parsed.message && parsed.message.content && parsed.message.content.parts;
-                    if (parts && parts.length > 0 && parsed.message.author && parsed.message.author.role === 'assistant') {
-                        fullText = parts.join('');
-
-                        if (parsed.message.id) {
-                            _parentMessageId = parsed.message.id;
-                        }
-                    }
-                } catch(e) {}
+                processLine(lines[i]);
             }
         }
 
+        // Process trailing partial line if the stream ended without newline.
+        if (buffer && buffer.indexOf('data: ') === 0) processLine(buffer);
         reader.releaseLock();
-        return fullText;
+        if (fullText) return fullText;
+        if (streamText) return streamText;
+        return sawAssistantEvent ? streamText : '';
+    }
+
+    function _conversationFetchOptions(headers, payload, signal) {
+        return {
+            method: 'POST',
+            credentials: 'include',
+            headers: headers,
+            body: JSON.stringify(payload),
+            signal: signal
+        };
+    }
+
+    function _isJsonResponse(res) {
+        var contentType = (res && res.headers && res.headers.get('content-type')) || '';
+        return contentType.toLowerCase().indexOf('application/json') === 0;
+    }
+
+    function _shouldTryAlternateConversationEndpoint(res) {
+        if (!res) return true;
+        // Keep token-refresh path intact.
+        if (res.status === 401) return false;
+        if (!res.ok) return true;
+        // If primary endpoint returns JSON, alternate endpoint often carries SSE.
+        return _isJsonResponse(res);
+    }
+
+    async function _cancelResponseBody(res) {
+        try {
+            if (res && res.body && typeof res.body.cancel === 'function') {
+                await res.body.cancel();
+            }
+        } catch (e) {}
+    }
+
+    async function _fetchConversationWithFallback(headers, payload, signal) {
+        var res = await fetch(
+            CHATGPT_CONVERSATION_ENDPOINT,
+            _conversationFetchOptions(headers, payload, signal)
+        );
+        if (_shouldTryAlternateConversationEndpoint(res)) {
+            await _cancelResponseBody(res);
+            res = await fetch(
+                CHATGPT_ALT_CONVERSATION_ENDPOINT,
+                _conversationFetchOptions(headers, payload, signal)
+            );
+        }
+        return res;
     }
 
     function _resolveThinkingEffort(options, model) {
@@ -371,22 +457,7 @@
         var controller = new AbortController();
         var timeoutId = setTimeout(function() { controller.abort(); }, TIMEOUT);
 
-        var res = await fetch(CHATGPT_CONVERSATION_ENDPOINT, {
-            method: 'POST',
-            credentials: 'include',
-            headers: headers,
-            body: JSON.stringify(payload),
-            signal: controller.signal
-        });
-        if (res.status === 404) {
-            res = await fetch(CHATGPT_ALT_CONVERSATION_ENDPOINT, {
-                method: 'POST',
-                credentials: 'include',
-                headers: headers,
-                body: JSON.stringify(payload),
-                signal: controller.signal
-            });
-        }
+        var res = await _fetchConversationWithFallback(headers, payload, controller.signal);
 
         // Token expired — refresh and retry once
         if (res.status === 401) {
@@ -394,22 +465,7 @@
             headers['Authorization'] = 'Bearer ' + newToken;
             var retryController = new AbortController();
             var retryTimeoutId = setTimeout(function() { retryController.abort(); }, TIMEOUT);
-            res = await fetch(CHATGPT_CONVERSATION_ENDPOINT, {
-                method: 'POST',
-                credentials: 'include',
-                headers: headers,
-                body: JSON.stringify(payload),
-                signal: retryController.signal
-            });
-            if (res.status === 404) {
-                res = await fetch(CHATGPT_ALT_CONVERSATION_ENDPOINT, {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: headers,
-                    body: JSON.stringify(payload),
-                    signal: retryController.signal
-                });
-            }
+            res = await _fetchConversationWithFallback(headers, payload, retryController.signal);
             if (!res.ok) {
                 clearTimeout(retryTimeoutId);
                 var err = await res.text().catch(function() { return ''; });
