@@ -94,6 +94,33 @@ function testSafetyValidator() {
         if (!e.message.includes('Package lifecycle script modification detected')) throw e;
     }
 
+    // 4. Reject actual OpenAI Begin Patch wrapper format
+    const beginPatchFormat = `
+*** Begin Patch
+*** Update File: scripts/lib/safety.cjs
+@@ -1,1 +1,1 @@
+-old
++new
+*** End Patch
+`;
+    try {
+        safety.validatePatchText(beginPatchFormat);
+        throw new Error('Should have blocked OpenAI Begin Patch wrapper format');
+    } catch (e) {
+        if (!e.message.includes('Response uses OpenAI *** Begin Patch format')) throw e;
+    }
+
+    // 5. Do not false-positive when a diff line merely contains the marker text
+    const quotedMarkerInDiff = `
+diff --git a/scripts/lib/safety.cjs b/scripts/lib/safety.cjs
+--- a/scripts/lib/safety.cjs
++++ b/scripts/lib/safety.cjs
+@@ -1,1 +1,1 @@
+-const msg = "old";
++const msg = "Response uses OpenAI *** Begin Patch format.";
+`;
+    safety.validatePatchText(quotedMarkerInDiff);
+
     console.log('✅ Safety Validator tests passed.');
 }
 

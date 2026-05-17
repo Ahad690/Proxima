@@ -1,8 +1,15 @@
 const path = require('path');
 
 function validatePatchText(patchText) {
-    // Reject OpenAI's *** Begin Patch format (not a standard unified diff)
-    if (patchText.includes('*** Begin Patch') || patchText.includes('*** End Patch')) {
+    // Reject OpenAI patch-wrapper marker lines (not standard unified diff).
+    // Match markers only when they appear as standalone lines, so code/comments
+    // that merely mention "*** Begin Patch" are not falsely rejected.
+    const patchWrapperMarkers = [
+        /^\*\*\* Begin Patch$/m,
+        /^\*\*\* End Patch$/m,
+        /^\*\*\* (Add|Update|Delete) File:/m,
+    ];
+    if (patchWrapperMarkers.some((pattern) => pattern.test(patchText))) {
         throw new Error('Response uses OpenAI *** Begin Patch format — not a valid unified diff. Retry with explicit prompt.');
     }
 

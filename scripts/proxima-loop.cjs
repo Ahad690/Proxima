@@ -325,6 +325,7 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
                 rejectScriptExecution(rawPatch, config);
                 rejectPackageJsonScripts(rawPatch, config);
             } catch (validationErr) {
+                log(`❌ Patch rejected by validator: ${validationErr.message}`);
                 fs.writeFileSync(path.join(repairDir, 'rejected-output.txt'), rawPatch, 'utf8');
                 fs.writeFileSync(path.join(repairDir, 'validation-error.txt'), validationErr.message, 'utf8');
                 updateStatus({ 
