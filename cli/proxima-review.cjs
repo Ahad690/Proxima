@@ -40,7 +40,7 @@ const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || automationConfig.reviewDir 
 
 function resolveProvider(model) {
     const m = model.toLowerCase();
-    if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
+    if (m === 'chatgpt' || m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
     return 'perplexity';
 }
 

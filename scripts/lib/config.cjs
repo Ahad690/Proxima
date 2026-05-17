@@ -15,7 +15,7 @@ const DEFAULT_CONFIG = {
     baseUrl: "http://localhost:3210",
 
 
-    reviewModel: "chatgpt",
+    reviewModel: "gpt-5-5-thinking",
     repairModel: "claude",
     maxIterations: 3,
     pushBotBranches: false,

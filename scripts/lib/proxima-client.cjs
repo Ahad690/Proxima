@@ -11,7 +11,7 @@ const IPC_HOST = '127.0.0.1';
 function resolveProvider(model) {
     if (!model) return 'chatgpt';
     const m = model.toLowerCase();
-    if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
+    if (m === 'chatgpt' || m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
     return 'perplexity';
 }
 

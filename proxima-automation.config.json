@@ -1,7 +1,7 @@
 {
   "reviewDir": "perplexity-reviews",
   "baseUrl": "http://localhost:3210",
-  "reviewModel": "chatgpt",
+  "reviewModel": "gpt-5-5-thinking",
   "repairModel": "gpt-5-5-thinking",
   "maxIterations": 3,
   "pushBotBranches": false,
