@@ -51,6 +51,15 @@ function resolveThinkingEffort(model) {
     return m.includes('thinking') ? 'extended' : 'standard';
 }
 
+function normalizePromptText(text) {
+    return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function isPlaceholderResponse(text) {
+    const t = String(text || '').trim().toLowerCase();
+    return !t || t === 'no response captured' || t === 'no response received';
+}
+
 const PROVIDER_DISPLAY = {
     'chatgpt': 'ChatGPT',
     'perplexity': 'Perplexity',
@@ -149,8 +158,9 @@ function queryAI(message, model, provider) {
         let buffer = '';
         let state = 'waitingSendAck';
         let reqId = 0;
+        let captureRequestId = null;
 
-        socket.setTimeout(600000); // 10 min max
+        socket.setTimeout(1800000); // 30 min max
 
         function ipcSend(action, data) {
             reqId++;
@@ -188,14 +198,22 @@ function queryAI(message, model, provider) {
                             return;
                         }
                         state = 'waitingResponse';
-                        ipcSend('getResponseWithTyping', {});
+                        captureRequestId = ipcSend('getResponseWithTyping', {});
 
-                    } else if (state === 'waitingResponse' && resp.requestId === 2) {
+                    } else if (state === 'waitingResponse' && resp.requestId === captureRequestId) {
+                        const text = resp.response || '';
+
+                        if (isPlaceholderResponse(text)) {
+                            setTimeout(() => {
+                                captureRequestId = ipcSend('getResponseWithTyping', {});
+                            }, 2500);
+                            continue;
+                        }
+
                         state = 'done';
                         socket.end();
-                        const text = resp.response || '';
-                        if (!text) {
-                            reject(new Error(provider + ' returned empty response'));
+                        if (isPlaceholderResponse(text)) {
+                            reject(new Error(provider + ' response capture failed'));
                         } else {
                             resolve(text);
                         }
@@ -212,7 +230,7 @@ function queryAI(message, model, provider) {
 
         socket.on('timeout', () => {
             socket.destroy();
-            reject(new Error('IPC request timed out after 10 minutes'));
+            reject(new Error('IPC request timed out after 30 minutes'));
         });
     });
 }
@@ -368,6 +386,9 @@ async function runReview(commitRef, options = {}) {
         return;
     }
 
+    const normalizedMsg = normalizePromptText(msg);
+    const normalizedDiff = normalizePromptText(diff);
+
     const prompt = `You are a hostile, adversarial code auditor with a mandate to find real bugs, not validate the author's intent.
 
 CRITICAL RULES — violating any of these makes your review useless:
@@ -381,11 +402,11 @@ CRITICAL RULES — violating any of these makes your review useless:
 Commit: ${shortSha}
 Author: ${author}
 Date:   ${date}
-Stated Intent (treat as unverified): "${msg}"
+Stated Intent (treat as unverified): "${normalizedMsg}"
 ---
 
 Diff to audit:
-${diff}
+${normalizedDiff}
 
 Answer these adversarial questions from the diff alone, ignoring the commit message:
 

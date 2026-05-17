@@ -108,13 +108,13 @@ class IPCClient {
 
             this.socket.write(JSON.stringify(request) + '\n');
 
-            // Timeout after 10 minutes
+            // Timeout after 30 minutes
             setTimeout(() => {
                 if (this.pendingRequests.has(requestId)) {
                     this.pendingRequests.delete(requestId);
                     reject(new Error('Request timeout'));
                 }
-            }, 600000);
+            }, 1800000);
         });
     }
 

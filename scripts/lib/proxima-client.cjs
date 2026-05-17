@@ -22,6 +22,11 @@ function resolveThinkingEffort(model, explicitEffort) {
     return m.includes('thinking') ? 'extended' : 'standard';
 }
 
+function isPlaceholderResponse(text) {
+    const t = String(text || '').trim().toLowerCase();
+    return !t || t === 'no response captured' || t === 'no response received';
+}
+
 /**
  * Send a prompt to Proxima via IPC and return the text response.
  * @param {string} message  - The full prompt text
@@ -38,8 +43,9 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
         let buffer = '';
         let state = 'waitingSendAck';
         let reqId = 0;
+        let captureRequestId = null;
 
-        socket.setTimeout(600000); // 10 min max
+        socket.setTimeout(1800000); // 30 min max
 
         function ipcSend(action, data) {
             reqId++;
@@ -75,17 +81,19 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
                             return;
                         }
                         state = 'waitingResponse';
-                        ipcSend('getResponseWithTyping', {});
+                        captureRequestId = ipcSend('getResponseWithTyping', {});
 
-                    } else if (state === 'waitingResponse' && resp.requestId === 2) {
+                    } else if (state === 'waitingResponse' && resp.requestId === captureRequestId) {
+                        const text = resp.response || '';
+                        if (isPlaceholderResponse(text)) {
+                            setTimeout(() => {
+                                captureRequestId = ipcSend('getResponseWithTyping', {});
+                            }, 2500);
+                            continue;
+                        }
                         state = 'done';
                         socket.end();
-                        const text = resp.response || '';
-                        if (!text) {
-                            reject(new Error(provider + ' returned empty response'));
-                        } else {
-                            resolve(text);
-                        }
+                        resolve(text);
                     }
                 } catch { /* ignore parse errors */ }
             }
@@ -99,7 +107,7 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
 
         socket.on('timeout', () => {
             socket.destroy();
-            reject(new Error('IPC request to Proxima timed out after 10 minutes'));
+            reject(new Error('IPC request to Proxima timed out after 30 minutes'));
         });
     });
 }

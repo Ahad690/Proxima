@@ -1586,7 +1586,7 @@ async function getProviderResponse(provider, customSelector = null) {
 
             if (typingDetected) {
                 console.log(`[getProviderResponse] ${provider}: AI still typing, waiting...`);
-                const maxTypingWait = (provider === 'claude' || provider === 'perplexity') ? 600 : 120;
+                const maxTypingWait = (provider === 'claude' || provider === 'perplexity' || provider === 'chatgpt' || provider === 'gemini') ? 1800 : 120;
                 let lastResponseSnap = '';
                 let stableResponseCount = 0;
                 for (let i = 0; i < maxTypingWait; i++) {
@@ -1636,7 +1636,7 @@ async function getProviderResponse(provider, customSelector = null) {
         let stableCount = 0;
         // Perplexity math/LaTeX renders in stages — need more stability checks
         const STABLE_THRESHOLD = provider === 'perplexity' ? 5 : 3;
-        const MAX_POLLS = (provider === 'claude' || provider === 'perplexity') ? 600 : 40;
+        const MAX_POLLS = (provider === 'claude' || provider === 'perplexity' || provider === 'chatgpt' || provider === 'gemini') ? 1800 : 40;
         let foundNewResponse = false;
 
 
