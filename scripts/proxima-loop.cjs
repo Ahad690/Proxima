@@ -3,7 +3,7 @@ const path = require('path');
 const { loadConfig } = require('./lib/config.cjs');
 const git = require('./lib/git-utils.cjs');
 const parser = require('./lib/review-parser.cjs');
-const { askProxima } = require('./lib/proxima-client.cjs');
+const { askProxima, resetProximaConversation } = require('./lib/proxima-client.cjs');
 const { 
     validatePatchText, 
     rejectDangerousPaths, 
@@ -244,7 +244,7 @@ async function main() {
 
         const score = parser.parseScore(reviewContent);
         const severityPolicy = getIterationSeverityPolicy(iteration);
-        log(`📊 Score: ${score}/10 | Critical: ${counts.critical} | High: ${counts.high}`);
+        log(`📊 Score: ${score}/10 | Critical: ${counts.critical} | High: ${counts.high} | Medium: ${counts.medium} | Low: ${counts.low}`);
         log(`🎯 Iteration ${iteration} target severities: ${severityPolicy.label}`);
 
         updateStatus({
@@ -369,7 +369,14 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
         fs.writeFileSync(path.join(repairDir, 'repair.prompt.txt'), prompt, 'utf8');
 
         try {
-            const rawPatch = normalizePatchText(await askProxima(prompt, config.repairModel, config.baseUrl));
+            try {
+                await resetProximaConversation(config.repairModel);
+                log(dim('🧹 Reset repair conversation state.'));
+            } catch (resetErr) {
+                log(dim(`⚠️ Could not reset repair conversation: ${resetErr.message}`));
+            }
+
+            let rawPatch = normalizePatchText(await askProxima(prompt, config.repairModel, config.baseUrl));
             fs.writeFileSync(path.join(repairDir, 'raw-output.txt'), rawPatch, 'utf8');
 
             try {
@@ -378,6 +385,31 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
                 rejectScriptExecution(rawPatch, config);
                 rejectPackageJsonScripts(rawPatch, config);
             } catch (validationErr) {
+                if (validationErr.message.includes('valid unified diff') || validationErr.message.includes('prose before') || validationErr.message.includes('markdown fences')) {
+                    log(`⚠️ Repair output was not a diff; retrying once with stricter patch-only prompt.`);
+                    const retryPrompt = `${prompt}
+
+Your previous response was rejected because it was not a unified diff. Return ONLY a git-compatible unified diff that starts with "diff --git". Do not repeat the review, do not explain the fix, and do not use markdown fences.`;
+                    try {
+                        await resetProximaConversation(config.repairModel);
+                    } catch { /* best effort */ }
+                    rawPatch = normalizePatchText(await askProxima(retryPrompt, config.repairModel, config.baseUrl));
+                    fs.writeFileSync(path.join(repairDir, 'raw-output-retry-1.txt'), rawPatch, 'utf8');
+
+                    try {
+                        validatePatchText(rawPatch);
+                        rejectDangerousPaths(rawPatch, config.gitRoot, config);
+                        rejectScriptExecution(rawPatch, config);
+                        rejectPackageJsonScripts(rawPatch, config);
+                        validationErr = null;
+                    } catch (retryValidationErr) {
+                        validationErr = retryValidationErr;
+                    }
+                }
+
+                if (!validationErr) {
+                    // Retry succeeded; continue with the validated rawPatch.
+                } else {
                 log(`❌ Patch rejected by validator: ${validationErr.message}`);
                 fs.writeFileSync(path.join(repairDir, 'rejected-output.txt'), rawPatch, 'utf8');
                 fs.writeFileSync(path.join(repairDir, 'validation-error.txt'), validationErr.message, 'utf8');
@@ -387,6 +419,7 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
                     rejectedOutputPath: path.join(repairDir, 'rejected-output.txt')
                 });
                 break;
+                }
             }
 
             const patchPath = path.join(repairDir, 'fix.patch');

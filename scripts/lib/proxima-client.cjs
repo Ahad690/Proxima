@@ -104,4 +104,42 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
     });
 }
 
-module.exports = { askProxima, resolveThinkingEffort };
+async function resetProximaConversation(model) {
+    const provider = resolveProvider(model);
+
+    return new Promise((resolve, reject) => {
+        const socket = net.createConnection({ port: IPC_PORT, host: IPC_HOST });
+        let buffer = '';
+        socket.setTimeout(60000);
+
+        socket.on('connect', () => {
+            socket.write(JSON.stringify({ requestId: 1, action: 'newConversation', provider, data: {} }) + '\n');
+        });
+
+        socket.on('data', (chunk) => {
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const resp = JSON.parse(line);
+                    if (resp.requestId === 1) {
+                        socket.end();
+                        if (resp.success) resolve(resp);
+                        else reject(new Error(resp.error || 'newConversation failed'));
+                    }
+                } catch { /* ignore parse errors */ }
+            }
+        });
+
+        socket.on('error', reject);
+        socket.on('timeout', () => {
+            socket.destroy();
+            reject(new Error('IPC newConversation request timed out'));
+        });
+    });
+}
+
+module.exports = { askProxima, resetProximaConversation, resolveThinkingEffort };
