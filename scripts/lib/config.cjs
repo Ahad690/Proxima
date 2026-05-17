@@ -17,6 +17,7 @@ const DEFAULT_CONFIG = {
 
     reviewModel: "gpt-5-5-thinking",
     repairModel: "claude",
+    enableAutoFix: false,
     maxIterations: 3,
     pushBotBranches: false,
     createPullRequest: false,

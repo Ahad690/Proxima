@@ -28,20 +28,26 @@ The automation consists of three main components:
 2.  **Enable REST API**: The repairer communicates with Proxima via `http://localhost:3210`.
 3.  **Install Dependencies**: Ensure you have run `npm install`.
 4.  **Configuration**: Customize the behavior in `proxima-automation.config.json`.
+    - Set `"enableAutoFix": false` for review-only mode (default).
+    - Set `"enableAutoFix": true` to enable repair/retry automation.
 
 ## Usage
 
 Run the automation from the root of your repository:
 
 ```bash
-# Run local review and repair loop (no push)
+# Run local review (default: review-only, no auto-fix)
 npm run loop:local
 
-# Run loop and push the bot branch to GitHub
+# Run loop and push the bot branch to GitHub (only relevant when auto-fix is enabled)
 npm run loop:local:push
 
 # Run loop, push branch, and create a draft Pull Request (requires 'gh' CLI)
+# (only relevant when auto-fix is enabled)
 npm run loop:local:pr
+
+# Force auto-fix for this run even if config has enableAutoFix=false
+node scripts/proxima-loop.cjs --auto-fix
 ```
 
 ## Bot Branches and Commits

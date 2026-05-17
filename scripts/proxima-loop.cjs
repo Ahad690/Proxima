@@ -295,6 +295,9 @@ async function main() {
     const prRequested = args.includes('--create-pr') || config.createPullRequest;
     const allowDirty = args.includes('--allow-dirty');
     const forceReview = args.includes('--force');
+    const reviewOnlyArg = args.includes('--review-only');
+    const forceAutoFixArg = args.includes('--auto-fix');
+    const autoFixEnabled = reviewOnlyArg ? false : (forceAutoFixArg ? true : config.enableAutoFix === true);
 
     // Allow targeting a specific SHA: node proxima-loop.cjs --sha <sha>
     const shaArgIdx = args.indexOf('--sha');
@@ -427,6 +430,12 @@ async function main() {
             low: counts.low,
             targetSeverities: severityPolicy.label
         });
+
+        if (!autoFixEnabled) {
+            log('🛑 Auto-fix disabled (review-only mode). Skipping tests, repair, and retries.');
+            updateStatus({ status: "review-only-complete", autoFixEnabled: false });
+            process.exit(0);
+        }
 
         // 2. Check if clean
         log('🧪 Running tests...');
