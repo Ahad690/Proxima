@@ -79,10 +79,17 @@ async function main() {
     const pushRequested = args.includes('--push') || config.pushBotBranches;
     const prRequested = args.includes('--create-pr') || config.createPullRequest;
     const allowDirty = args.includes('--allow-dirty');
+    const forceReview = args.includes('--force');
+
+    // Allow targeting a specific SHA: node proxima-loop.cjs --sha <sha>
+    const shaArgIdx = args.indexOf('--sha');
+    const targetSha = shaArgIdx !== -1 ? args[shaArgIdx + 1] : null;
 
     git.ensureInsideGitRepo();
     
-    const originalHeadSha = git.getHeadSha();
+    const originalHeadSha = targetSha
+        ? git.runCommand('git', ['rev-parse', targetSha]).stdout
+        : git.getHeadSha();
     const shortSha = git.getShortSha(originalHeadSha);
     const sourceBranch = git.getCurrentBranch();
     const commitMsg = git.getCommitMessage(originalHeadSha);
