@@ -8,8 +8,8 @@
     if (window.__proximaChatGPT) return;
 
     var CHATGPT_BASE = 'https://chatgpt.com';
-    var CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
-    var CHATGPT_LEGACY_CONVERSATION_ENDPOINT = '/backend-api/conversation';
+    var CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/conversation';
+    var CHATGPT_ALT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
     var CHATGPT_PREPARE_ENDPOINT = '/backend-api/f/conversation/prepare';
     var TIMEOUT = 360000;
 
@@ -379,7 +379,7 @@
             signal: controller.signal
         });
         if (res.status === 404) {
-            res = await fetch(CHATGPT_LEGACY_CONVERSATION_ENDPOINT, {
+            res = await fetch(CHATGPT_ALT_CONVERSATION_ENDPOINT, {
                 method: 'POST',
                 credentials: 'include',
                 headers: headers,
@@ -402,7 +402,7 @@
                 signal: retryController.signal
             });
             if (res.status === 404) {
-                res = await fetch(CHATGPT_LEGACY_CONVERSATION_ENDPOINT, {
+                res = await fetch(CHATGPT_ALT_CONVERSATION_ENDPOINT, {
                     method: 'POST',
                     credentials: 'include',
                     headers: headers,

@@ -766,27 +766,6 @@ async function sendMessageToProvider(provider, message, forceDOM = false, option
         console.log(`[${provider}] forceDOM=true — skipping API, typing into open conversation`);
     }
 
-    // API-first approach — direct fetch + SSE, skip when forceDOM=true
-    if (!forceDOM) {
-        try {
-            console.log(`[${provider}] Trying API-first approach...`);
-            const apiResponse = await providerAPI.sendViaAPI(provider, webContents, message, options);
-            if (apiResponse && apiResponse.length > 0) {
-                console.log(`[${provider}] \u2714 API response captured (${apiResponse.length} chars)`);
-                _apiResponseCache[provider] = apiResponse;
-                return { response: apiResponse };
-            }
-            console.log(`[${provider}] API returned empty \u2014 falling back to DOM`);
-            delete _apiResponseCache[provider];
-        } catch (apiErr) {
-            console.log(`[${provider}] API failed: ${apiErr.message} — falling back to DOM`);
-            // Clear stale cache so getResponseWithTyping doesn't return old data
-            delete _apiResponseCache[provider];
-        }
-    } else {
-        console.log(`[${provider}] forceDOM=true — skipping API, typing into open conversation`);
-    }
-
     // DOM fallback: types into currently open conversation
 
     switch (provider) {

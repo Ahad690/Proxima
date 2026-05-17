@@ -1,4 +1,5 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { loadConfig } = require('./lib/config.cjs');
 const git = require('./lib/git-utils.cjs');
@@ -21,6 +22,55 @@ const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[22m`;
+const GLOBAL_AI_LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
+const GLOBAL_AI_LOCK_STALE_MS = 15 * 60 * 1000; // 15 min
+
+function tryAcquireGlobalAiLock(lockTag) {
+    if (fs.existsSync(GLOBAL_AI_LOCK_FILE)) {
+        try {
+            const lock = JSON.parse(fs.readFileSync(GLOBAL_AI_LOCK_FILE, 'utf8'));
+            if (Date.now() - lock.time > GLOBAL_AI_LOCK_STALE_MS) {
+                fs.unlinkSync(GLOBAL_AI_LOCK_FILE);
+            } else {
+                return false;
+            }
+        } catch {
+            try { fs.unlinkSync(GLOBAL_AI_LOCK_FILE); } catch { }
+        }
+    }
+
+    try {
+        fs.writeFileSync(
+            GLOBAL_AI_LOCK_FILE,
+            JSON.stringify({ tag: lockTag, pid: process.pid, time: Date.now() }),
+            { encoding: 'utf8', flag: 'wx' }
+        );
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function acquireGlobalAiLockWithRetry(lockTag, log, maxWaitMs = 60 * 60 * 1000) {
+    const start = Date.now();
+    let firstWait = true;
+
+    while (Date.now() - start < maxWaitMs) {
+        if (tryAcquireGlobalAiLock(lockTag)) return true;
+
+        if (firstWait) {
+            log(dim('⏳ Waiting for global AI lock...'));
+            firstWait = false;
+        }
+        await new Promise((r) => setTimeout(r, 10000));
+    }
+
+    throw new Error('Timed out waiting for global AI lock after 60 minutes');
+}
+
+function releaseGlobalAiLock() {
+    try { fs.unlinkSync(GLOBAL_AI_LOCK_FILE); } catch { }
+}
 
 /**
  * Normalizes model-generated patches before validation and git apply.
@@ -30,6 +80,75 @@ function normalizePatchText(patchText) {
     let normalized = patchText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     if (!normalized.endsWith('\n')) normalized += '\n';
     return normalized;
+}
+
+function recoverUnifiedDiffFromMarkdown(rawText) {
+    const lines = normalizePatchText(rawText).split('\n');
+    const cleaned = [];
+    let inHunk = false;
+
+    for (let line of lines) {
+        const trimmed = line.trim();
+
+        // Strip markdown fences (including list-wrapped fences like "* ```")
+        if (/^```[a-zA-Z0-9_-]*$/.test(trimmed)) continue;
+        if (/^[-*+]\s*```[a-zA-Z0-9_-]*$/.test(trimmed)) continue;
+
+        if (inHunk) {
+            // Convert list-wrapped hunk lines back into valid diff lines.
+            if (/^[*+]\s/.test(line)) {
+                const rest = line.slice(2);
+                line = /^[+\- ]/.test(rest) ? rest : `+${rest}`;
+            } else if (/^-\s/.test(line)) {
+                const rest = line.slice(2);
+                line = /^[+\- ]/.test(rest) ? rest : `-${rest}`;
+            }
+        }
+
+        if (/^@@ /.test(line)) inHunk = true;
+        if (/^diff --git /.test(line) || /^--- /.test(line) || /^\+\+\+ /.test(line)) {
+            if (!/^@@ /.test(line)) inHunk = false;
+        }
+
+        cleaned.push(line);
+    }
+
+    const start = cleaned.findIndex((l) => l.startsWith('diff --git '));
+    if (start === -1) return normalizePatchText(rawText);
+
+    const out = [];
+    inHunk = false;
+    for (const line of cleaned.slice(start)) {
+        if (/^@@ /.test(line)) inHunk = true;
+        if (/^diff --git /.test(line) || /^--- /.test(line) || /^\+\+\+ /.test(line)) {
+            if (!/^@@ /.test(line)) inHunk = false;
+        }
+
+        if (inHunk) {
+            if (/^[+\- ]/.test(line) || line.startsWith('\\ ')) out.push(line);
+            continue;
+        }
+
+        if (
+            line.startsWith('diff --git ') ||
+            line.startsWith('index ') ||
+            line.startsWith('--- ') ||
+            line.startsWith('+++ ') ||
+            line.startsWith('@@ ') ||
+            line.startsWith('new file mode ') ||
+            line.startsWith('deleted file mode ') ||
+            line.startsWith('old mode ') ||
+            line.startsWith('new mode ') ||
+            line.startsWith('similarity index ') ||
+            line.startsWith('rename from ') ||
+            line.startsWith('rename to ') ||
+            line.startsWith('Binary files ')
+        ) {
+            out.push(line);
+        }
+    }
+
+    return normalizePatchText(out.join('\n'));
 }
 
 /**
@@ -357,6 +476,8 @@ STRICT RULES:
 4. Include 3 lines of unchanged context around every change.
 5. ${severityInstruction} Do NOT refactor or change unrelated code.
 6. If a finding cannot be fixed with a code patch (e.g. "add documentation"), skip it.
+7. If you have Python sandbox access, validate your patch output format before responding: ensure it starts with "diff --git", includes valid file headers, and contains parseable @@ hunk headers.
+8. Preserve raw LF line breaks exactly in the output. Do not wrap diff lines into bullets/markdown lists. Treat each newline ("\n") as significant.
 
 --- REVIEW ---
 ${reviewContent}
@@ -369,56 +490,87 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
         fs.writeFileSync(path.join(repairDir, 'repair.prompt.txt'), prompt, 'utf8');
 
         try {
+            let rawPatch = '';
+            let repairLockAcquired = false;
             try {
-                await resetProximaConversation(config.repairModel);
-                log(dim('🧹 Reset repair conversation state.'));
-            } catch (resetErr) {
-                log(dim(`⚠️ Could not reset repair conversation: ${resetErr.message}`));
-            }
+                await acquireGlobalAiLockWithRetry(`repair-${shortSha}-iter-${iteration}`, log);
+                repairLockAcquired = true;
+                log(dim('🔐 Global AI lock acquired for repair.'));
 
-            let rawPatch = normalizePatchText(await askProxima(prompt, config.repairModel, config.baseUrl));
-            fs.writeFileSync(path.join(repairDir, 'raw-output.txt'), rawPatch, 'utf8');
-
-            try {
-                validatePatchText(rawPatch);
-                rejectDangerousPaths(rawPatch, config.gitRoot, config);
-                rejectScriptExecution(rawPatch, config);
-                rejectPackageJsonScripts(rawPatch, config);
-            } catch (validationErr) {
-                if (validationErr.message.includes('valid unified diff') || validationErr.message.includes('prose before') || validationErr.message.includes('markdown fences')) {
-                    log(`⚠️ Repair output was not a diff; retrying once with stricter patch-only prompt.`);
-                    const retryPrompt = `${prompt}
-
-Your previous response was rejected because it was not a unified diff. Return ONLY a git-compatible unified diff that starts with "diff --git". Do not repeat the review, do not explain the fix, and do not use markdown fences.`;
-                    try {
-                        await resetProximaConversation(config.repairModel);
-                    } catch { /* best effort */ }
-                    rawPatch = normalizePatchText(await askProxima(retryPrompt, config.repairModel, config.baseUrl));
-                    fs.writeFileSync(path.join(repairDir, 'raw-output-retry-1.txt'), rawPatch, 'utf8');
-
-                    try {
-                        validatePatchText(rawPatch);
-                        rejectDangerousPaths(rawPatch, config.gitRoot, config);
-                        rejectScriptExecution(rawPatch, config);
-                        rejectPackageJsonScripts(rawPatch, config);
-                        validationErr = null;
-                    } catch (retryValidationErr) {
-                        validationErr = retryValidationErr;
-                    }
+                try {
+                    await resetProximaConversation(config.repairModel);
+                    log(dim('🧹 Reset repair conversation state.'));
+                } catch (resetErr) {
+                    log(dim(`⚠️ Could not reset repair conversation: ${resetErr.message}`));
                 }
 
-                if (!validationErr) {
-                    // Retry succeeded; continue with the validated rawPatch.
-                } else {
-                log(`❌ Patch rejected by validator: ${validationErr.message}`);
-                fs.writeFileSync(path.join(repairDir, 'rejected-output.txt'), rawPatch, 'utf8');
-                fs.writeFileSync(path.join(repairDir, 'validation-error.txt'), validationErr.message, 'utf8');
-                updateStatus({ 
-                    status: "patch-validation-failed", 
-                    error: validationErr.message,
-                    rejectedOutputPath: path.join(repairDir, 'rejected-output.txt')
-                });
-                break;
+                rawPatch = normalizePatchText(await askProxima(prompt, config.repairModel, config.baseUrl));
+                fs.writeFileSync(path.join(repairDir, 'raw-output.txt'), rawPatch, 'utf8');
+
+                try {
+                    validatePatchText(rawPatch);
+                    rejectDangerousPaths(rawPatch, config.gitRoot, config);
+                    rejectScriptExecution(rawPatch, config);
+                    rejectPackageJsonScripts(rawPatch, config);
+                } catch (validationErr) {
+                    const recoveredPatch = recoverUnifiedDiffFromMarkdown(rawPatch);
+                    if (recoveredPatch !== rawPatch) {
+                        fs.writeFileSync(path.join(repairDir, 'raw-output-recovered.txt'), recoveredPatch, 'utf8');
+                        try {
+                            validatePatchText(recoveredPatch);
+                            rejectDangerousPaths(recoveredPatch, config.gitRoot, config);
+                            rejectScriptExecution(recoveredPatch, config);
+                            rejectPackageJsonScripts(recoveredPatch, config);
+                            rawPatch = recoveredPatch;
+                            validationErr = null;
+                        } catch {
+                            // Keep original validation error and continue with retry/fail flow.
+                        }
+                    }
+
+                    if (!validationErr) {
+                        // Recovery succeeded; continue with recovered rawPatch.
+                    } else
+                    if (validationErr.message.includes('valid unified diff') || validationErr.message.includes('prose before') || validationErr.message.includes('markdown fences')) {
+                        log(`⚠️ Repair output was not a diff; retrying once with stricter patch-only prompt.`);
+                        const retryPrompt = `${prompt}
+
+Your previous response was rejected because it was not a unified diff. Return ONLY a git-compatible unified diff that starts with "diff --git". Do not repeat the review, do not explain the fix, and do not use markdown fences.`;
+                        try {
+                            await resetProximaConversation(config.repairModel);
+                        } catch { /* best effort */ }
+                        rawPatch = normalizePatchText(await askProxima(retryPrompt, config.repairModel, config.baseUrl));
+                        fs.writeFileSync(path.join(repairDir, 'raw-output-retry-1.txt'), rawPatch, 'utf8');
+
+                        try {
+                            validatePatchText(rawPatch);
+                            rejectDangerousPaths(rawPatch, config.gitRoot, config);
+                            rejectScriptExecution(rawPatch, config);
+                            rejectPackageJsonScripts(rawPatch, config);
+                            validationErr = null;
+                        } catch (retryValidationErr) {
+                            validationErr = retryValidationErr;
+                        }
+                    }
+
+                    if (!validationErr) {
+                        // Retry succeeded; continue with the validated rawPatch.
+                    } else {
+                    log(`❌ Patch rejected by validator: ${validationErr.message}`);
+                    fs.writeFileSync(path.join(repairDir, 'rejected-output.txt'), rawPatch, 'utf8');
+                    fs.writeFileSync(path.join(repairDir, 'validation-error.txt'), validationErr.message, 'utf8');
+                    updateStatus({ 
+                        status: "patch-validation-failed", 
+                        error: validationErr.message,
+                        rejectedOutputPath: path.join(repairDir, 'rejected-output.txt')
+                    });
+                    break;
+                    }
+                }
+            } finally {
+                if (repairLockAcquired) {
+                    releaseGlobalAiLock();
+                    log(dim('🔓 Global AI lock released for repair.'));
                 }
             }
 

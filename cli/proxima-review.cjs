@@ -388,63 +388,66 @@ async function runReview(commitRef, options = {}) {
 
     const normalizedMsg = normalizePromptText(msg);
     const normalizedDiff = normalizePromptText(diff);
-
-    const prompt = `You are a hostile, adversarial code auditor with a mandate to find real bugs, not validate the author's intent.
-
-CRITICAL RULES — violating any of these makes your review useless:
-1. **NEVER trust the commit message.** The message says what the author INTENDED. Your job is to verify whether the code ACTUALLY does that. Treat the message as a hypothesis to be tested, not a fact to be summarized.
-2. **Do NOT mirror or paraphrase the commit message in your summary.** If your summary reads like a reworded version of the commit message, you have failed.
-3. **Assume the author is wrong** until the code proves otherwise. Look for cases where the implementation contradicts the stated intent.
-4. **Generic advice is forbidden.** Every point must cite a specific line in the diff. "Add input validation" with no line reference is worthless.
-5. **Use web search** to verify API contracts, library behavior, or security advisories for any external dependency touched in the diff.
-
----
-Commit: ${shortSha}
-Author: ${author}
-Date:   ${date}
-Stated Intent (treat as unverified): "${normalizedMsg}"
----
-
-Diff to audit:
-${normalizedDiff}
-
-Answer these adversarial questions from the diff alone, ignoring the commit message:
-
-**Q1 — Does the code actually do what the commit message claims?**
-Verify line by line. Call out any gap between stated intent and actual implementation.
-
-**Q2 — What are the realistic failure modes?**
-Think: race conditions, null/undefined paths, unhandled exceptions, wrong assumptions about input shape or order of operations.
-
-**Q3 — What did the author NOT change that they should have?**
-Look for related code paths, sibling functions, or symmetric operations that were left inconsistent with this change.
-
-**Q4 — What is the worst-case security or data-integrity impact if this code has a bug?**
-Be specific about attack vectors or corruption scenarios, not generic.
-
-Produce your audit in this exact structure:
-
-## Verdict
-**PASS / FAIL / NEEDS WORK** — one sentence on whether the implementation correctly achieves its stated purpose.
-
-## Implementation vs Intent Gap
-(Specific divergences between what the commit message claims and what the code does. If none, say "None found" — do NOT leave this blank.)
-
-## Bugs & Failure Modes
-| File:Line | Severity | Finding | Evidence |
-|-----------|----------|---------|----------|
-| src/file.js:L42 | 🔴 Critical | Race condition on token refresh | Two concurrent calls both pass the \`!token\` check before either sets it |
-
-## Missing Changes
-- List related code that was NOT updated but should have been, with file:line references.
-
-## Security & Data Integrity
-- Worst-case impact if this code is wrong (be specific, not generic).
-
-## Score: X/10
-Justification must reference specific evidence from the diff, not the commit message.
-
-REMEMBER: A review that mostly agrees with the commit message is a failed review.`;
+    const nl = '\n';
+    const prompt = [
+        `You are a hostile, adversarial code auditor with a mandate to find real bugs, not validate the author's intent.`,
+        ``,
+        `CRITICAL RULES — violating any of these makes your review useless:`,
+        `1. **NEVER trust the commit message.** The message says what the author INTENDED. Your job is to verify whether the code ACTUALLY does that. Treat the message as a hypothesis to be tested, not a fact to be summarized.`,
+        `2. **Do NOT mirror or paraphrase the commit message in your summary.** If your summary reads like a reworded version of the commit message, you have failed.`,
+        `3. **Assume the author is wrong** until the code proves otherwise. Look for cases where the implementation contradicts the stated intent.`,
+        `4. **Generic advice is forbidden.** Every point must cite a specific line in the diff. "Add input validation" with no line reference is worthless.`,
+        `5. **Use web search** to verify API contracts, library behavior, or security advisories for any external dependency touched in the diff.`,
+        `6. **Respect line breaks exactly.** Treat every newline as significant; do not collapse or rewrite multi-line sections.`,
+        ``,
+        `---`,
+        `Commit: ${shortSha}`,
+        `Author: ${author}`,
+        `Date:   ${date}`,
+        `Stated Intent (treat as unverified): "${normalizedMsg}"`,
+        `---`,
+        ``,
+        `Diff to audit (line breaks are significant; preserve each \\n exactly):`,
+        `${normalizedDiff}`,
+        ``,
+        `Answer these adversarial questions from the diff alone, ignoring the commit message:`,
+        ``,
+        `**Q1 — Does the code actually do what the commit message claims?**`,
+        `Verify line by line. Call out any gap between stated intent and actual implementation.`,
+        ``,
+        `**Q2 — What are the realistic failure modes?**`,
+        `Think: race conditions, null/undefined paths, unhandled exceptions, wrong assumptions about input shape or order of operations.`,
+        ``,
+        `**Q3 — What did the author NOT change that they should have?**`,
+        `Look for related code paths, sibling functions, or symmetric operations that were left inconsistent with this change.`,
+        ``,
+        `**Q4 — What is the worst-case security or data-integrity impact if this code has a bug?**`,
+        `Be specific about attack vectors or corruption scenarios, not generic.`,
+        ``,
+        `Produce your audit in this exact structure:`,
+        ``,
+        `## Verdict`,
+        `**PASS / FAIL / NEEDS WORK** — one sentence on whether the implementation correctly achieves its stated purpose.`,
+        ``,
+        `## Implementation vs Intent Gap`,
+        `(Specific divergences between what the commit message claims and what the code does. If none, say "None found" — do NOT leave this blank.)`,
+        ``,
+        `## Bugs & Failure Modes`,
+        `| File:Line | Severity | Finding | Evidence |`,
+        `|-----------|----------|---------|----------|`,
+        `| src/file.js:L42 | 🔴 Critical | Race condition on token refresh | Two concurrent calls both pass the \`!token\` check before either sets it |`,
+        ``,
+        `## Missing Changes`,
+        `- List related code that was NOT updated but should have been, with file:line references.`,
+        ``,
+        `## Security & Data Integrity`,
+        `- Worst-case impact if this code is wrong (be specific, not generic).`,
+        ``,
+        `## Score: X/10`,
+        `Justification must reference specific evidence from the diff, not the commit message.`,
+        ``,
+        `REMEMBER: A review that mostly agrees with the commit message is a failed review.`
+    ].join(nl);
 
 
     log(cyan('🚀') + ' Sending to ' + PROVIDER_LABEL + ' (' + REVIEW_MODEL + ')...');
