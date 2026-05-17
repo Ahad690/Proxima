@@ -320,6 +320,23 @@ async function main() {
     const sourceBranch = git.getCurrentBranch();
     const commitMsg = git.getCommitMessage(originalHeadSha);
 
+    // Review-only mode: write a single root review file and exit.
+    // This avoids creating per-commit session folders when auto-fix is disabled.
+    if (!autoFixEnabled) {
+        process.stdout.write(`[${new Date().toLocaleTimeString()}] 🚀 Proxima Review Mode (auto-fix disabled)\n`);
+        process.stdout.write(`[${new Date().toLocaleTimeString()}] 🤖 Running Proxima review for ${shortSha}...\n`);
+        await runReview(originalHeadSha, { outputDir: config.reviewDir, force: true });
+
+        const reviewFile = path.join(config.reviewDir, `${shortSha}.md`);
+        if (!fs.existsSync(reviewFile)) {
+            process.stderr.write(`[${new Date().toLocaleTimeString()}] ❌ Review file was not generated: ${reviewFile}\n`);
+            process.exit(1);
+        }
+
+        process.stdout.write(`[${new Date().toLocaleTimeString()}] ✅ Review-only complete: ${reviewFile}\n`);
+        process.exit(0);
+    }
+
     const sessionDir = path.join(config.reviewDir, shortSha);
     globalSessionDir = sessionDir;
     if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
@@ -430,12 +447,6 @@ async function main() {
             low: counts.low,
             targetSeverities: severityPolicy.label
         });
-
-        if (!autoFixEnabled) {
-            log('🛑 Auto-fix disabled (review-only mode). Skipping tests, repair, and retries.');
-            updateStatus({ status: "review-only-complete", autoFixEnabled: false });
-            process.exit(0);
-        }
 
         // 2. Check if clean
         log('🧪 Running tests...');

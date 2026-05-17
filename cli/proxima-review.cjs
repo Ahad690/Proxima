@@ -563,9 +563,6 @@ function spawnBackground(sha) {
         const ps1Lines = [
             "Set-Location '" + safeRoot + "'",
             "node '" + safeLoop + "'",
-            "Write-Host ''",
-            "Write-Host '--- Automation finished. Auto-closing in 5 minutes ---'",
-            "Start-Sleep -Seconds 300",
             "Exit 0",
         ];
         fs.writeFileSync(tmpScript, ps1Lines.join('\r\n'), 'utf8');
