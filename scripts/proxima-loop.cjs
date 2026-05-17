@@ -22,6 +22,56 @@ const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[22m`;
 
+/**
+ * Recounts all hunk headers in a unified diff so that the @@ -L,N +L,N @@ counts
+ * match the actual content lines. The START line numbers are preserved as-is
+ * (git apply --recount already handles those). This fixes the most common LLM error
+ * of generating wrong line counts in hunk headers.
+ */
+function fixPatchHunkHeaders(patchText) {
+    const lines = patchText.split('\n');
+    const result = [];
+    let i = 0;
+
+    while (i < lines.length) {
+        const line = lines[i];
+        const hunkMatch = line.match(/^(@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@)(.*)/);
+
+        if (!hunkMatch) {
+            result.push(line);
+            i++;
+            continue;
+        }
+
+        // Collect all lines belonging to this hunk
+        const oldStart = hunkMatch[2];
+        const newStart = hunkMatch[3];
+        const suffix = hunkMatch[4]; // e.g. " async function main() {"
+        const hunkLines = [];
+        i++;
+
+        while (i < lines.length && !lines[i].match(/^(@@|diff |--- |\+\+\+)/)) {
+            hunkLines.push(lines[i]);
+            i++;
+        }
+
+        // Recount
+        let oldCount = 0;
+        let newCount = 0;
+        for (const hl of hunkLines) {
+            if (hl.startsWith('-')) { oldCount++; }
+            else if (hl.startsWith('+')) { newCount++; }
+            else { oldCount++; newCount++; } // context line
+        }
+
+        result.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${suffix}`);
+        result.push(...hunkLines);
+    }
+
+    return result.join('\n');
+}
+
+
 async function main() {
     const config = loadConfig();
     const args = process.argv.slice(2);
@@ -271,7 +321,13 @@ PATCH:`;
             }
 
             const patchPath = path.join(repairDir, 'fix.patch');
-            fs.writeFileSync(patchPath, rawPatch, 'utf8');
+            // Programmatically recount hunk headers so LLM count errors don't corrupt the patch
+            const fixedPatch = fixPatchHunkHeaders(rawPatch);
+            fs.writeFileSync(patchPath, fixedPatch, 'utf8');
+            if (fixedPatch !== rawPatch) {
+                log(dim('🔧 Hunk headers recounted (LLM had wrong counts).'));
+                fs.writeFileSync(path.join(repairDir, 'raw-output-original.txt'), rawPatch, 'utf8');
+            }
 
             // Touched files from patch
             const touchedFiles = git.getFilesFromPatch(patchPath);
