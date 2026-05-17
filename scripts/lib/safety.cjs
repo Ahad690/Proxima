@@ -28,39 +28,63 @@ function validatePatchText(patchText) {
 
     // Structural validation: enforce real diff headers and real hunk bodies.
     const hunkHeaderRe = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?:.*)$/;
-    const metadataRe = /^(index |new file mode |deleted file mode |old mode |new mode |similarity index |rename from |rename to |Binary files )/;
+    const metadataRe = /^(index |new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |Binary files )/;
+    const metadataOnlyChangeRe = /^(new file mode |deleted file mode |old mode |new mode |similarity index |dissimilarity index |rename from |rename to |copy from |copy to |Binary files )/;
     const hunkBodyLineRe = /^[ +\-\\]/; // context/add/remove/no-newline marker
 
     let sawDiffStart = false;
-    let sawOldHeader = false;
-    let sawNewHeader = false;
-    let sawHunk = false;
+    let sawValidFileSection = false;
     let inHunk = false;
+    let currentFile = null;
+
+    const startFile = () => ({
+        sawOldHeader: false,
+        sawNewHeader: false,
+        sawHunk: false,
+        sawMetadataOnlyChange: false,
+    });
+
+    const finishFile = () => {
+        if (!currentFile) return;
+        if (currentFile.sawHunk || currentFile.sawMetadataOnlyChange) {
+            sawValidFileSection = true;
+        }
+    };
 
     for (const line of lines) {
-        if (line.startsWith('diff --git ')) {
+        if (line.startsWith('diff --git ') || line.startsWith('Index: ')) {
+            finishFile();
             sawDiffStart = true;
+            currentFile = startFile();
             inHunk = false;
             continue;
         }
 
         if (line.startsWith('--- ')) {
-            sawOldHeader = true;
+            if (!currentFile) {
+                sawDiffStart = true;
+                currentFile = startFile();
+            }
+            currentFile.sawOldHeader = true;
             inHunk = false;
             continue;
         }
 
         if (line.startsWith('+++ ')) {
-            sawNewHeader = true;
+            if (!currentFile) {
+                throw new Error('Patch new-file header appears before old-file header');
+            }
+            currentFile.sawNewHeader = true;
             inHunk = false;
             continue;
         }
 
         if (hunkHeaderRe.test(line)) {
-            if (!sawOldHeader || !sawNewHeader) {
+            if (!currentFile || !currentFile.sawOldHeader || !currentFile.sawNewHeader) {
                 throw new Error('Patch hunk appears before file headers');
             }
-            sawHunk = true;
+            currentFile.sawHunk = true;
+            sawValidFileSection = true;
             inHunk = true;
             continue;
         }
@@ -70,21 +94,25 @@ function validatePatchText(patchText) {
         }
 
         if (inHunk) {
-            if (line.startsWith('diff --git ') || line.startsWith('--- ') || line.startsWith('+++ ')) {
-                inHunk = false;
-                // This line will be handled by the next loop iteration.
-            } else {
-                if (!hunkBodyLineRe.test(line)) {
-                    throw new Error('Patch contains invalid hunk body line');
-                }
-                continue;
+            if (!hunkBodyLineRe.test(line)) {
+                throw new Error('Patch contains invalid hunk body line');
             }
+            continue;
         }
 
-        if (line === '' || metadataRe.test(line)) continue;
+        if (metadataRe.test(line)) {
+            if (currentFile && metadataOnlyChangeRe.test(line)) {
+                currentFile.sawMetadataOnlyChange = true;
+            }
+            continue;
+        }
+
+        if (line === '') continue;
     }
 
-    if (!sawDiffStart || !sawOldHeader || !sawNewHeader || !sawHunk) {
+    finishFile();
+
+    if (!sawDiffStart || !sawValidFileSection) {
         throw new Error('Response does not appear to be a valid unified diff');
     }
 

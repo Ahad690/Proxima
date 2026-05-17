@@ -195,7 +195,49 @@ function testPatchNormalization() {
         throw new Error('Hunk fixer should not count no-newline markers as patch lines');
     }
 
+    const markdownWrappedDiff = [
+        'diff --git a/a.txt b/a.txt',
+        'index 1111111..2222222 100644',
+        '--- a/a.txt',
+        '+++ b/a.txt',
+        '@@ -1,3 +1,3 @@',
+        '* line one',
+        '- old',
+        '+ new',
+        '* ```',
+        '* trailing fence should be ignored',
+        '* ```'
+    ].join('\n');
+
+    const recovered = loop.recoverUnifiedDiffFromMarkdown(markdownWrappedDiff);
+    safety.validatePatchText(recovered);
+    if (!recovered.includes('@@ -1,3 +1,3 @@')) {
+        throw new Error('Recovered patch should keep hunk headers');
+    }
+    if (!recovered.includes(' line one')) {
+        throw new Error('Recovered patch should unwrap markdown bullet context lines');
+    }
+
     console.log('✅ Patch Normalization tests passed.');
+}
+
+function testRepairRetryGuards() {
+    console.log('Testing Repair Retry Guards...');
+
+    const loopPath = path.join(__dirname, '../proxima-loop.cjs');
+    const content = fs.readFileSync(loopPath, 'utf8');
+
+    if (!content.includes('function sanitizeFeedbackForPrompt')) {
+        throw new Error('Repair retry feedback should be sanitized before prompting');
+    }
+    if (!content.includes('isRetryablePatchValidationError(validationResult.error)')) {
+        throw new Error('Validator retry should be limited to retryable patch format errors');
+    }
+    if (!content.includes('const applyRetryValidation = validateCandidatePatch(rawPatch);')) {
+        throw new Error('Apply-check retry should validate/recover via candidate patch validator');
+    }
+
+    console.log('✅ Repair Retry Guards tests passed.');
 }
 
 function testThinkingEffortWiring() {
@@ -227,6 +269,7 @@ try {
     testSafetyValidator();
     testPRBody();
     testPatchNormalization();
+    testRepairRetryGuards();
     testThinkingEffortWiring();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
