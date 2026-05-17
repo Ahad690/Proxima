@@ -8,6 +8,9 @@
     if (window.__proximaChatGPT) return;
 
     var CHATGPT_BASE = 'https://chatgpt.com';
+    var CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
+    var CHATGPT_LEGACY_CONVERSATION_ENDPOINT = '/backend-api/conversation';
+    var CHATGPT_PREPARE_ENDPOINT = '/backend-api/f/conversation/prepare';
     var TIMEOUT = 360000;
 
     // ─── State ───────────────────────────────────────
@@ -255,6 +258,35 @@
         return fullText;
     }
 
+    function _resolveThinkingEffort(options, model) {
+        if (options && typeof options.thinkingEffort === 'string') return options.thinkingEffort;
+        if (typeof model === 'string' && model.toLowerCase().includes('thinking')) return 'extended';
+        return 'standard';
+    }
+
+    function _buildConversationMeta(model, thinkingEffort, state) {
+        var tz = 'UTC';
+        try {
+            tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        } catch (e) {}
+
+        return {
+            action: 'next',
+            conversation_id: _conversationId || undefined,
+            parent_message_id: _parentMessageId || crypto.randomUUID(),
+            model: model,
+            client_prepare_state: state,
+            timezone_offset_min: new Date().getTimezoneOffset(),
+            timezone: tz,
+            conversation_mode: { kind: 'primary_assistant' },
+            system_hints: [],
+            supports_buffering: true,
+            supported_encodings: ['v1'],
+            client_contextual_info: { app_name: 'chatgpt.com' },
+            thinking_effort: thinkingEffort
+        };
+    }
+
     // ─── Send Message ───────────────────────────────
 
     async function send(message, options) {
@@ -283,33 +315,49 @@
         if (powData.requirementsToken) headers['Openai-Sentinel-Chat-Requirements-Token'] = powData.requirementsToken;
         if (powData.proofToken) headers['Openai-Sentinel-Proof-Token'] = powData.proofToken;
 
+        var model = (options && options.model) ? options.model : 'gpt-5-5-thinking';
+        var thinkingEffort = _resolveThinkingEffort(options, model);
+        var conversationMeta = _buildConversationMeta(model, thinkingEffort, 'success');
+
         var payload = {
-            action: 'next',
+            action: conversationMeta.action,
             messages: [{
                 id: crypto.randomUUID(),
                 author: { role: 'user' },
                 content: { content_type: 'text', parts: [message] },
                 metadata: {}
             }],
-            model: (options && options.model) ? options.model : 'gpt-5-5-thinking',
-
-            parent_message_id: _parentMessageId || crypto.randomUUID(),
-            timezone_offset_min: new Date().getTimezoneOffset(),
-            history_and_training_disabled: false,
-            conversation_mode: { kind: 'primary_assistant' },
-            force_paragen: false,
-            force_nulligen: false,
-            force_rate_limit: false,
-            websocket_request_id: crypto.randomUUID()
+            conversation_id: conversationMeta.conversation_id,
+            parent_message_id: conversationMeta.parent_message_id,
+            model: conversationMeta.model,
+            client_prepare_state: conversationMeta.client_prepare_state,
+            timezone_offset_min: conversationMeta.timezone_offset_min,
+            timezone: conversationMeta.timezone,
+            conversation_mode: conversationMeta.conversation_mode,
+            enable_message_followups: true,
+            system_hints: conversationMeta.system_hints,
+            supports_buffering: conversationMeta.supports_buffering,
+            supported_encodings: conversationMeta.supported_encodings,
+            client_contextual_info: conversationMeta.client_contextual_info,
+            paragen_cot_summary_display_override: 'allow',
+            force_parallel_switch: 'auto',
+            thinking_effort: conversationMeta.thinking_effort
         };
+        if (!payload.conversation_id) delete payload.conversation_id;
 
-        // Add model config for extended reasoning models
-        if (options && options.model && options.model.includes('thinking')) {
-            payload['oai-last-model-config'] = JSON.stringify({
-                model: options.model,
-                effort: 'extended'
+        var preparePayload = _buildConversationMeta(model, thinkingEffort, 'none');
+        preparePayload.fork_from_shared_post = false;
+        if (!preparePayload.conversation_id) delete preparePayload.conversation_id;
+
+        try {
+            await fetch(CHATGPT_PREPARE_ENDPOINT, {
+                method: 'POST',
+                credentials: 'include',
+                headers: headers,
+                body: JSON.stringify(preparePayload)
             });
-            console.log('[Proxima ChatGPT] Using extended reasoning model:', options.model);
+        } catch (e) {
+            // Prepare is best-effort; send can still succeed without it.
         }
 
 
@@ -323,13 +371,22 @@
         var controller = new AbortController();
         var timeoutId = setTimeout(function() { controller.abort(); }, TIMEOUT);
 
-        var res = await fetch('/backend-api/conversation', {
+        var res = await fetch(CHATGPT_CONVERSATION_ENDPOINT, {
             method: 'POST',
             credentials: 'include',
             headers: headers,
             body: JSON.stringify(payload),
             signal: controller.signal
         });
+        if (res.status === 404) {
+            res = await fetch(CHATGPT_LEGACY_CONVERSATION_ENDPOINT, {
+                method: 'POST',
+                credentials: 'include',
+                headers: headers,
+                body: JSON.stringify(payload),
+                signal: controller.signal
+            });
+        }
 
         // Token expired — refresh and retry once
         if (res.status === 401) {
@@ -337,13 +394,22 @@
             headers['Authorization'] = 'Bearer ' + newToken;
             var retryController = new AbortController();
             var retryTimeoutId = setTimeout(function() { retryController.abort(); }, TIMEOUT);
-            res = await fetch('/backend-api/conversation', {
+            res = await fetch(CHATGPT_CONVERSATION_ENDPOINT, {
                 method: 'POST',
                 credentials: 'include',
                 headers: headers,
                 body: JSON.stringify(payload),
                 signal: retryController.signal
             });
+            if (res.status === 404) {
+                res = await fetch(CHATGPT_LEGACY_CONVERSATION_ENDPOINT, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: headers,
+                    body: JSON.stringify(payload),
+                    signal: retryController.signal
+                });
+            }
             if (!res.ok) {
                 clearTimeout(retryTimeoutId);
                 var err = await res.text().catch(function() { return ''; });

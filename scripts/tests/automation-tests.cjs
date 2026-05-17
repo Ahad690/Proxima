@@ -1,5 +1,6 @@
 const parser = require('../lib/review-parser.cjs');
 const safety = require('../lib/safety.cjs');
+const loop = require('../proxima-loop.cjs');
 const path = require('path');
 const fs = require('fs');
 
@@ -138,10 +139,74 @@ function testPRBody() {
     console.log('✅ PR Body leak check passed.');
 }
 
+function testPatchNormalization() {
+    console.log('Testing Patch Normalization...');
+
+    const noFinalNewline = [
+        'diff --git a/a.txt b/a.txt',
+        '--- a/a.txt',
+        '+++ b/a.txt',
+        '@@ -1,99 +1,99 @@',
+        '-old',
+        '+new'
+    ].join('\n');
+
+    const normalized = loop.normalizePatchText(noFinalNewline);
+    if (!normalized.endsWith('\n')) throw new Error('Patch normalization should add final newline');
+
+    const fixed = loop.fixPatchHunkHeaders(noFinalNewline);
+    if (!fixed.endsWith('\n')) throw new Error('Hunk fixer should preserve final newline');
+    if (!fixed.includes('@@ -1,1 +1,1 @@')) throw new Error('Hunk fixer should recount patch lines');
+
+    const noNewlineMarker = [
+        'diff --git a/a.txt b/a.txt',
+        '--- a/a.txt',
+        '+++ b/a.txt',
+        '@@ -1,99 +1,99 @@',
+        '-old',
+        '\\ No newline at end of file',
+        '+new',
+        '\\ No newline at end of file'
+    ].join('\n');
+
+    const fixedWithMarker = loop.fixPatchHunkHeaders(noNewlineMarker);
+    if (!fixedWithMarker.includes('@@ -1,1 +1,1 @@')) {
+        throw new Error('Hunk fixer should not count no-newline markers as patch lines');
+    }
+
+    console.log('✅ Patch Normalization tests passed.');
+}
+
+function testThinkingEffortWiring() {
+    console.log('Testing Thinking Effort Wiring...');
+
+    const reviewScript = fs.readFileSync(path.join(__dirname, '../../cli/proxima-review.cjs'), 'utf8');
+    const repairClient = fs.readFileSync(path.join(__dirname, '../lib/proxima-client.cjs'), 'utf8');
+    const mainProcess = fs.readFileSync(path.join(__dirname, '../../electron/main-v2.cjs'), 'utf8');
+    const chatgptEngine = fs.readFileSync(path.join(__dirname, '../../electron/providers/chatgpt-engine.js'), 'utf8');
+
+    if (!reviewScript.includes('thinkingEffort: REVIEW_THINKING_EFFORT')) {
+        throw new Error('Review IPC payload does not include thinkingEffort');
+    }
+    if (!repairClient.includes('return { message, model, thinkingEffort };')) {
+        throw new Error('Repair IPC payload does not include thinkingEffort');
+    }
+    if (!mainProcess.includes('thinkingEffort: data.thinkingEffort')) {
+        throw new Error('Main process does not forward thinkingEffort option');
+    }
+    if (!chatgptEngine.includes('thinking_effort: conversationMeta.thinking_effort')) {
+        throw new Error('ChatGPT engine payload is missing thinking_effort serialization');
+    }
+
+    console.log('✅ Thinking Effort Wiring tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
     testPRBody();
+    testPatchNormalization();
+    testThinkingEffortWiring();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');

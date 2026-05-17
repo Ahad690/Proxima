@@ -37,11 +37,18 @@ const SKIP_COMMIT_MARKER = '[proxima-auto-fix]';
 const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || automationConfig.reviewModel || 'gpt-5-5-thinking';
 const REVIEW_PROVIDER = process.env.PROXIMA_REVIEW_PROVIDER || resolveProvider(REVIEW_MODEL);
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || automationConfig.reviewDir || path.join(findGitRoot(), 'perplexity-reviews');
+const REVIEW_THINKING_EFFORT = process.env.PROXIMA_REVIEW_THINKING_EFFORT || resolveThinkingEffort(REVIEW_MODEL);
 
 function resolveProvider(model) {
     const m = model.toLowerCase();
     if (m === 'chatgpt' || m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
     return 'perplexity';
+}
+
+function resolveThinkingEffort(model) {
+    if (!model) return 'standard';
+    const m = model.toLowerCase();
+    return m.includes('thinking') ? 'extended' : 'standard';
 }
 
 const PROVIDER_DISPLAY = {
@@ -134,7 +141,7 @@ const dim = (t) => `${c.dim}${t}${c.reset}`;
 // ─── IPC Client ───────────────────────────────────────────────────────────────
 // Talks directly to Proxima Agent Hub over TCP (same protocol as MCP server).
 // Routes to the correct provider (chatgpt or perplexity) based on REVIEW_PROVIDER.
-// ChatGPT:    sendMessage with { message, model }
+// ChatGPT:    sendMessage with { message, model, thinkingEffort }
 // Perplexity: sendMessage with { message, modelPreference, deepSearch: false }
 function queryAI(message, model, provider) {
     return new Promise((resolve, reject) => {
@@ -154,7 +161,7 @@ function queryAI(message, model, provider) {
         // Build the correct payload for each provider
         function buildSendPayload() {
             if (provider === 'chatgpt') {
-                return { message, model };
+                return { message, model, thinkingEffort: REVIEW_THINKING_EFFORT };
             }
             // perplexity (and any future provider)
             return { message, modelPreference: model, deepSearch: false };
@@ -432,6 +439,7 @@ date: ${date}
 message: ${JSON.stringify(msg)}
 model: ${REVIEW_MODEL}
 provider: ${REVIEW_PROVIDER}
+thinking_effort: ${REVIEW_THINKING_EFFORT}
 reviewed_at: ${new Date().toISOString()}
 ---
 
