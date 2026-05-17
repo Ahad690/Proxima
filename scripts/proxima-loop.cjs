@@ -83,12 +83,20 @@ async function main() {
 
     // Allow targeting a specific SHA: node proxima-loop.cjs --sha <sha>
     const shaArgIdx = args.indexOf('--sha');
-    const targetSha = shaArgIdx !== -1 ? args[shaArgIdx + 1] : null;
+    let targetSha = null;
+    if (shaArgIdx !== -1) {
+        const candidate = args[shaArgIdx + 1];
+        if (!candidate || candidate.startsWith('--')) {
+            console.error('❌ --sha requires a commit SHA or ref argument');
+            process.exit(1);
+        }
+        targetSha = candidate;
+    }
 
     git.ensureInsideGitRepo();
-    
+
     const originalHeadSha = targetSha
-        ? git.runCommand('git', ['rev-parse', targetSha]).stdout
+        ? git.runCommand('git', ['rev-parse', targetSha]).stdout.trim()
         : git.getHeadSha();
     const shortSha = git.getShortSha(originalHeadSha);
     const sourceBranch = git.getCurrentBranch();
@@ -443,6 +451,13 @@ PATCH:`;
             log(`✅ Repair committed: ${git.getShortSha(currentSha)}`);
 
         } catch (e) {
+            // Provider not yet initialized — wait 30s and retry once
+            if (e.message && e.message.includes('not initialized')) {
+                log(`⏳ Provider not ready, retrying in 30s... (${e.message})`);
+                await new Promise(r => setTimeout(r, 30000));
+                iteration--; // don't consume an iteration slot
+                continue;
+            }
             log(`❌ Repair failed: ${e.message}`);
             updateStatus({ status: "error", error: e.message });
             break;

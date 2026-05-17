@@ -308,8 +308,8 @@ async function runReview(commitRef, options = {}) {
 
     log(cyan('📋') + ' Commit: ' + shortSha + ' — ' + dim(msg.split('\n')[0]));
 
-    // Skip maintenance/chore commits to save Perplexity quota
-    if (msg.toLowerCase().startsWith('chore:') || msg.toLowerCase().startsWith('docs:')) {
+    // Skip maintenance/chore commits to save Perplexity quota (bypassed when force=true)
+    if (!options.force && (msg.toLowerCase().startsWith('chore:') || msg.toLowerCase().startsWith('docs:'))) {
         log(yellow('⏭') + ' Skipping maintenance commit: ' + shortSha);
         return;
     }
