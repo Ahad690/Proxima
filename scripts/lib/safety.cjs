@@ -1,6 +1,8 @@
 const path = require('path');
 
 function validatePatchText(patchText) {
+    const text = String(patchText || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
     // Reject OpenAI patch-wrapper marker lines (not standard unified diff).
     // Match markers only when they appear as standalone lines, so code/comments
     // that merely mention "*** Begin Patch" are not falsely rejected.
@@ -9,24 +11,81 @@ function validatePatchText(patchText) {
         /^\*\*\* End Patch$/m,
         /^\*\*\* (Add|Update|Delete) File:/m,
     ];
-    if (patchWrapperMarkers.some((pattern) => pattern.test(patchText))) {
+    if (patchWrapperMarkers.some((pattern) => pattern.test(text))) {
         throw new Error('Response uses OpenAI *** Begin Patch format — not a valid unified diff. Retry with explicit prompt.');
     }
 
     // Reject markdown fences
-    if (patchText.includes('```')) {
+    if (text.includes('```')) {
         throw new Error('Patch contains markdown fences');
     }
-    
-    // Check if it looks like a unified diff
-    if (!patchText.includes('--- ') || !patchText.includes('+++ ') || !patchText.includes('@@ ')) {
-        throw new Error('Response does not appear to be a valid unified diff');
-    }
-    
-    // Reject prose before/after diff (simple check)
-    const lines = patchText.trim().split('\n');
+
+    // Reject prose before diff start
+    const lines = text.trim().split('\n');
     if (!lines[0].startsWith('--- ') && !lines[0].startsWith('Index: ') && !lines[0].startsWith('diff ')) {
         throw new Error('Patch contains prose before the diff');
+    }
+
+    // Structural validation: enforce real diff headers and real hunk bodies.
+    const hunkHeaderRe = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?:.*)$/;
+    const metadataRe = /^(index |new file mode |deleted file mode |old mode |new mode |similarity index |rename from |rename to |Binary files )/;
+    const hunkBodyLineRe = /^[ +\-\\]/; // context/add/remove/no-newline marker
+
+    let sawDiffStart = false;
+    let sawOldHeader = false;
+    let sawNewHeader = false;
+    let sawHunk = false;
+    let inHunk = false;
+
+    for (const line of lines) {
+        if (line.startsWith('diff --git ')) {
+            sawDiffStart = true;
+            inHunk = false;
+            continue;
+        }
+
+        if (line.startsWith('--- ')) {
+            sawOldHeader = true;
+            inHunk = false;
+            continue;
+        }
+
+        if (line.startsWith('+++ ')) {
+            sawNewHeader = true;
+            inHunk = false;
+            continue;
+        }
+
+        if (hunkHeaderRe.test(line)) {
+            if (!sawOldHeader || !sawNewHeader) {
+                throw new Error('Patch hunk appears before file headers');
+            }
+            sawHunk = true;
+            inHunk = true;
+            continue;
+        }
+
+        if (line.startsWith('@@ ')) {
+            throw new Error('Patch contains malformed hunk header');
+        }
+
+        if (inHunk) {
+            if (line.startsWith('diff --git ') || line.startsWith('--- ') || line.startsWith('+++ ')) {
+                inHunk = false;
+                // This line will be handled by the next loop iteration.
+            } else {
+                if (!hunkBodyLineRe.test(line)) {
+                    throw new Error('Patch contains invalid hunk body line');
+                }
+                continue;
+            }
+        }
+
+        if (line === '' || metadataRe.test(line)) continue;
+    }
+
+    if (!sawDiffStart || !sawOldHeader || !sawNewHeader || !sawHunk) {
+        throw new Error('Response does not appear to be a valid unified diff');
     }
 
     return true;

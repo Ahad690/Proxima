@@ -507,55 +507,45 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
                 rawPatch = normalizePatchText(await askProxima(prompt, config.repairModel, config.baseUrl));
                 fs.writeFileSync(path.join(repairDir, 'raw-output.txt'), rawPatch, 'utf8');
 
-                try {
-                    validatePatchText(rawPatch);
-                    rejectDangerousPaths(rawPatch, config.gitRoot, config);
-                    rejectScriptExecution(rawPatch, config);
-                    rejectPackageJsonScripts(rawPatch, config);
-                } catch (validationErr) {
-                    const recoveredPatch = recoverUnifiedDiffFromMarkdown(rawPatch);
-                    if (recoveredPatch !== rawPatch) {
-                        fs.writeFileSync(path.join(repairDir, 'raw-output-recovered.txt'), recoveredPatch, 'utf8');
-                        try {
-                            validatePatchText(recoveredPatch);
-                            rejectDangerousPaths(recoveredPatch, config.gitRoot, config);
-                            rejectScriptExecution(recoveredPatch, config);
-                            rejectPackageJsonScripts(recoveredPatch, config);
-                            rawPatch = recoveredPatch;
-                            validationErr = null;
-                        } catch {
-                            // Keep original validation error and continue with retry/fail flow.
+                const validateCandidatePatch = (candidatePatch) => {
+                    let currentPatch = candidatePatch;
+                    try {
+                        validatePatchText(currentPatch);
+                        rejectDangerousPaths(currentPatch, config.gitRoot, config);
+                        rejectScriptExecution(currentPatch, config);
+                        rejectPackageJsonScripts(currentPatch, config);
+                        return { ok: true, patch: currentPatch, error: null };
+                    } catch (validationErr) {
+                        const recoveredPatch = recoverUnifiedDiffFromMarkdown(currentPatch);
+                        if (recoveredPatch !== currentPatch) {
+                            fs.writeFileSync(path.join(repairDir, 'raw-output-recovered.txt'), recoveredPatch, 'utf8');
+                            try {
+                                validatePatchText(recoveredPatch);
+                                rejectDangerousPaths(recoveredPatch, config.gitRoot, config);
+                                rejectScriptExecution(recoveredPatch, config);
+                                rejectPackageJsonScripts(recoveredPatch, config);
+                                return { ok: true, patch: recoveredPatch, error: null };
+                            } catch {
+                                // Keep original validation error.
+                            }
                         }
+                        return { ok: false, patch: currentPatch, error: validationErr };
                     }
+                };
 
-                    if (!validationErr) {
-                        // Recovery succeeded; continue with recovered rawPatch.
-                    } else
-                    if (validationErr.message.includes('valid unified diff') || validationErr.message.includes('prose before') || validationErr.message.includes('markdown fences')) {
-                        log(`⚠️ Repair output was not a diff; retrying once with stricter patch-only prompt.`);
-                        const retryPrompt = `${prompt}
+                let validationResult = validateCandidatePatch(rawPatch);
+                if (!validationResult.ok) {
+                    log(`⚠️ Patch rejected by validator; retrying in the same chat thread.`);
+                    const retryPrompt = `Your previous response was rejected by the patch validator: ${validationResult.error.message}
 
-Your previous response was rejected because it was not a unified diff. Return ONLY a git-compatible unified diff that starts with "diff --git". Do not repeat the review, do not explain the fix, and do not use markdown fences.`;
-                        try {
-                            await resetProximaConversation(config.repairModel);
-                        } catch { /* best effort */ }
-                        rawPatch = normalizePatchText(await askProxima(retryPrompt, config.repairModel, config.baseUrl));
-                        fs.writeFileSync(path.join(repairDir, 'raw-output-retry-1.txt'), rawPatch, 'utf8');
+Return ONLY a corrected git-compatible unified diff that starts with "diff --git". Do not explain. Do not use markdown fences. Preserve exact newline structure.`;
+                    rawPatch = normalizePatchText(await askProxima(retryPrompt, config.repairModel, config.baseUrl));
+                    fs.writeFileSync(path.join(repairDir, 'raw-output-retry-1.txt'), rawPatch, 'utf8');
+                    validationResult = validateCandidatePatch(rawPatch);
+                }
 
-                        try {
-                            validatePatchText(rawPatch);
-                            rejectDangerousPaths(rawPatch, config.gitRoot, config);
-                            rejectScriptExecution(rawPatch, config);
-                            rejectPackageJsonScripts(rawPatch, config);
-                            validationErr = null;
-                        } catch (retryValidationErr) {
-                            validationErr = retryValidationErr;
-                        }
-                    }
-
-                    if (!validationErr) {
-                        // Retry succeeded; continue with the validated rawPatch.
-                    } else {
+                if (!validationResult.ok) {
+                    const validationErr = validationResult.error;
                     log(`❌ Patch rejected by validator: ${validationErr.message}`);
                     fs.writeFileSync(path.join(repairDir, 'rejected-output.txt'), rawPatch, 'utf8');
                     fs.writeFileSync(path.join(repairDir, 'validation-error.txt'), validationErr.message, 'utf8');
@@ -565,8 +555,8 @@ Your previous response was rejected because it was not a unified diff. Return ON
                         rejectedOutputPath: path.join(repairDir, 'rejected-output.txt')
                     });
                     break;
-                    }
                 }
+                rawPatch = validationResult.patch;
             } finally {
                 if (repairLockAcquired) {
                     releaseGlobalAiLock();
@@ -606,12 +596,38 @@ Your previous response was rejected because it was not a unified diff. Return ON
             }
 
             log('🔍 Validating patch (git apply --check)...');
-            const checkRes = git.applyPatchCheck(patchPath);
+            let checkRes = git.applyPatchCheck(patchPath);
             if (!checkRes.success) {
-                log(`❌ Patch validation failed: ${checkRes.stderr}`);
+                log(`⚠️ Patch validation failed: ${checkRes.stderr}`);
                 fs.writeFileSync(path.join(repairDir, 'apply.log'), `Validation failed:\n${checkRes.stderr}`, 'utf8');
-                updateStatus({ status: "patch-check-failed", error: checkRes.stderr });
-                break;
+
+                log('🔁 Retrying patch generation in the same chat thread using git-apply error feedback...');
+                const applyRetryPrompt = `Your previous unified diff failed git apply --check with this exact error:
+${(checkRes.stderr || '').trim()}
+
+Return ONLY a corrected unified diff that starts with "diff --git". No prose, no markdown fences. Keep the same intended fixes and adjust patch format/hunks so git apply --check passes.`;
+                rawPatch = normalizePatchText(await askProxima(applyRetryPrompt, config.repairModel, config.baseUrl));
+                fs.writeFileSync(path.join(repairDir, 'raw-output-applycheck-retry-1.txt'), rawPatch, 'utf8');
+
+                validatePatchText(rawPatch);
+                rejectDangerousPaths(rawPatch, config.gitRoot, config);
+                rejectScriptExecution(rawPatch, config);
+                rejectPackageJsonScripts(rawPatch, config);
+
+                const fixedRetryPatch = fixPatchHunkHeaders(rawPatch);
+                fs.writeFileSync(patchPath, fixedRetryPatch, 'utf8');
+                if (fixedRetryPatch !== rawPatch) {
+                    log(dim('🔧 Hunk headers recounted on apply-check retry patch.'));
+                    fs.writeFileSync(path.join(repairDir, 'raw-output-applycheck-retry-original.txt'), rawPatch, 'utf8');
+                }
+
+                checkRes = git.applyPatchCheck(patchPath);
+                if (!checkRes.success) {
+                    log(`❌ Patch validation failed after retry: ${checkRes.stderr}`);
+                    fs.writeFileSync(path.join(repairDir, 'apply.log'), `Validation failed after retry:\n${checkRes.stderr}`, 'utf8');
+                    updateStatus({ status: "patch-check-failed", error: checkRes.stderr });
+                    break;
+                }
             }
 
             // 4. Branch and Apply

@@ -122,6 +122,27 @@ diff --git a/scripts/lib/safety.cjs b/scripts/lib/safety.cjs
 `;
     safety.validatePatchText(quotedMarkerInDiff);
 
+    // 6. Reject diff-like text that lacks real hunk headers/body structure
+    const malformedDiffLike = `
+diff --git a/file.js b/file.js
+index 1111111..2222222 100644
+--- a/file.js
++++ b/file.js
+-const A = 1;
++const A = 2;
+Hunk headers (@@ -L,N +L,N @@) must match.
+`;
+    try {
+        safety.validatePatchText(malformedDiffLike);
+        throw new Error('Should have rejected malformed diff-like patch');
+    } catch (e) {
+        const ok =
+            e.message.includes('valid unified diff') ||
+            e.message.includes('malformed hunk header') ||
+            e.message.includes('invalid hunk body line');
+        if (!ok) throw e;
+    }
+
     console.log('✅ Safety Validator tests passed.');
 }
 
