@@ -576,12 +576,29 @@ async function main() {
     }
 
     // Manual run: node cli/proxima-review.cjs <sha>
+    // Behaves identically to the git hook — spawns the full repair loop in a new window.
+    // Use --review-only to skip the loop and just generate a review file.
     const commitRef = args[0];
-    try {
-        await runReview(commitRef);
-    } catch (e) {
-        console.error(red('Error: ') + e.message);
-        process.exit(1);
+    const reviewOnly = args.includes('--review-only');
+
+    if (reviewOnly) {
+        try {
+            await runReview(commitRef, { force: args.includes('--force') });
+        } catch (e) {
+            console.error(red('Error: ') + e.message);
+            process.exit(1);
+        }
+    } else {
+        // Resolve to full SHA first
+        const { execSync } = require('child_process');
+        let sha;
+        try {
+            sha = execSync(`git rev-parse ${commitRef}`, { encoding: 'utf8' }).trim();
+        } catch (e) {
+            console.error(red('Error: ') + `Cannot resolve ref '${commitRef}': ${e.message}`);
+            process.exit(1);
+        }
+        spawnBackground(sha);
     }
 }
 
