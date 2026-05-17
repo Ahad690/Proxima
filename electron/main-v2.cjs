@@ -510,7 +510,7 @@ async function handleMCPRequest(request) {
 
             case 'sendMessage':
                 // Extract options — Perplexity uses modelPreference, ChatGPT uses model
-                const sendOptions = { modelPreference: data.modelPreference, model: data.model };
+                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
                 // Check if file should be uploaded
                 if (data.filePath && fileReferenceEnabled) {
@@ -770,7 +770,7 @@ async function sendMessageToProvider(provider, message, forceDOM = false, option
     if (!forceDOM) {
         try {
             console.log(`[${provider}] Trying API-first approach...`);
-            const apiResponse = await providerAPI.sendViaAPI(provider, webContents, message);
+            const apiResponse = await providerAPI.sendViaAPI(provider, webContents, message, options);
             if (apiResponse && apiResponse.length > 0) {
                 console.log(`[${provider}] \u2714 API response captured (${apiResponse.length} chars)`);
                 _apiResponseCache[provider] = apiResponse;

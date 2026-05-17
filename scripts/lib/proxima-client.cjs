@@ -15,14 +15,23 @@ function resolveProvider(model) {
     return 'perplexity';
 }
 
+function resolveThinkingEffort(model, explicitEffort) {
+    if (explicitEffort) return explicitEffort;
+    if (!model) return 'standard';
+    const m = model.toLowerCase();
+    return m.includes('thinking') ? 'extended' : 'standard';
+}
+
 /**
  * Send a prompt to Proxima via IPC and return the text response.
  * @param {string} message  - The full prompt text
  * @param {string} model    - Model name (e.g. "chatgpt", "claude", "gpt-5-5-thinking")
  * @param {string} _baseUrl - Ignored; kept for API compatibility
+ * @param {object} opts     - Optional: { thinkingEffort: "standard" | "extended" }
  */
-async function askProxima(message, model, _baseUrl) {
+async function askProxima(message, model, _baseUrl, opts = {}) {
     const provider = resolveProvider(model);
+    const thinkingEffort = resolveThinkingEffort(model, opts.thinkingEffort);
 
     return new Promise((resolve, reject) => {
         const socket = net.createConnection({ port: IPC_PORT, host: IPC_HOST });
@@ -40,7 +49,7 @@ async function askProxima(message, model, _baseUrl) {
 
         function buildSendPayload() {
             if (provider === 'chatgpt') {
-                return { message, model };
+                return { message, model, thinkingEffort };
             }
             return { message, modelPreference: model, deepSearch: false };
         }
@@ -95,4 +104,4 @@ async function askProxima(message, model, _baseUrl) {
     });
 }
 
-module.exports = { askProxima };
+module.exports = { askProxima, resolveThinkingEffort };

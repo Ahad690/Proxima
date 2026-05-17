@@ -23,13 +23,24 @@ const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[22m`;
 
 /**
+ * Normalizes model-generated patches before validation and git apply.
+ * A missing final newline can make git report "corrupt patch" at EOF.
+ */
+function normalizePatchText(patchText) {
+    let normalized = patchText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (!normalized.endsWith('\n')) normalized += '\n';
+    return normalized;
+}
+
+/**
  * Recounts all hunk headers in a unified diff so that the @@ -L,N +L,N @@ counts
  * match the actual content lines. The START line numbers are preserved as-is
  * (git apply --recount already handles those). This fixes the most common LLM error
  * of generating wrong line counts in hunk headers.
  */
 function fixPatchHunkHeaders(patchText) {
-    const lines = patchText.split('\n');
+    const lines = normalizePatchText(patchText).split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
     const result = [];
     let i = 0;
 
@@ -59,7 +70,8 @@ function fixPatchHunkHeaders(patchText) {
         let oldCount = 0;
         let newCount = 0;
         for (const hl of hunkLines) {
-            if (hl.startsWith('-')) { oldCount++; }
+            if (hl.startsWith('\\')) { continue; } // "\ No newline at end of file" marker
+            else if (hl.startsWith('-')) { oldCount++; }
             else if (hl.startsWith('+')) { newCount++; }
             else { oldCount++; newCount++; } // context line
         }
@@ -68,7 +80,7 @@ function fixPatchHunkHeaders(patchText) {
         result.push(...hunkLines);
     }
 
-    return result.join('\n');
+    return result.join('\n') + '\n';
 }
 
 function getIterationSeverityPolicy(iteration) {
@@ -357,7 +369,7 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
         fs.writeFileSync(path.join(repairDir, 'repair.prompt.txt'), prompt, 'utf8');
 
         try {
-            const rawPatch = await askProxima(prompt, config.repairModel, config.baseUrl);
+            const rawPatch = normalizePatchText(await askProxima(prompt, config.repairModel, config.baseUrl));
             fs.writeFileSync(path.join(repairDir, 'raw-output.txt'), rawPatch, 'utf8');
 
             try {
@@ -408,6 +420,15 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
                 }
             }
 
+            log('🔍 Validating patch (git apply --check)...');
+            const checkRes = git.applyPatchCheck(patchPath);
+            if (!checkRes.success) {
+                log(`❌ Patch validation failed: ${checkRes.stderr}`);
+                fs.writeFileSync(path.join(repairDir, 'apply.log'), `Validation failed:\n${checkRes.stderr}`, 'utf8');
+                updateStatus({ status: "patch-check-failed", error: checkRes.stderr });
+                break;
+            }
+
             // 4. Branch and Apply
             if (!botBranchCreated) {
                 botBranchName = `${config.repairBranchPrefix}-${shortSha}-iter-${iteration}`;
@@ -424,15 +445,6 @@ Output your unified diff below. Start immediately with "diff --git" — no pream
                 }
                 botBranchCreated = true;
                 updateStatus({ botBranch: botBranchName, recoveryInstructions: `Repair in progress. To reset, git checkout ${sourceBranch} && git branch -D ${botBranchName}` });
-            }
-
-            log('🔍 Validating patch (git apply --check)...');
-            const checkRes = git.applyPatchCheck(patchPath);
-            if (!checkRes.success) {
-                log(`❌ Patch validation failed: ${checkRes.stderr}`);
-                fs.writeFileSync(path.join(repairDir, 'apply.log'), `Validation failed:\n${checkRes.stderr}`, 'utf8');
-                updateStatus({ status: "patch-check-failed", error: checkRes.stderr });
-                break;
             }
 
             log('🩹 Applying patch...');
@@ -568,3 +580,10 @@ if (require.main === module) {
         process.exit(1);
     });
 }
+
+module.exports = {
+    fixPatchHunkHeaders,
+    normalizePatchText,
+    getIterationSeverityPolicy,
+    hasBlockingFindings
+};
