@@ -123,10 +123,14 @@ async function sendViaAPI(provider, webContents, message, options = {}) {
         );
 
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        const charCount = result ? result.length : 0;
+        const charCount = typeof result === 'string' ? result.length : 0;
         console.log(`[ProviderAPI] ✔ ${provider} API response: ${charCount} chars in ${elapsed}s`);
 
-        return result || null;
+        // Preserve empty string responses so caller can decide whether to wait
+        // (patient API-first) instead of instantly falling back to DOM.
+        if (typeof result === 'string') return result;
+        if (result == null) return null;
+        return String(result);
     } catch (e) {
         console.error(`[ProviderAPI] ✘ ${provider} API error:`, e.message);
         return null;

@@ -756,6 +756,14 @@ async function sendMessageToProvider(provider, message, forceDOM = false, option
                 _apiResponseCache[provider] = apiResponse;
                 return { response: apiResponse };
             }
+            // ChatGPT sometimes starts generation but returns an early empty API body.
+            // In this case, be patient and let getResponseWithTyping capture the response
+            // instead of re-sending via DOM (which can duplicate prompts).
+            if (provider === 'chatgpt' && apiResponse === '') {
+                console.log(`[${provider}] API returned empty early — waiting via response capture (no DOM re-send)`);
+                delete _apiResponseCache[provider];
+                return { response: '', apiPending: true };
+            }
             console.log(`[${provider}] API returned empty — falling back to DOM`);
             delete _apiResponseCache[provider];
         } catch (apiErr) {
