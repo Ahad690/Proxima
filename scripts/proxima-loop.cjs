@@ -211,17 +211,23 @@ async function main() {
         // Build current file contents for each file touched by the original diff
         const diffRes = git.runCommand('git', ['show', '--no-color', currentSha]);
         const rawDiff = diffRes.stdout;
-        const touchedInDiff = git.getFilesFromPatch(
-            (() => { const f = path.join(repairDir, '_orig.patch'); fs.writeFileSync(f, rawDiff); return f; })()
-        );
+        // Write patch to temp file first
+        const origPatchPath = path.join(repairDir, '_orig.patch');
+        fs.writeFileSync(origPatchPath, rawDiff, 'utf8');
+        const touchedInDiff = git.getFilesFromPatch(origPatchPath) || [];
+        const repoRoot = process.cwd();
+
         let fileContentsSection = '';
-        for (const relPath of touchedInDiff.slice(0, 5)) { // cap at 5 files
-            const absPath = path.join(process.cwd(), relPath);
-            if (fs.existsSync(absPath)) {
-                const lines = fs.readFileSync(absPath, 'utf8').split('\n');
-                const numbered = lines.map((l, i) => `${String(i + 1).padStart(4)}: ${l}`).join('\n');
-                fileContentsSection += `\n--- CURRENT FILE: ${relPath} ---\n${numbered}\n`;
-            }
+        for (const relPath of touchedInDiff) {
+            // Safety: ensure the path is relative and stays inside the repo
+            const absPath = path.resolve(repoRoot, relPath);
+            if (!absPath.startsWith(repoRoot + path.sep) && absPath !== repoRoot) continue;
+            if (!fs.existsSync(absPath)) continue;
+
+            // Normalize line endings and strip trailing newline before numbering
+            const raw = fs.readFileSync(absPath, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n$/, '');
+            const numbered = raw.split('\n').map((l, i) => `${String(i + 1).padStart(4)}: ${l}`).join('\n');
+            fileContentsSection += `\n--- CURRENT FILE: ${relPath} ---\n${numbered}\n`;
         }
 
         const prompt = `You are an expert software engineer. Based on the following code review and original diff, generate a unified diff patch to fix ONLY the Critical and High severity findings.
