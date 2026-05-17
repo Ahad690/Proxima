@@ -71,6 +71,37 @@ function fixPatchHunkHeaders(patchText) {
     return result.join('\n');
 }
 
+function getIterationSeverityPolicy(iteration) {
+    if (iteration <= 1) {
+        return {
+            label: 'Critical/High/Medium/Low',
+            includeMedium: true,
+            includeLow: true
+        };
+    }
+
+    if (iteration === 2) {
+        return {
+            label: 'Critical/High/Medium',
+            includeMedium: true,
+            includeLow: false
+        };
+    }
+
+    return {
+        label: 'Critical/High',
+        includeMedium: false,
+        includeLow: false
+    };
+}
+
+function hasBlockingFindings(counts, policy) {
+    if (counts.critical > 0 || counts.high > 0) return true;
+    if (policy.includeMedium && counts.medium > 0) return true;
+    if (policy.includeLow && counts.low > 0) return true;
+    return false;
+}
+
 
 async function main() {
     const config = loadConfig();
@@ -200,14 +231,17 @@ async function main() {
         }
 
         const score = parser.parseScore(reviewContent);
+        const severityPolicy = getIterationSeverityPolicy(iteration);
         log(`📊 Score: ${score}/10 | Critical: ${counts.critical} | High: ${counts.high}`);
+        log(`🎯 Iteration ${iteration} target severities: ${severityPolicy.label}`);
 
         updateStatus({
             score,
             critical: counts.critical,
             high: counts.high,
             medium: counts.medium,
-            low: counts.low
+            low: counts.low,
+            targetSeverities: severityPolicy.label
         });
 
         // 2. Check if clean
@@ -241,8 +275,9 @@ async function main() {
         }
         updateStatus({ testsPassed });
 
-        if (testsPassed && counts.critical === 0 && counts.high === 0) {
-            log('✅ Clean state reached (Tests pass, no Critical/High findings).');
+        const hasTargetFindings = hasBlockingFindings(counts, severityPolicy);
+        if (testsPassed && !hasTargetFindings) {
+            log(`✅ Clean state reached (Tests pass, no ${severityPolicy.label} findings).`);
             updateStatus({ status: "clean-local" });
             
             if (botBranchCreated && pushRequested) {
@@ -295,14 +330,20 @@ async function main() {
             fileContentsSection += `\n--- CURRENT FILE: ${relPath} ---\n${numbered}\n`;
         }
 
-        const prompt = `You are an expert software engineer. Based on the following code review and original diff, generate a unified diff patch to fix ONLY the Critical and High severity findings.
+        const severityInstruction = severityPolicy.includeLow
+            ? 'Fix Critical, High, Medium, and Low findings.'
+            : severityPolicy.includeMedium
+                ? 'Fix ONLY Critical, High, and Medium findings. Ignore Low and Informational findings.'
+                : 'Fix ONLY Critical and High findings. Ignore Medium, Low, and Informational findings.';
+
+        const prompt = `You are an expert software engineer. Based on the following code review and original diff, generate a unified diff patch to fix the required severity findings for this iteration.
 
 STRICT RULES:
 1. Output ONLY a valid unified diff — no markdown fences, no prose, no explanations.
 2. Use EXACTLY the file paths from the diff headers (e.g. "--- a/scripts/lib/safety.cjs").
 3. Hunk headers (@@ -L,N +L,N @@) must reflect the CURRENT FILE line numbers shown below.
 4. Include 3 lines of unchanged context around every change.
-5. Fix ONLY Critical and High issues. Do NOT refactor or change unrelated code.
+5. ${severityInstruction} Do NOT refactor or change unrelated code.
 6. If a finding cannot be fixed with a code patch (e.g. "add documentation"), skip it.
 
 --- REVIEW ---
