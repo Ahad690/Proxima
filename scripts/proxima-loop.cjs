@@ -311,7 +311,7 @@ ${reviewContent}
 --- ORIGINAL DIFF ---
 ${rawDiff}
 ${fileContentsSection}
-PATCH:`;
+Output your unified diff below. Start immediately with "diff --git" — no preamble, no explanation, no markdown:`;
 
         fs.writeFileSync(path.join(repairDir, 'repair.prompt.txt'), prompt, 'utf8');
 

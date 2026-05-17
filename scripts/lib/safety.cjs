@@ -1,6 +1,11 @@
 const path = require('path');
 
 function validatePatchText(patchText) {
+    // Reject OpenAI's *** Begin Patch format (not a standard unified diff)
+    if (patchText.includes('*** Begin Patch') || patchText.includes('*** End Patch')) {
+        throw new Error('Response uses OpenAI *** Begin Patch format — not a valid unified diff. Retry with explicit prompt.');
+    }
+
     // Reject markdown fences
     if (patchText.includes('```')) {
         throw new Error('Patch contains markdown fences');
