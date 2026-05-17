@@ -534,11 +534,12 @@ function spawnBackground(sha) {
             "Write-Host ''",
             "Write-Host '--- Automation finished. Auto-closing in 5 minutes ---'",
             "Start-Sleep -Seconds 300",
+            "Exit 0",
         ];
         fs.writeFileSync(tmpScript, ps1Lines.join('\r\n'), 'utf8');
         child = spawn('cmd.exe', [
             '/c', 'start', 'Proxima Automation',
-            'powershell.exe', '-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpScript
+            'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpScript
         ], { detached: true, stdio: 'ignore' });
     } else {
         child = spawn(process.execPath, [loopScript], {
