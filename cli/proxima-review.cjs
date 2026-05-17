@@ -71,6 +71,9 @@ const PROVIDER_LABEL = PROVIDER_DISPLAY[REVIEW_PROVIDER] || REVIEW_PROVIDER;
 // Universal lock file in the home directory to prevent cross-project Hub overloading
 const LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
 const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min
+const SOCKET_TIMEOUT_MS = parseInt(process.env.PROXIMA_IPC_TIMEOUT_MS || '', 10) || (15 * 60 * 1000);
+const CAPTURE_RETRY_DELAY_MS = parseInt(process.env.PROXIMA_CAPTURE_RETRY_DELAY_MS || '', 10) || 2500;
+const CAPTURE_MAX_ATTEMPTS = parseInt(process.env.PROXIMA_CAPTURE_MAX_ATTEMPTS || '', 10) || 2;
 
 // ─── Git root detection ───────────────────────────────────────────────────────
 function findGitRoot() {
@@ -86,7 +89,7 @@ function tryAcquireLock(commitSha) {
     if (fs.existsSync(LOCK_FILE)) {
         try {
             const lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8'));
-            if (Date.now() - lock.time > STALE_LOCK_MS) {
+            if (shouldReapLock(lock)) {
                 fs.unlinkSync(LOCK_FILE);
             } else {
                 return false; // Another review is actively running
@@ -159,13 +162,19 @@ function queryAI(message, model, provider) {
         let state = 'waitingSendAck';
         let reqId = 0;
         let captureRequestId = null;
+        let captureAttempts = 0;
 
-        socket.setTimeout(1800000); // 30 min max
+        socket.setTimeout(SOCKET_TIMEOUT_MS);
 
         function ipcSend(action, data) {
             reqId++;
             socket.write(JSON.stringify({ requestId: reqId, action, provider, data }) + '\n');
             return reqId;
+        }
+
+        function requestCapture() {
+            captureAttempts++;
+            captureRequestId = ipcSend('getResponseWithTyping', {});
         }
 
         // Build the correct payload for each provider
@@ -198,15 +207,21 @@ function queryAI(message, model, provider) {
                             return;
                         }
                         state = 'waitingResponse';
-                        captureRequestId = ipcSend('getResponseWithTyping', {});
+                        requestCapture();
 
                     } else if (state === 'waitingResponse' && resp.requestId === captureRequestId) {
                         const text = resp.response || '';
 
                         if (isPlaceholderResponse(text)) {
+                            if (captureAttempts >= CAPTURE_MAX_ATTEMPTS) {
+                                state = 'done';
+                                socket.end();
+                                reject(new Error(provider + ' response capture failed after ' + captureAttempts + ' attempts'));
+                                return;
+                            }
                             setTimeout(() => {
-                                captureRequestId = ipcSend('getResponseWithTyping', {});
-                            }, 2500);
+                                requestCapture();
+                            }, CAPTURE_RETRY_DELAY_MS);
                             continue;
                         }
 
@@ -230,9 +245,28 @@ function queryAI(message, model, provider) {
 
         socket.on('timeout', () => {
             socket.destroy();
-            reject(new Error('IPC request timed out after 30 minutes'));
+            reject(new Error('IPC request timed out after ' + Math.round(SOCKET_TIMEOUT_MS / 60000) + ' minutes'));
         });
     });
+}
+
+function isProcessRunning(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (e) {
+        return e && e.code === 'EPERM';
+    }
+}
+
+function shouldReapLock(lock) {
+    const lockTime = Number(lock && lock.time);
+    const lockAge = Number.isFinite(lockTime) ? Date.now() - lockTime : Infinity;
+    if (lock && Number.isInteger(lock.pid)) {
+        return !isProcessRunning(lock.pid);
+    }
+    return lockAge > STALE_LOCK_MS;
 }
 
 // ─── Git helpers ──────────────────────────────────────────────────────────────

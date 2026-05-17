@@ -25,11 +25,30 @@ const dim = (s) => `\x1b[2m${s}\x1b[22m`;
 const GLOBAL_AI_LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
 const GLOBAL_AI_LOCK_STALE_MS = 15 * 60 * 1000; // 15 min
 
+function isProcessRunning(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (e) {
+        return e && e.code === 'EPERM';
+    }
+}
+
+function shouldReapGlobalAiLock(lock) {
+    const lockTime = Number(lock && lock.time);
+    const lockAge = Number.isFinite(lockTime) ? Date.now() - lockTime : Infinity;
+    if (lock && Number.isInteger(lock.pid)) {
+        return !isProcessRunning(lock.pid);
+    }
+    return lockAge > GLOBAL_AI_LOCK_STALE_MS;
+}
+
 function tryAcquireGlobalAiLock(lockTag) {
     if (fs.existsSync(GLOBAL_AI_LOCK_FILE)) {
         try {
             const lock = JSON.parse(fs.readFileSync(GLOBAL_AI_LOCK_FILE, 'utf8'));
-            if (Date.now() - lock.time > GLOBAL_AI_LOCK_STALE_MS) {
+            if (shouldReapGlobalAiLock(lock)) {
                 fs.unlinkSync(GLOBAL_AI_LOCK_FILE);
             } else {
                 return false;

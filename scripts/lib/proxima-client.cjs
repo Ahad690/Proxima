@@ -7,6 +7,9 @@ const net = require('net');
 
 const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
 const IPC_HOST = '127.0.0.1';
+const SOCKET_TIMEOUT_MS = parseInt(process.env.PROXIMA_IPC_TIMEOUT_MS || '', 10) || (15 * 60 * 1000);
+const CAPTURE_RETRY_DELAY_MS = parseInt(process.env.PROXIMA_CAPTURE_RETRY_DELAY_MS || '', 10) || 2500;
+const CAPTURE_MAX_ATTEMPTS = parseInt(process.env.PROXIMA_CAPTURE_MAX_ATTEMPTS || '', 10) || 2;
 
 function resolveProvider(model) {
     if (!model) return 'chatgpt';
@@ -44,13 +47,19 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
         let state = 'waitingSendAck';
         let reqId = 0;
         let captureRequestId = null;
+        let captureAttempts = 0;
 
-        socket.setTimeout(1800000); // 30 min max
+        socket.setTimeout(SOCKET_TIMEOUT_MS);
 
         function ipcSend(action, data) {
             reqId++;
             socket.write(JSON.stringify({ requestId: reqId, action, provider, data }) + '\n');
             return reqId;
+        }
+
+        function requestCapture() {
+            captureAttempts++;
+            captureRequestId = ipcSend('getResponseWithTyping', {});
         }
 
         function buildSendPayload() {
@@ -81,14 +90,20 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
                             return;
                         }
                         state = 'waitingResponse';
-                        captureRequestId = ipcSend('getResponseWithTyping', {});
+                        requestCapture();
 
                     } else if (state === 'waitingResponse' && resp.requestId === captureRequestId) {
                         const text = resp.response || '';
                         if (isPlaceholderResponse(text)) {
+                            if (captureAttempts >= CAPTURE_MAX_ATTEMPTS) {
+                                state = 'done';
+                                socket.end();
+                                reject(new Error(provider + ' response capture failed after ' + captureAttempts + ' attempts'));
+                                return;
+                            }
                             setTimeout(() => {
-                                captureRequestId = ipcSend('getResponseWithTyping', {});
-                            }, 2500);
+                                requestCapture();
+                            }, CAPTURE_RETRY_DELAY_MS);
                             continue;
                         }
                         state = 'done';
@@ -107,7 +122,7 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
 
         socket.on('timeout', () => {
             socket.destroy();
-            reject(new Error('IPC request to Proxima timed out after 30 minutes'));
+            reject(new Error('IPC request to Proxima timed out after ' + Math.round(SOCKET_TIMEOUT_MS / 60000) + ' minutes'));
         });
     });
 }
