@@ -94,27 +94,56 @@ function rejectDangerousPaths(patchText, gitRoot, config = {}) {
 }
 
 function rejectScriptExecution(content, config = {}) {
-    const dangerousPatterns = [
-        /#!/,
-        /powershell/i,
-        /pwsh/i,
-        /cmd\.exe/i,
-        /bash/i,
-        /sh /i,
-        /\.ps1/i,
-        /\.sh/i,
-        /\.bat/i
+    // Patterns that indicate actual shell *execution* — not mere string references
+    // These match shell shebang lines or spawn/exec calls with these interpreters
+    const executionPatterns = [
+        /^#!.*\/(bash|sh|zsh|pwsh|powershell)/i,   // shebang lines
+        /`[^`]*(powershell|bash|cmd\.exe|pwsh)[^`]*`/,  // backtick execution
+        /exec(?:Sync|File)?\s*\(\s*['"](?:powershell|bash|cmd\.exe|pwsh)/i,  // execSync("powershell...")
+        /spawn\s*\(\s*['"](?:bash|sh|zsh|pwsh)\s*['"]/i,  // spawn("bash")
     ];
-    
-    // Always block these regardless of config for execution context safety
-    for (const pattern of dangerousPatterns) {
+
+    // Patterns that look like new script FILES being created
+    const newScriptFilePatterns = [
+        /\+\+\+ b\/.*\.ps1\b/,
+        /\+\+\+ b\/.*\.sh\b/,
+        /\+\+\+ b\/.*\.bat\b/,
+        /\+\+\+ b\/.*\.cmd\b/,
+    ];
+
+    // Check for new script files being created by patch
+    for (const pattern of newScriptFilePatterns) {
         if (pattern.test(content)) {
-            throw new Error(`Response contains forbidden script pattern: ${pattern}`);
+            throw new Error(`Patch creates a new shell script file, which is not allowed: ${pattern}`);
         }
     }
 
-    if (config.allowGeneratedScripts === false) {
-        // Additional checks if needed
+    // For execution patterns, only scan lines that are actual shebang/top-level lines
+    // (not + lines inside source code files where they're string arguments)
+    const lines = content.split('\n');
+    let inSourceFile = false;
+
+    for (const line of lines) {
+        // Track which file we're in
+        if (line.startsWith('+++ b/')) {
+            const filePath = line.substring(6).split('\t')[0].trim();
+            const ext = filePath.split('.').pop().toLowerCase();
+            // These extensions are source code — strings inside them are not execution
+            inSourceFile = ['cjs', 'js', 'mjs', 'ts', 'tsx', 'jsx', 'py', 'rb', 'go', 'java', 'cs'].includes(ext);
+            continue;
+        }
+
+        // Skip string literals inside source files
+        if (inSourceFile) continue;
+
+        // Only check added lines in non-source files
+        if (!line.startsWith('+')) continue;
+
+        for (const pattern of executionPatterns) {
+            if (pattern.test(line)) {
+                throw new Error(`Response contains forbidden script execution pattern in patch: ${pattern}`);
+            }
+        }
     }
 }
 
