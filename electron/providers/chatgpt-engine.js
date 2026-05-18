@@ -231,6 +231,23 @@
         if (parsed.delta && typeof parsed.delta.text === 'string') return parsed.delta.text;
         if (typeof parsed.text === 'string') return parsed.text;
         if (parsed.message_delta && typeof parsed.message_delta === 'string') return parsed.message_delta;
+        // JSON-patch style stream events (common in some ChatGPT SSE paths)
+        if (typeof parsed.value === 'string') {
+            if (
+                (typeof parsed.p === 'string' && parsed.p.indexOf('/message/content/parts/') >= 0) ||
+                (typeof parsed.path === 'string' && parsed.path.indexOf('/message/content/parts/') >= 0)
+            ) {
+                return parsed.value;
+            }
+        }
+        if (Array.isArray(parsed.value)) {
+            if (
+                (typeof parsed.p === 'string' && parsed.p.indexOf('/message/content/parts/') >= 0) ||
+                (typeof parsed.path === 'string' && parsed.path.indexOf('/message/content/parts/') >= 0)
+            ) {
+                return parsed.value.join('');
+            }
+        }
         return '';
     }
 
@@ -272,8 +289,10 @@
         var sawAssistantEvent = false;
 
         function processLine(line) {
-            if (!line.startsWith('data: ')) return;
-            var data = line.slice(6).trim();
+            var normalized = String(line || '').trimStart();
+            if (!normalized.startsWith('data:')) return;
+            // Accept both "data: {...}" and "data:{...}" forms.
+            var data = normalized.slice(5).trimStart();
             if (!data || data === '[DONE]') return;
 
             try {
@@ -317,7 +336,7 @@
         }
 
         // Process trailing partial line if the stream ended without newline.
-        if (buffer && buffer.indexOf('data: ') === 0) processLine(buffer);
+        if (buffer && String(buffer).trimStart().indexOf('data:') === 0) processLine(buffer);
         reader.releaseLock();
         if (fullText) return fullText;
         if (streamText) return streamText;
