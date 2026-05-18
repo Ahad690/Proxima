@@ -594,9 +594,10 @@ function spawnBackground(sha) {
         const tmpScript = path.join(os.tmpdir(), 'proxima-loop-' + Date.now() + '.ps1');
         const safeRoot = gitRoot.replace(/'/g, "''");
         const safeLoop = loopScript.replace(/'/g, "''");
+        const safeSha = String(sha || '').replace(/'/g, "''");
         const ps1Lines = [
             "Set-Location '" + safeRoot + "'",
-            "node '" + safeLoop + "'",
+            "node '" + safeLoop + "' --sha '" + safeSha + "'",
             "Exit 0",
         ];
         fs.writeFileSync(tmpScript, ps1Lines.join('\r\n'), 'utf8');
@@ -605,7 +606,7 @@ function spawnBackground(sha) {
             'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpScript
         ], { detached: true, stdio: 'ignore' });
     } else {
-        child = spawn(process.execPath, [loopScript], {
+        child = spawn(process.execPath, [loopScript, '--sha', sha], {
             detached: true,
             stdio: ['ignore', out, out],
             cwd: gitRoot,
