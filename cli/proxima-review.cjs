@@ -73,7 +73,7 @@ const LOCK_FILE = path.join(os.homedir(), '.proxima-review.lock');
 const STALE_LOCK_MS = 15 * 60 * 1000; // 15 min
 const SOCKET_TIMEOUT_MS = parseInt(process.env.PROXIMA_IPC_TIMEOUT_MS || '', 10) || (15 * 60 * 1000);
 const CAPTURE_RETRY_DELAY_MS = parseInt(process.env.PROXIMA_CAPTURE_RETRY_DELAY_MS || '', 10) || 2500;
-const CAPTURE_MAX_ATTEMPTS = parseInt(process.env.PROXIMA_CAPTURE_MAX_ATTEMPTS || '', 10) || 2;
+const CAPTURE_MAX_ATTEMPTS = parseInt(process.env.PROXIMA_CAPTURE_MAX_ATTEMPTS || '', 10) || 120;
 
 // ─── Git root detection ───────────────────────────────────────────────────────
 function findGitRoot() {

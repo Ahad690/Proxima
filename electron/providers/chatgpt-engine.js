@@ -234,6 +234,33 @@
         return '';
     }
 
+    function _latestAssistantMessageText() {
+        try {
+            var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
+            if (!nodes || nodes.length === 0) return '';
+            return (nodes[nodes.length - 1].innerText || nodes[nodes.length - 1].textContent || '').trim();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    async function _waitForAssistantDomResponse(previousText, timeoutMs) {
+        var deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            var text = _latestAssistantMessageText();
+            if (
+                text &&
+                text !== previousText &&
+                text.toLowerCase() !== 'thinking...' &&
+                text.toLowerCase() !== 'thinking'
+            ) {
+                return text;
+            }
+            await new Promise(function (r) { setTimeout(r, 500); });
+        }
+        return '';
+    }
+
     // ─── SSE Stream Parser ──────────────────────────
 
     async function _parseSSEStream(response) {
@@ -377,6 +404,7 @@
 
     async function send(message, options) {
         var token = await _getToken();
+        var previousAssistantText = _latestAssistantMessageText();
 
         // OAI-Device-Id header required for API auth
         var deviceId = '';
@@ -472,6 +500,9 @@
                 throw new Error('ChatGPT API error (' + res.status + '): ' + err.substring(0, 300));
             }
             var result = await _parseSSEStream(res);
+            if (!result) {
+                result = await _waitForAssistantDomResponse(previousAssistantText, 120000);
+            }
             clearTimeout(retryTimeoutId);
             return result;
         }
@@ -490,6 +521,9 @@
         }
 
         var result = await _parseSSEStream(res);
+        if (!result) {
+            result = await _waitForAssistantDomResponse(previousAssistantText, 120000);
+        }
         clearTimeout(timeoutId);
         return result;
     }

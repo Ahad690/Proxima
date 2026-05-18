@@ -9,7 +9,7 @@ const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
 const IPC_HOST = '127.0.0.1';
 const SOCKET_TIMEOUT_MS = parseInt(process.env.PROXIMA_IPC_TIMEOUT_MS || '', 10) || (15 * 60 * 1000);
 const CAPTURE_RETRY_DELAY_MS = parseInt(process.env.PROXIMA_CAPTURE_RETRY_DELAY_MS || '', 10) || 2500;
-const CAPTURE_MAX_ATTEMPTS = parseInt(process.env.PROXIMA_CAPTURE_MAX_ATTEMPTS || '', 10) || 2;
+const CAPTURE_MAX_ATTEMPTS = parseInt(process.env.PROXIMA_CAPTURE_MAX_ATTEMPTS || '', 10) || 120;
 
 function resolveProvider(model) {
     if (!model) return 'chatgpt';
