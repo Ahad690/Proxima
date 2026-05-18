@@ -8,9 +8,6 @@
     if (window.__proximaChatGPT) return;
 
     var CHATGPT_BASE = 'https://chatgpt.com';
-    var CHATGPT_CONVERSATION_ENDPOINT = '/backend-api/f/conversation';
-    var CHATGPT_ALT_CONVERSATION_ENDPOINT = '/backend-api/conversation';
-    var CHATGPT_PREPARE_ENDPOINT = '/backend-api/f/conversation/prepare';
     var TIMEOUT = 360000;
 
     // ─── State ───────────────────────────────────────
@@ -212,72 +209,6 @@
         return result;
     }
 
-    function _extractAssistantTextFromMessage(message) {
-        if (!message || !message.author || message.author.role !== 'assistant') return '';
-        var content = message.content || {};
-        if (Array.isArray(content.parts) && content.parts.length > 0) {
-            return content.parts.join('');
-        }
-        if (typeof content.text === 'string') return content.text;
-        if (Array.isArray(content.text) && content.text.length > 0) {
-            return content.text.join('');
-        }
-        return '';
-    }
-
-    function _extractAssistantDelta(parsed) {
-        if (!parsed || typeof parsed !== 'object') return '';
-        if (typeof parsed.delta === 'string') return parsed.delta;
-        if (parsed.delta && typeof parsed.delta.text === 'string') return parsed.delta.text;
-        if (typeof parsed.text === 'string') return parsed.text;
-        if (parsed.message_delta && typeof parsed.message_delta === 'string') return parsed.message_delta;
-        // JSON-patch style stream events (common in some ChatGPT SSE paths)
-        if (typeof parsed.value === 'string') {
-            if (
-                (typeof parsed.p === 'string' && parsed.p.indexOf('/message/content/parts/') >= 0) ||
-                (typeof parsed.path === 'string' && parsed.path.indexOf('/message/content/parts/') >= 0)
-            ) {
-                return parsed.value;
-            }
-        }
-        if (Array.isArray(parsed.value)) {
-            if (
-                (typeof parsed.p === 'string' && parsed.p.indexOf('/message/content/parts/') >= 0) ||
-                (typeof parsed.path === 'string' && parsed.path.indexOf('/message/content/parts/') >= 0)
-            ) {
-                return parsed.value.join('');
-            }
-        }
-        return '';
-    }
-
-    function _latestAssistantMessageText() {
-        try {
-            var nodes = document.querySelectorAll('[data-message-author-role="assistant"]');
-            if (!nodes || nodes.length === 0) return '';
-            return (nodes[nodes.length - 1].innerText || nodes[nodes.length - 1].textContent || '').trim();
-        } catch (e) {
-            return '';
-        }
-    }
-
-    async function _waitForAssistantDomResponse(previousText, timeoutMs) {
-        var deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            var text = _latestAssistantMessageText();
-            if (
-                text &&
-                text !== previousText &&
-                text.toLowerCase() !== 'thinking...' &&
-                text.toLowerCase() !== 'thinking'
-            ) {
-                return text;
-            }
-            await new Promise(function (r) { setTimeout(r, 500); });
-        }
-        return '';
-    }
-
     // ─── SSE Stream Parser ──────────────────────────
 
     async function _parseSSEStream(response) {
@@ -286,41 +217,6 @@
         var fullText = '';
         var streamText = '';
         var buffer = '';
-        var sawAssistantEvent = false;
-
-        function processLine(line) {
-            var normalized = String(line || '').trimStart();
-            if (!normalized.startsWith('data:')) return;
-            // Accept both "data: {...}" and "data:{...}" forms.
-            var data = normalized.slice(5).trimStart();
-            if (!data || data === '[DONE]') return;
-
-            try {
-                var parsed = JSON.parse(data);
-
-                // Persist conversation context for follow-up messages
-                if (parsed.conversation_id) {
-                    _conversationId = parsed.conversation_id;
-                }
-
-                if (parsed.message && parsed.message.id) {
-                    _parentMessageId = parsed.message.id;
-                }
-
-                var assistantText = _extractAssistantTextFromMessage(parsed.message);
-                if (assistantText) {
-                    fullText = assistantText;
-                    sawAssistantEvent = true;
-                }
-
-                // Some ChatGPT responses stream deltas rather than full parts snapshots.
-                var deltaText = _extractAssistantDelta(parsed);
-                if (deltaText) {
-                    streamText += deltaText;
-                    sawAssistantEvent = true;
-                }
-            } catch (e) {}
-        }
 
         while (true) {
             var chunk = await reader.read();
@@ -331,99 +227,78 @@
             buffer = lines.pop() || '';
 
             for (var i = 0; i < lines.length; i++) {
-                processLine(lines[i]);
+                var line = lines[i];
+                var normalized = String(line || '').trimStart();
+                if (!normalized.startsWith('data:')) continue;
+                // Accept both "data: {...}" and "data:{...}" forms.
+                var data = normalized.slice(5).trimStart();
+                if (!data || data === '[DONE]') continue;
+
+                try {
+                    var parsed = JSON.parse(data);
+
+                    // Persist conversation context for follow-up messages
+                    if (parsed.conversation_id) {
+                        _conversationId = parsed.conversation_id;
+                    }
+
+                    var parts = parsed && parsed.message && parsed.message.content && parsed.message.content.parts;
+                    if (parts && parts.length > 0 && parsed.message.author && parsed.message.author.role === 'assistant') {
+                        fullText = parts.join('');
+
+                        if (parsed.message.id) {
+                            _parentMessageId = parsed.message.id;
+                        }
+                    }
+
+                    // Also support delta-style and JSON-patch style events.
+                    var delta = '';
+                    if (typeof parsed.delta === 'string') delta = parsed.delta;
+                    else if (parsed.delta && typeof parsed.delta.text === 'string') delta = parsed.delta.text;
+                    else if (typeof parsed.text === 'string') delta = parsed.text;
+                    else if (typeof parsed.message_delta === 'string') delta = parsed.message_delta;
+                    else if (
+                        typeof parsed.value === 'string' &&
+                        ((typeof parsed.p === 'string' && parsed.p.indexOf('/message/content/parts/') >= 0) ||
+                         (typeof parsed.path === 'string' && parsed.path.indexOf('/message/content/parts/') >= 0))
+                    ) delta = parsed.value;
+                    else if (
+                        Array.isArray(parsed.value) &&
+                        ((typeof parsed.p === 'string' && parsed.p.indexOf('/message/content/parts/') >= 0) ||
+                         (typeof parsed.path === 'string' && parsed.path.indexOf('/message/content/parts/') >= 0))
+                    ) delta = parsed.value.join('');
+
+                    if (delta) streamText += delta;
+                } catch(e) {}
             }
         }
 
-        // Process trailing partial line if the stream ended without newline.
-        if (buffer && String(buffer).trimStart().indexOf('data:') === 0) processLine(buffer);
+        // Handle trailing buffered line if stream ended without newline.
+        if (buffer) {
+            var trailing = String(buffer || '').trimStart();
+            if (trailing.startsWith('data:')) {
+                try {
+                    var trailingData = trailing.slice(5).trimStart();
+                    if (trailingData && trailingData !== '[DONE]') {
+                        var trailingParsed = JSON.parse(trailingData);
+                        var trailingParts = trailingParsed && trailingParsed.message && trailingParsed.message.content && trailingParsed.message.content.parts;
+                        if (trailingParts && trailingParts.length > 0 && trailingParsed.message.author && trailingParsed.message.author.role === 'assistant') {
+                            fullText = trailingParts.join('');
+                            if (trailingParsed.message.id) _parentMessageId = trailingParsed.message.id;
+                        }
+                    }
+                } catch (e) {}
+            }
+        }
+
         reader.releaseLock();
-        if (fullText) return fullText;
-        if (streamText) return streamText;
-        return sawAssistantEvent ? streamText : '';
-    }
-
-    function _conversationFetchOptions(headers, payload, signal) {
-        return {
-            method: 'POST',
-            credentials: 'include',
-            headers: headers,
-            body: JSON.stringify(payload),
-            signal: signal
-        };
-    }
-
-    function _isJsonResponse(res) {
-        var contentType = (res && res.headers && res.headers.get('content-type')) || '';
-        return contentType.toLowerCase().indexOf('application/json') === 0;
-    }
-
-    function _shouldTryAlternateConversationEndpoint(res) {
-        if (!res) return true;
-        // Keep token-refresh path intact.
-        if (res.status === 401) return false;
-        if (!res.ok) return true;
-        // If primary endpoint returns JSON, alternate endpoint often carries SSE.
-        return _isJsonResponse(res);
-    }
-
-    async function _cancelResponseBody(res) {
-        try {
-            if (res && res.body && typeof res.body.cancel === 'function') {
-                await res.body.cancel();
-            }
-        } catch (e) {}
-    }
-
-    async function _fetchConversationWithFallback(headers, payload, signal) {
-        var res = await fetch(
-            CHATGPT_CONVERSATION_ENDPOINT,
-            _conversationFetchOptions(headers, payload, signal)
-        );
-        if (_shouldTryAlternateConversationEndpoint(res)) {
-            await _cancelResponseBody(res);
-            res = await fetch(
-                CHATGPT_ALT_CONVERSATION_ENDPOINT,
-                _conversationFetchOptions(headers, payload, signal)
-            );
-        }
-        return res;
-    }
-
-    function _resolveThinkingEffort(options, model) {
-        if (options && typeof options.thinkingEffort === 'string') return options.thinkingEffort;
-        if (typeof model === 'string' && model.toLowerCase().includes('thinking')) return 'extended';
-        return 'standard';
-    }
-
-    function _buildConversationMeta(model, thinkingEffort, state) {
-        var tz = 'UTC';
-        try {
-            tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-        } catch (e) {}
-
-        return {
-            action: 'next',
-            conversation_id: _conversationId || undefined,
-            parent_message_id: _parentMessageId || crypto.randomUUID(),
-            model: model,
-            client_prepare_state: state,
-            timezone_offset_min: new Date().getTimezoneOffset(),
-            timezone: tz,
-            conversation_mode: { kind: 'primary_assistant' },
-            system_hints: [],
-            supports_buffering: true,
-            supported_encodings: ['v1'],
-            client_contextual_info: { app_name: 'chatgpt.com' },
-            thinking_effort: thinkingEffort
-        };
+        return fullText || streamText;
     }
 
     // ─── Send Message ───────────────────────────────
 
     async function send(message, options) {
         var token = await _getToken();
-        var previousAssistantText = _latestAssistantMessageText();
 
         // OAI-Device-Id header required for API auth
         var deviceId = '';
@@ -448,49 +323,33 @@
         if (powData.requirementsToken) headers['Openai-Sentinel-Chat-Requirements-Token'] = powData.requirementsToken;
         if (powData.proofToken) headers['Openai-Sentinel-Proof-Token'] = powData.proofToken;
 
-        var model = (options && options.model) ? options.model : 'gpt-5-5-thinking';
-        var thinkingEffort = _resolveThinkingEffort(options, model);
-        var conversationMeta = _buildConversationMeta(model, thinkingEffort, 'success');
-
         var payload = {
-            action: conversationMeta.action,
+            action: 'next',
             messages: [{
                 id: crypto.randomUUID(),
                 author: { role: 'user' },
                 content: { content_type: 'text', parts: [message] },
                 metadata: {}
             }],
-            conversation_id: conversationMeta.conversation_id,
-            parent_message_id: conversationMeta.parent_message_id,
-            model: conversationMeta.model,
-            client_prepare_state: conversationMeta.client_prepare_state,
-            timezone_offset_min: conversationMeta.timezone_offset_min,
-            timezone: conversationMeta.timezone,
-            conversation_mode: conversationMeta.conversation_mode,
-            enable_message_followups: true,
-            system_hints: conversationMeta.system_hints,
-            supports_buffering: conversationMeta.supports_buffering,
-            supported_encodings: conversationMeta.supported_encodings,
-            client_contextual_info: conversationMeta.client_contextual_info,
-            paragen_cot_summary_display_override: 'allow',
-            force_parallel_switch: 'auto',
-            thinking_effort: conversationMeta.thinking_effort
+            model: (options && options.model) ? options.model : 'gpt-5-5-thinking',
+
+            parent_message_id: _parentMessageId || crypto.randomUUID(),
+            timezone_offset_min: new Date().getTimezoneOffset(),
+            history_and_training_disabled: false,
+            conversation_mode: { kind: 'primary_assistant' },
+            force_paragen: false,
+            force_nulligen: false,
+            force_rate_limit: false,
+            websocket_request_id: crypto.randomUUID()
         };
-        if (!payload.conversation_id) delete payload.conversation_id;
 
-        var preparePayload = _buildConversationMeta(model, thinkingEffort, 'none');
-        preparePayload.fork_from_shared_post = false;
-        if (!preparePayload.conversation_id) delete preparePayload.conversation_id;
-
-        try {
-            await fetch(CHATGPT_PREPARE_ENDPOINT, {
-                method: 'POST',
-                credentials: 'include',
-                headers: headers,
-                body: JSON.stringify(preparePayload)
+        // Add model config for extended reasoning models
+        if (options && options.model && options.model.includes('thinking')) {
+            payload['oai-last-model-config'] = JSON.stringify({
+                model: options.model,
+                effort: (options && options.thinkingEffort) ? options.thinkingEffort : 'extended'
             });
-        } catch (e) {
-            // Prepare is best-effort; send can still succeed without it.
+            console.log('[Proxima ChatGPT] Using extended reasoning model:', options.model);
         }
 
 
@@ -504,7 +363,13 @@
         var controller = new AbortController();
         var timeoutId = setTimeout(function() { controller.abort(); }, TIMEOUT);
 
-        var res = await _fetchConversationWithFallback(headers, payload, controller.signal);
+        var res = await fetch('/backend-api/conversation', {
+            method: 'POST',
+            credentials: 'include',
+            headers: headers,
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
 
         // Token expired — refresh and retry once
         if (res.status === 401) {
@@ -512,16 +377,19 @@
             headers['Authorization'] = 'Bearer ' + newToken;
             var retryController = new AbortController();
             var retryTimeoutId = setTimeout(function() { retryController.abort(); }, TIMEOUT);
-            res = await _fetchConversationWithFallback(headers, payload, retryController.signal);
+            res = await fetch('/backend-api/conversation', {
+                method: 'POST',
+                credentials: 'include',
+                headers: headers,
+                body: JSON.stringify(payload),
+                signal: retryController.signal
+            });
             if (!res.ok) {
                 clearTimeout(retryTimeoutId);
                 var err = await res.text().catch(function() { return ''; });
                 throw new Error('ChatGPT API error (' + res.status + '): ' + err.substring(0, 300));
             }
             var result = await _parseSSEStream(res);
-            if (!result) {
-                result = await _waitForAssistantDomResponse(previousAssistantText, 120000);
-            }
             clearTimeout(retryTimeoutId);
             return result;
         }
@@ -540,9 +408,6 @@
         }
 
         var result = await _parseSSEStream(res);
-        if (!result) {
-            result = await _waitForAssistantDomResponse(previousAssistantText, 120000);
-        }
         clearTimeout(timeoutId);
         return result;
     }
