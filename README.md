@@ -274,6 +274,37 @@ Add this server configuration block to your editor's MCP configuration settings 
 
 ---
 
+## Troubleshooting
+
+### Python 3.10+ Environment shows "Error" or "Missing"
+
+**Symptoms:** The Diagnostics panel shows a red ✗ next to *Python 3.10+ Environment* even though Python is installed on your system.
+
+**Cause:** On Windows, the app installs to `C:\Program Files\Proxima` which is a protected directory. During first-time setup, `pip install` needs to write temporary files in the source folder and fails with "Access is denied" for standard (non-admin) users.
+
+> **Versions 5.0.0+ with bundled wheel:** This issue is resolved automatically. The installer bundles a pre-built `.whl` package that installs directly into the virtual environment without writing to the app directory. If you still see this error, make sure you're running the latest build.
+
+**Quick Fix (older builds):**
+
+1. Close Proxima completely.
+2. Right-click the **Proxima** app (desktop shortcut or Start menu).
+3. Select **"Run as administrator"**.
+4. Wait for the setup to complete — you'll see the Python status turn green ✓.
+5. Close and reopen normally. Admin mode is only needed once.
+
+**macOS / Linux:** This is rare on these platforms since app directories are usually user-owned. If it occurs, run the app once with `sudo` to complete the initial setup.
+
+### Python is installed but Proxima can't find it
+
+Make sure Python is on your system PATH:
+
+- **Windows:** During Python installation, check **"Add Python.exe to PATH"** at the bottom of the installer. If you missed it, re-run the installer → *Modify* → check the PATH option.
+- **macOS / Linux:** Run `python3 --version` in a terminal. If not found, install via [python.org](https://www.python.org/downloads/) or your package manager.
+
+Proxima requires **Python 3.10 or higher**.
+
+---
+
 ## Architecture
 
 The system consists of three primary layers: the **Proxima Runtime Host**, the **Model Context Protocol (MCP) Server**, and the **Local Agent Runtime**.

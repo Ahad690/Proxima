@@ -38,6 +38,7 @@ proxima-agent/build/
 proxima-agent/dist/
 build/lib/
 build/bdist.*/
+build/wheels/*.whl
 
 # Runtime environment (provisioned dynamically)
 py-env/

@@ -67,6 +67,21 @@ function getWheelhouseDir() {
     return null;
 }
 
+function getBundledWheel() {
+    const dirs = [
+        process.resourcesPath && path.join(process.resourcesPath, 'agent-wheel'),
+        path.join(__dirname, '..', 'build', 'wheels'),
+    ];
+    for (const dir of dirs) {
+        if (!dir) continue;
+        try {
+            const files = fs.readdirSync(dir).filter((f) => f.endsWith('.whl') && f.startsWith('proxima_agent'));
+            if (files.length > 0) return path.join(dir, files[0]);
+        } catch { }
+    }
+    return null;
+}
+
 function venvPythonPath(envDir) {
     return IS_WIN
         ? path.join(envDir, 'Scripts', 'python.exe')
@@ -255,31 +270,42 @@ async function _provisionWithBase(basePython, bundled, agentDir, log) {
             }
         }
 
+        await _spawnAsync(
+            py,
+            ['-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', 'pip'],
+            { timeout: 120000 }
+        );
+
+        const bundledWheel = getBundledWheel();
         const wheelhouse = getWheelhouseDir();
         let install;
-        if (wheelhouse) {
-            log('Installing proxima-agent from bundled wheels (offline)…');
+
+        if (bundledWheel) {
+            log(`Installing proxima-agent from bundled wheel: ${path.basename(bundledWheel)}`);
+            install = await _spawnAsync(
+                py,
+                ['-m', 'pip', 'install', '--disable-pip-version-check', '--retries', '5', bundledWheel],
+                { timeout: 600000 }
+            );
+        } else if (wheelhouse) {
+            log('Installing proxima-agent from offline wheelhouse…');
             install = await _spawnAsync(
                 py,
                 ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-index', '--find-links', wheelhouse, '.'],
                 { cwd: agentDir, timeout: 600000 }
             );
         } else {
-            log('Installing proxima-agent and dependencies from PyPI (first run)…');
-            await _spawnAsync(
-                py,
-                ['-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', 'pip'],
-                { timeout: 120000 }
-            );
+            log('Installing proxima-agent from source (dev mode)…');
             install = await _spawnAsync(
                 py,
                 ['-m', 'pip', 'install', '--disable-pip-version-check', '--retries', '5', '.'],
                 { cwd: agentDir, timeout: 600000 }
             );
         }
+
         if (install.status !== 0) {
             throw new Error(
-                `pip install failed (${wheelhouse ? 'offline wheels may be incomplete for this OS/arch' : 'check your internet connection'}): ` +
+                `pip install failed (${bundledWheel ? 'bundled wheel may be incompatible' : wheelhouse ? 'offline wheels may be incomplete for this OS/arch' : 'check your internet connection'}): ` +
                 `${(install.stderr || install.stdout || '').trim().slice(-500)}`
             );
         }
@@ -320,6 +346,7 @@ module.exports = {
     getManagedEnvDir,
     getBundledPythonDir,
     bundledPythonExe,
+    getBundledWheel,
     getWheelhouseDir,
     findSystemPython,
     findBaseInterpreter,

@@ -24,6 +24,7 @@
         "start": "electron .",
         "mcp": "node src/mcp/index.js",
         "cli": "node cli/proxima-cli.cjs",
+        "prebuild": "node scripts/build-wheel.cjs",
         "build": "electron-builder --win --x64",
         "build:win": "electron-builder --win --x64",
         "build:mac": "electron-builder --mac --x64 --arm64",
@@ -92,6 +93,13 @@
                 "filter": [
                     "**/*",
                     "!.gitkeep"
+                ]
+            },
+            {
+                "from": "build/wheels",
+                "to": "agent-wheel",
+                "filter": [
+                    "*.whl"
                 ]
             }
         ],
