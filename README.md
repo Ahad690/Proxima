@@ -14,6 +14,12 @@
 [![Sponsor](https://img.shields.io/badge/Sponsor-Proxima-d05c87?style=for-the-badge&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/Zen4-bit)
 [![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-d73a49?style=for-the-badge)](LICENSE)
 
+<br/>
+
+<a href="https://trendshift.io/repositories/25862?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25862" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25862" alt="Zen4-bit%2FProxima | Trendshift" width="250" height="55"/></a>
+<a href="https://trendshift.io/repositories/25862?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-25862" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/25862/daily?language=JavaScript" alt="Zen4-bit%2FProxima | Trendshift" width="250" height="55"/></a>
+<a href="https://trendshift.io/repositories/25862?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-25862" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/25862/weekly?language=JavaScript" alt="Zen4-bit%2FProxima | Trendshift" width="250" height="55"/></a>
+
 </div>
 
 ---
