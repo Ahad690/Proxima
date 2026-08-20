@@ -60,7 +60,8 @@ const responseState = {
     perplexity: { fingerprint: '', blockCount: 0 },
     chatgpt: { fingerprint: '' },
     claude: { fingerprint: '' },
-    gemini: { fingerprint: '' }
+    gemini: { fingerprint: '' },
+    qwen: { fingerprint: '' }
 };
 
 // Default settings
@@ -69,7 +70,8 @@ const defaultSettings = {
         perplexity: { enabled: true, loggedIn: false },
         chatgpt: { enabled: true, loggedIn: false },
         claude: { enabled: false, loggedIn: false },
-        gemini: { enabled: true, loggedIn: false }
+        gemini: { enabled: true, loggedIn: false },
+        qwen: { enabled: false, loggedIn: false }
     },
     ipcPort: 19222, // Port for MCP server IPC communication
     theme: 'dark',
@@ -81,7 +83,14 @@ function loadSettings() {
     try {
         if (fs.existsSync(settingsPath)) {
             const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-            return { ...defaultSettings, ...saved };
+            // Spread is SHALLOW: `saved.providers` would replace the defaults
+            // wholesale, so a provider added in a later version never appears in
+            // an existing install and the UI toggle throws on undefined. Merge the
+            // providers map key-by-key so new providers arrive with their defaults
+            // while the user's existing choices win.
+            const merged = { ...defaultSettings, ...saved };
+            merged.providers = { ...defaultSettings.providers, ...(saved.providers || {}) };
+            return merged;
         }
     } catch (e) {
         console.error('Error loading settings:', e);
@@ -189,7 +198,10 @@ async function restoreCookies(provider, ses) {
             perplexity: { domain: 'perplexity.ai', authCookies: ['__Secure-next-auth.session-token', 'pplx_'] },
             chatgpt: { domain: 'openai.com', authCookies: ['__Secure-next-auth.session-token', '__cf_bm'] },
             claude: { domain: 'claude.ai', authCookies: ['sessionKey', '__cf_bm'] },
-            gemini: { domain: 'google.com', authCookies: ['SID', 'HSID', 'SSID', '__Secure-1PSID', '__Secure-3PSID'] }
+            gemini: { domain: 'google.com', authCookies: ['SID', 'HSID', 'SSID', '__Secure-1PSID', '__Secure-3PSID'] },
+            // Qwen's session cookie is httpOnly and not JS-visible; ssxmod_itna is the
+            // Alibaba session marker that actually rides along with an authed session.
+            qwen: { domain: 'qwen.ai', authCookies: ['token', 'ssxmod_itna', 'cna', 'x5sec'] }
         };
         const authConfig = providerAuthDomains[provider];
         if (authConfig) {
@@ -509,8 +521,13 @@ async function handleMCPRequest(request) {
                 return { success: true, provider, loggedIn };
 
             case 'sendMessage':
-                // Extract options — Perplexity uses modelPreference, ChatGPT uses model
-                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort };
+                // Extract options — Perplexity uses modelPreference, ChatGPT uses model,
+                // Claude uses model + thinkingMode (pins a specific claude.ai model)
+                // This is an ALLOWLIST — anything not named here is silently dropped
+                // before it reaches the engine. Add new per-provider options here or
+                // they will appear to be ignored with no error anywhere.
+                // qwen: autoSearch -> feature_config.auto_search, thinking -> thinking_enabled
+                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
                 // Check if file should be uploaded
                 if (data.filePath && fileReferenceEnabled) {
@@ -785,6 +802,15 @@ async function sendMessageToProvider(provider, message, forceDOM = false, option
             return await sendToClaude(webContents, message);
         case 'gemini':
             return await sendToGemini(webContents, message);
+        case 'qwen':
+            // API-only by design: there is no DOM fallback for Qwen. Reaching here
+            // means the engine failed, and typing into the page would not help —
+            // the failure is almost always a flagged session (Aliyun WAF) or a
+            // logged-out cookie jar, neither of which the DOM path can fix.
+            throw new Error(
+                'Qwen: API request failed and Qwen has no DOM fallback. ' +
+                'Open the Qwen tab and check you are logged in / solve any "Access Verification" slider.'
+            );
         default:
             throw new Error(`Unknown provider: ${provider}`);
     }
@@ -1526,6 +1552,20 @@ async function getProviderResponse(provider, customSelector = null) {
     const webContents = browserManager.getWebContents(provider);
     if (!webContents) {
         throw new Error(`Provider ${provider} not initialized`);
+    }
+
+    // Qwen is API-only and this path is actively DESTRUCTIVE for it: the DOM
+    // capture navigates/reloads the view, which tears down the injected engine
+    // while a generation may still be running server-side. That is how an
+    // 11m57s deep_research run that SUCCEEDED in the UI came back as
+    // "No response captured". The engine recovers dropped streams itself by
+    // re-reading GET /api/v2/chats/{id}; let it, and never type into the page.
+    if (provider === 'qwen') {
+        throw new Error(
+            'Qwen has no DOM fallback — the API engine owns the conversation and ' +
+            'recovers dropped streams by re-reading it. Reaching the DOM path would ' +
+            'reload the view and destroy an in-flight generation.'
+        );
     }
 
     console.log(`[getProviderResponse] ${provider}: Using DOM fallback path...`);

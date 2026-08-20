@@ -32,6 +32,11 @@ class BrowserManager {
                 url: 'https://gemini.google.com/app',
                 partition: 'persist:gemini',
                 color: '#4285f4'
+            },
+            qwen: {
+                url: 'https://chat.qwen.ai/',
+                partition: 'persist:qwen',
+                color: '#615ced'
             }
         };
 
@@ -368,7 +373,11 @@ class BrowserManager {
 
         view.webContents.on('console-message', (event, level, message) => {
             if (level >= 2) {
-                console.log(`[${provider}] Console:`, message.substring(0, 100));
+                // Our own [Proxima] diagnostics carry JSON samples of undocumented
+                // response frames; truncating them at 100 chars throws away the exact
+                // thing they exist to show. Page noise stays capped.
+                const limit = message.indexOf('[Proxima]') === 0 ? 4000 : 100;
+                console.log(`[${provider}] Console:`, message.substring(0, limit));
             }
         });
 

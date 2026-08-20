@@ -88,8 +88,26 @@
         return fullText;
     }
 
+    // ─── Completion body ────────────────────────────
+    // Pins a specific model / thinking mode when the caller supplies them
+    // (e.g. model="claude-haiku-4-5-20251001"); otherwise claude.ai uses the
+    // account default, matching the engine's original behavior.
+    function _completionBody(message, options) {
+        var body = {
+            prompt: message,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata',
+            attachments: [],
+            files: []
+        };
+        if (options && options.model) body.model = options.model;
+        if (options && options.thinkingMode) body.thinking_mode = options.thinkingMode;
+        if (options && options.locale) body.locale = options.locale;
+        return JSON.stringify(body);
+    }
+
     // ─── Send Message ───────────────────────────────
-    async function send(message) {
+    async function send(message, options) {
+        options = options || {};
         var orgId = await _getOrgId();
 
         // Reuse existing conversation or create new one
@@ -111,12 +129,7 @@
                     'Content-Type': 'application/json',
                     'Accept': 'text/event-stream'
                 },
-                body: JSON.stringify({
-                    prompt: message,
-                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata',
-                    attachments: [],
-                    files: []
-                }),
+                body: _completionBody(message, options),
                 signal: controller.signal
             });
 
@@ -139,12 +152,7 @@
                             'Content-Type': 'application/json',
                             'Accept': 'text/event-stream'
                         },
-                        body: JSON.stringify({
-                            prompt: message,
-                            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata',
-                            attachments: [],
-                            files: []
-                        }),
+                        body: _completionBody(message, options),
                         signal: retryController.signal
                     });
 

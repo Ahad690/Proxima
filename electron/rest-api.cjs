@@ -27,6 +27,7 @@ const MODEL_ALIASES = {
 
     
     'perplexity': 'perplexity', 'pplx': 'perplexity', 'sonar': 'perplexity',
+    'qwen': 'qwen', 'qwen3': 'qwen', 'tongyi': 'qwen',
 
     
     'auto': 'auto',   // Auto-pick best available
@@ -142,7 +143,23 @@ function getEnabled() {
 function resolveModel(model) {
     if (!model) return 'auto';
     const key = String(model).toLowerCase().trim();
-    return MODEL_ALIASES[key] || key;
+    if (MODEL_ALIASES[key]) return MODEL_ALIASES[key];
+    // Full model slugs (e.g. "claude-haiku-4-5-20251001", "gpt-5-...") → provider
+    if (key.startsWith('claude') || key.startsWith('anthropic')) return 'claude';
+    if (key.startsWith('gpt') || key.startsWith('o1') || key.startsWith('o3')) return 'chatgpt';
+    if (key.startsWith('gemini') || key.startsWith('bard')) return 'gemini';
+    if (key.startsWith('sonar') || key.startsWith('pplx')) return 'perplexity';
+    return key;
+}
+
+// A bare alias ("claude", "haiku", "auto") means "use the provider's default
+// model". Only a full model id ("claude-haiku-4-5-20251001") is forwarded to the
+// engine to pin a specific model — return undefined for everything else.
+function passthroughModelSlug(model) {
+    if (!model) return undefined;
+    const key = String(model).toLowerCase().trim();
+    if (key === 'auto' || key === 'all' || MODEL_ALIASES[key]) return undefined;
+    return model;
 }
 
 // Resolve model — supports string, array, or 'auto'
@@ -186,7 +203,7 @@ function pickBestProvider(preferred) {
         if (enabled.includes(preferred)) return preferred;
         return null;
     }
-    return ['claude', 'chatgpt', 'gemini', 'perplexity'].find(p => enabled.includes(p)) || null;
+    return ['claude', 'chatgpt', 'gemini', 'perplexity', 'qwen'].find(p => enabled.includes(p)) || null;
 }
 
 function extractMessage(body) {
@@ -206,13 +223,14 @@ function extractMessage(body) {
 }
 
 // ─── Core: Send to Provider with Timing ──────────────────
-async function queryProvider(provider, message) {
+async function queryProvider(provider, message, options = {}) {
     initProviderStats(provider);
     const start = Date.now();
 
     try {
         const sendResult = await handleMCPRequest({
-            action: 'sendMessage', provider, data: { message }
+            action: 'sendMessage', provider,
+            data: { message, model: options.model, thinkingMode: options.thinkingMode }
         });
         if (!sendResult.success) throw new Error(sendResult.error || `Failed to send to ${provider}`);
 
@@ -467,7 +485,7 @@ function getDocsPage() {
             <div class="logo">⚡ Proxima API</div>
             <p class="sub">Unified AI Gateway · Port ${REST_PORT} · v${VERSION}</p>
             <div class="chips">
-                ${['perplexity', 'chatgpt', 'claude', 'gemini'].map(p =>
+                ${['perplexity', 'chatgpt', 'claude', 'gemini', 'qwen'].map(p =>
         `<div class="chip ${enabled.includes(p) ? 'on' : 'off'}"><div class="d"></div>${p[0].toUpperCase() + p.slice(1)}</div>`
     ).join('')}
             </div>
@@ -1089,9 +1107,13 @@ async function handleRoute(method, pathname, body, res) {
             const input = body.model || defaultModel || 'auto';
             const r = resolveModels(input);
             if (r.mode === 'error') return sendError(res, 404, r.error);
+            const sendOpts = {
+                model: passthroughModelSlug(body.model),
+                thinkingMode: body.thinking_mode || body.thinkingMode
+            };
             try {
                 if (r.mode === 'single') {
-                    const result = await queryProvider(r.providers[0], prompt);
+                    const result = await queryProvider(r.providers[0], prompt, sendOpts);
                     sendJSON(res, 200, { ...formatChatResponse(result, r.providers[0]), ...extraFields });
                 } else {
                     const multi = await queryMultiple(r.providers, prompt);
@@ -1229,9 +1251,13 @@ End with a security score (0-100).`;
         try {
             if (resolved.mode === 'single') {
                 const provider = resolved.providers[0];
+                const sendOpts = {
+                    model: passthroughModelSlug(body.model),
+                    thinkingMode: body.thinking_mode || body.thinkingMode
+                };
                 const result = body.file
                     ? await queryProviderWithFile(provider, message, body.file)
-                    : await queryProvider(provider, message);
+                    : await queryProvider(provider, message, sendOpts);
                 sendJSON(res, 200, formatChatResponse(result, provider));
             } else {
                 const multiResults = await queryMultiple(resolved.providers, message);
@@ -1252,7 +1278,7 @@ End with a security score (0-100).`;
             aliases: Object.entries(MODEL_ALIASES).filter(([_, v]) => v === p).map(([k]) => k).filter(k => k !== p)
         }));
         // Also show disabled ones
-        const allProviders = ['chatgpt', 'claude', 'gemini', 'perplexity'];
+        const allProviders = ['chatgpt', 'claude', 'gemini', 'perplexity', 'qwen'];
         allProviders.filter(p => !enabled.includes(p)).forEach(p => {
             models.push({
                 id: p, object: 'model', owned_by: 'proxima', status: 'disabled',

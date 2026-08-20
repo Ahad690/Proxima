@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Qwen">
+  <defs>
+    <linearGradient id="qwenBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7C6CF5"/>
+      <stop offset="100%" stop-color="#4B3BD6"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#qwenBg)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
+    <!-- stylised Q: ring plus tail -->
+    <circle cx="30" cy="30" r="13.5"/>
+    <path d="M39.5 39.5 L47 47"/>
+  </g>
+</svg>

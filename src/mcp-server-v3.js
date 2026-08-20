@@ -419,7 +419,7 @@ class SmartRouter {
 
     async smartQuery(message, preferredProvider = null) {
         const enabled = getEnabledProviders();
-        const order = ['chatgpt', 'claude', 'perplexity', 'gemini'];
+        const order = ['chatgpt', 'claude', 'perplexity', 'gemini', 'qwen'];
 
         // Start with preferred if enabled
         if (preferredProvider && enabled.has(preferredProvider)) {
@@ -470,8 +470,9 @@ const perplexity = new AIProvider('perplexity', ipcClient);
 const chatgpt = new AIProvider('chatgpt', ipcClient);
 const claude = new AIProvider('claude', ipcClient);
 const gemini = new AIProvider('gemini', ipcClient);
+const qwen = new AIProvider('qwen', ipcClient);
 
-const router = new SmartRouter({ perplexity, chatgpt, claude, gemini });
+const router = new SmartRouter({ perplexity, chatgpt, claude, gemini, qwen });
 
 // Create MCP Server
 const server = new McpServer({
@@ -1434,6 +1435,34 @@ server.tool(
     }
 );
 
+// --- ask_qwen ---
+// No forceDOM twin: Qwen is API-only. The engine has no DOM fallback because a
+// failure there is a flagged Aliyun WAF session or a logged-out cookie jar,
+// neither of which typing into the page can fix.
+server.tool(
+    'ask_qwen',
+    {
+        message: z.string().describe('Message to send to Qwen (Alibaba Qwen3.8). Ordinary web search needs no flag — just ask for it in the prompt ("do a websearch, then ..."); that is measured working. Use `mode` only for deep_research, which cannot be triggered from the prompt.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.'),
+        mode: z.enum(['t2t', 'search', 'deep_research', 'artifacts', 'web_dev', 'learn', 'slides', 'travel'])
+            .optional()
+            .describe('Qwen chat_type. Default t2t. "deep_research" is a long-running multi-step research mode — budget MINUTES per call, not seconds. Switching mode starts a fresh Qwen conversation because chat_type is fixed when the conversation is created.')
+    },
+    async ({ message, files, mode }) => {
+        const disabled = checkDisabled('qwen');
+        if (disabled) return disabled;
+        try {
+            const fullMessage = buildMessageWithFiles(message, files);
+            // Never serve deep_research from cache — the whole point is fresh research,
+            // and a cache hit would also hide the phase diagnostics we still need.
+            const useCache = !mode || mode === 't2t';
+            return toolResponse(await qwen.chat(fullMessage, useCache, { chatType: mode || 't2t' }));
+        } catch (err) {
+            return toolError(err);
+        }
+    }
+);
+
 server.tool(
     'new_conversation',
     {},
@@ -1442,7 +1471,7 @@ server.tool(
             const enabled = getEnabledProviders();
             for (const provider of ['perplexity', 'chatgpt', 'claude', 'gemini']) {
                 if (enabled.has(provider)) {
-                    await { perplexity, chatgpt, claude, gemini }[provider].newConversation();
+                    await { perplexity, chatgpt, claude, gemini, qwen }[provider].newConversation();
                 }
             }
             return toolResponse({ success: true, message: 'Started new conversations' });
@@ -1465,7 +1494,7 @@ server.tool(
     },
     async ({ steps, initialContext }) => {
         try {
-            const providers = { perplexity, chatgpt, claude, gemini };
+            const providers = { perplexity, chatgpt, claude, gemini, qwen };
             const results = [];
             let previousOutput = initialContext || '';
 
@@ -1520,14 +1549,14 @@ server.tool(
 // --- Smart Provider Selection Helper ---
 function pickBestProvider(taskType) {
     const enabled = getEnabledProviders();
-    const providers = { perplexity, chatgpt, claude, gemini };
+    const providers = { perplexity, chatgpt, claude, gemini, qwen };
     
     // Priority order based on task type
     const priorities = {
-        coding: ['claude', 'chatgpt', 'gemini', 'perplexity'],
-        research: ['perplexity', 'gemini', 'chatgpt', 'claude'],
-        general: ['claude', 'chatgpt', 'gemini', 'perplexity'],
-        review: ['claude', 'chatgpt', 'gemini', 'perplexity']
+        coding: ['claude', 'chatgpt', 'gemini', 'perplexity', 'qwen'],
+        research: ['perplexity', 'gemini', 'chatgpt', 'claude', 'qwen'],
+        general: ['claude', 'chatgpt', 'gemini', 'perplexity', 'qwen'],
+        review: ['claude', 'chatgpt', 'gemini', 'perplexity', 'qwen']
     };
     
     const order = priorities[taskType] || priorities.general;
@@ -1541,7 +1570,7 @@ function pickBestProvider(taskType) {
 
 // --- Dynamic Provider Resolution ---
 function resolveProvider(providerName, taskType) {
-    const providers = { perplexity, chatgpt, claude, gemini };
+    const providers = { perplexity, chatgpt, claude, gemini, qwen };
     
     if (providerName) {
         const name = providerName.toLowerCase();
@@ -1610,7 +1639,7 @@ server.tool(
     async ({ topic, sides }) => {
         try {
             const enabled = getEnabledProviders();
-            const allProviders = { perplexity, chatgpt, claude, gemini };
+            const allProviders = { perplexity, chatgpt, claude, gemini, qwen };
             const numSides = Math.min(sides || 2, enabled.size);
 
             if (enabled.size < 2) {
@@ -1710,7 +1739,7 @@ server.tool(
     async ({ question, providers: requestedProviders }) => {
         try {
             const enabled = getEnabledProviders();
-            const allProviders = { perplexity, chatgpt, claude, gemini };
+            const allProviders = { perplexity, chatgpt, claude, gemini, qwen };
             
             // Determine which providers to use
             let targetProviders = requestedProviders 
@@ -1982,13 +2011,13 @@ server.tool(
     'ask_selected',
     {
         message: z.string().describe('Message to send to selected providers'),
-        providers: z.array(z.string()).describe('Which providers to ask: ["chatgpt", "claude", "gemini", "perplexity"]'),
+        providers: z.array(z.string()).describe('Which providers to ask: ["chatgpt", "claude", "gemini", "perplexity", "qwen"]'),
         files: z.array(z.string()).optional().describe('Optional: file paths to include as context')
     },
     async ({ message, providers: selectedProviders, files }) => {
         try {
             const enabled = getEnabledProviders();
-            const allProviders = { perplexity, chatgpt, claude, gemini };
+            const allProviders = { perplexity, chatgpt, claude, gemini, qwen };
             
             let fileContext = '';
             if (files && files.length > 0) {
@@ -2081,7 +2110,7 @@ Any important user preferences, specific instructions, edge cases, constraints, 
 
 Be exhaustive. Do not summarize loosely. A coding AI is going to read this and start building without asking the user a single question — so include everything.`;
 
-            const providers = { perplexity, chatgpt, claude, gemini };
+            const providers = { perplexity, chatgpt, claude, gemini, qwen };
             const results = {};
 
             for (const prov of targetProviders) {
