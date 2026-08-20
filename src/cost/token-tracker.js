@@ -14,6 +14,7 @@ const MODEL_PRICING = {
   'claude':      { input: 4.00,   output: 20.00 },
   'gemini':      { input: 2.50,   output: 10.00 },
   'perplexity':  { input: 5.00,   output: 20.00 },
+  'qwen':        { input: 0.00,   output: 0.00 },   // browser session, not metered API
   'default':     { input: 5.00,   output: 20.00 },
 };
 

@@ -32,6 +32,11 @@ class BrowserManager {
                 url: 'https://gemini.google.com/app',
                 partition: 'persist:gemini',
                 color: '#4285f4'
+            },
+            qwen: {
+                url: 'https://chat.qwen.ai/',
+                partition: 'persist:qwen',
+                color: '#615ced'
             }
         };
 

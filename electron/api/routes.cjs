@@ -373,7 +373,7 @@ function createRouteHandler(deps) {
                         aliases: Object.entries(MODEL_ALIASES).filter(([_, v]) => v === p).map(([k]) => k).filter(k => k !== p),
                     });
                 }
-                ['chatgpt', 'claude', 'gemini', 'perplexity'].filter(p => !enabled.includes(p)).forEach(p =>
+                ['chatgpt', 'claude', 'gemini', 'perplexity', 'qwen'].filter(p => !enabled.includes(p)).forEach(p =>
                     models.push({ id: p, object: 'model', owned_by: 'proxima', status: 'disabled' })
                 );
             }

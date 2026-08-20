@@ -99,7 +99,8 @@ const defaultSettings = {
         perplexity: { enabled: true, loggedIn: false },
         chatgpt: { enabled: true, loggedIn: false },
         claude: { enabled: true, loggedIn: false },
-        gemini: { enabled: true, loggedIn: false }
+        gemini: { enabled: true, loggedIn: false },
+        qwen: { enabled: false, loggedIn: false }
     },
     ipcPort: 19222,
     theme: 'dark',

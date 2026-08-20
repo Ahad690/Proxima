@@ -6,12 +6,12 @@ import assert from 'node:assert';
 import { register } from '../../src/mcp/tools-chat.js';
 import { registerModule, textOf } from '../fixtures/mcp-harness.js';
 
-test('tools-chat: registers exactly the 8 documented chat tools with schemas', () => {
+test('tools-chat: registers exactly the 9 documented chat tools with schemas', () => {
     const { tools } = registerModule(register);
     assert.deepEqual(
         [...tools.keys()].sort(),
         ['ask_all_ais', 'ask_chatgpt', 'ask_claude', 'ask_gemini', 'ask_model', 'new_conversation', 'smart_query'].sort()
-            .concat('ask_perplexity').sort(),
+            .concat('ask_perplexity', 'ask_qwen').sort(),
     );
     // Every tool exposes a non-empty description and an inputSchema object.
     for (const [, { meta }] of tools) {

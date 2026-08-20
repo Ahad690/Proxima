@@ -124,6 +124,38 @@ export function register(server, deps) {
         }
     });
 
+    // ask_qwen — Alibaba Qwen3.8 via chat.qwen.ai.
+    // No forceDOM twin: the Qwen engine is API-only. A failure there is a flagged
+    // Aliyun WAF session or a logged-out cookie jar, neither of which typing into
+    // the page can fix. The engine recovers dropped streams itself by re-reading
+    // GET /api/v2/chats/{id}.
+    server.registerTool('ask_qwen', {
+        title: 'Ask Qwen',
+        description: 'Send a message to Qwen (Alibaba Qwen3.8). Ordinary web search needs no flag — just ask for it in the prompt ("do a websearch, then ..."); that is measured working. Use `mode` only for deep_research, which cannot be triggered from the prompt.',
+        inputSchema: {
+            message: z.string().describe('Message to send to Qwen (Alibaba Qwen3.8)'),
+            files: z.array(z.string()).optional().describe(FILES_DESC),
+            mode: z.enum(['t2t', 'search', 'deep_research', 'artifacts', 'web_dev', 'learn', 'slides', 'travel'])
+                .optional()
+                .describe('Qwen chat_type. Default t2t. "deep_research" is a long-running multi-step research mode — budget MINUTES per call. Switching mode starts a fresh Qwen conversation because chat_type is fixed when the conversation is created.'),
+        },
+        annotations: CHAT,
+    }, async ({ message, files, mode }) => {
+        const disabled = checkDisabled('qwen');
+        if (disabled) return disabled;
+        try {
+            const { textFiles, uploadFilePath } = getFilesSetup(files);
+            const fullMessage = buildMessageWithFiles(message, textFiles);
+            // Ride the existing provider:engine channel rather than inventing an
+            // options field — pipeline.js calls chat() with a FIXED positional
+            // signature, so an extra option object would be silently dropped.
+            const target = (mode && mode !== 't2t') ? `qwen:${mode}` : 'qwen';
+            return toolResponse(await smartChat(fullMessage, target, { filePath: uploadFilePath }));
+        } catch (err) {
+            return toolError(err);
+        }
+    });
+
     const enabledList = [...getEnabledProviders()].join(', ') || 'gemini, chatgpt, claude, perplexity';
     server.registerTool('ask_model', {
         title: 'Ask Any Model',

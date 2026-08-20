@@ -29,6 +29,7 @@ const MODEL_ALIASES = {
     'gemini': 'gemini', 'gemini-pro': 'gemini', 'gemini-2': 'gemini', 'gemini-2.5': 'gemini',
     'google': 'gemini', 'bard': 'gemini',
     'perplexity': 'perplexity', 'pplx': 'perplexity', 'sonar': 'perplexity',
+    'qwen': 'qwen', 'qwen3': 'qwen', 'tongyi': 'qwen',
     'auto': 'auto', 'all': 'all'
 };
 
@@ -342,7 +343,7 @@ function pickBestProvider(preferred) {
         return enabled.includes(base) ? base : null;
     }
 
-    const priorityList = ['claude', 'chatgpt', 'gemini', 'perplexity', 'deepseek', 'groq', 'xai', 'openrouter', 'together', 'fireworks', 'mistral', 'nvidia'];
+    const priorityList = ['claude', 'chatgpt', 'gemini', 'perplexity', 'qwen', 'deepseek', 'groq', 'xai', 'openrouter', 'together', 'fireworks', 'mistral', 'nvidia'];
     const priority = priorityList.filter(p => enabled.includes(p));
     if (priority.length === 0) {
         return enabled.length > 0 ? enabled[0] : null;

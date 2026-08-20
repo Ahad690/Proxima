@@ -1328,6 +1328,11 @@
             <span class="tab-name">Gemini</span>
             <div class="tab-status offline" id="status-dot-gemini"></div>
         </div>
+        <div class="tab" data-provider="qwen" onclick="switchTab('qwen')">
+            <img src="../assets/qwen.svg" class="tab-icon-img" alt="Qwen">
+            <span class="tab-name">Qwen</span>
+            <div class="tab-status offline" id="status-dot-qwen"></div>
+        </div>
         <div class="tab-spacer"></div>
         <div class="tab" id="header-clear-cache-btn" onclick="triggerClearCache()" title="Clear cache and session data for this provider"
             style="display: none;">
@@ -1665,6 +1670,26 @@
                                             style="font-weight: 600; color: #f59e0b;">Checking...</span></div>
                                     <div>Latency: <span id="card-latency-gemini" style="color: #888;">--ms</span></div>
                                     <div>Model: <span style="color: #888;">Auto</span></div>
+                                    <div>Account: <span style="color: #888;">Session</span></div>
+                                </div>
+                            </div>
+                            <div class="provider-card disabled" data-provider="qwen"
+                                style="flex-direction: column; align-items: stretch; gap: 14px; padding: 18px; border: 1px solid rgba(255,255,255,0.05); background: rgba(255,255,255,0.01); box-shadow: none;">
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <div style="display: flex; align-items: center; gap: 12px;">
+                                        <img src="../assets/qwen.svg"
+                                            style="width: 28px; height: 28px; object-fit: contain;">
+                                        <span style="font-weight: 700; font-size: 0.95rem; color: #fff;">Qwen</span>
+                                    </div>
+                                    <div class="toggle-switch" data-provider="qwen"
+                                        onclick="toggleProvider(this)"></div>
+                                </div>
+                                <div
+                                    style="border-top: 1px solid rgba(255,255,255,0.04); padding-top: 12px; display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 6px; font-size: 0.72rem; color: #666;">
+                                    <div>Status: <span id="card-status-qwen"
+                                            style="font-weight: 600; color: #f59e0b;">Checking...</span></div>
+                                    <div>Latency: <span id="card-latency-qwen" style="color: #888;">--ms</span></div>
+                                    <div>Model: <span style="color: #888;">Qwen3.8-Max</span></div>
                                     <div>Account: <span style="color: #888;">Session</span></div>
                                 </div>
                             </div>
