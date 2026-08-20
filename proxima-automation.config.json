@@ -1,18 +1,30 @@
 {
   "reviewDir": "perplexity-reviews",
   "baseUrl": "http://localhost:3210",
-  "reviewModel": "gpt-5-5-thinking",
-  "repairModel": "gpt-5-5-thinking",
+  "reviewModel": "qwen",
+  "repairModel": "qwen",
   "enableAutoFix": false,
   "maxIterations": 3,
   "pushBotBranches": false,
   "createPullRequest": false,
   "pullRequestDraft": true,
-  "pullRequestLabels": ["proxima-auto-fix"],
-  "protectedBranches": ["main", "master", "develop"],
-  "skipReviewBranches": ["proxima/fix-*"],
-  "skipReviewCommitMarkers": ["[proxima-auto-fix]"],
-    "testCommands": ["node scripts/tests/automation-tests.cjs"],
+  "pullRequestLabels": [
+    "proxima-auto-fix"
+  ],
+  "protectedBranches": [
+    "main",
+    "master",
+    "develop"
+  ],
+  "skipReviewBranches": [
+    "proxima/fix-*"
+  ],
+  "skipReviewCommitMarkers": [
+    "[proxima-auto-fix]"
+  ],
+  "testCommands": [
+    "node scripts/tests/automation-tests.cjs"
+  ],
   "stopOnTestFailure": true,
   "allowGeneratedScripts": false,
   "allowWorkflowModification": false,

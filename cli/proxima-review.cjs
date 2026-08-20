@@ -42,6 +42,12 @@ const REVIEW_THINKING_EFFORT = process.env.PROXIMA_REVIEW_THINKING_EFFORT || res
 function resolveProvider(model) {
     const m = model.toLowerCase();
     if (m === 'chatgpt' || m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3')) return 'chatgpt';
+    if (m === 'qwen' || m.startsWith('qwen') || m.startsWith('tongyi')) return 'qwen';
+    if (m === 'claude' || m.startsWith('claude')) return 'claude';
+    if (m === 'gemini' || m.startsWith('gemini')) return 'gemini';
+    // Anything unrecognised falls through to perplexity. Name a provider
+    // explicitly above before configuring it, or reviews silently run on the
+    // wrong model.
     return 'perplexity';
 }
 
@@ -64,7 +70,8 @@ const PROVIDER_DISPLAY = {
     'chatgpt': 'ChatGPT',
     'perplexity': 'Perplexity',
     'claude': 'Claude',
-    'gemini': 'Gemini'
+    'gemini': 'Gemini',
+    'qwen': 'Qwen'
 };
 const PROVIDER_LABEL = PROVIDER_DISPLAY[REVIEW_PROVIDER] || REVIEW_PROVIDER;
 
@@ -181,6 +188,11 @@ function queryAI(message, model, provider) {
         function buildSendPayload() {
             if (provider === 'chatgpt') {
                 return { message, model, thinkingEffort: REVIEW_THINKING_EFFORT };
+            }
+            if (provider === 'qwen') {
+                // The Qwen engine picks its own default model; chat_type rides the
+                // provider:engine channel, not the payload.
+                return { message };
             }
             // perplexity (and any future provider)
             return { message, modelPreference: model, deepSearch: false };
@@ -423,47 +435,99 @@ async function runReview(commitRef, options = {}) {
     const normalizedMsg = normalizePromptText(msg);
     const normalizedDiff = normalizePromptText(diff);
     const nl = '\n';
-    const prompt = `You are a principal software engineer performing a high-quality code review.
-
----
-Commit: ${shortSha}
-Author: ${author}
-Date: ${date}
-Message: ${normalizedMsg}
----
-
-Full diff:
-\`\`\`
-${normalizedDiff}
-\`\`\`
-
-Instructions:
-1. **Research Capability:** You have full access to web search. Use it to verify official documentation, API schemas, or library best practices if you encounter unfamiliar code, external API calls, or complex patterns in the diff.
-2. **Line Numbers:** For EVERY issue, suggestion, or positive observation, you MUST include the exact file and line number(s) in the format 'filename:L[number]' (e.g., 'src/utils.js:L42').
-3. **Be Specific:** Do not give generic advice. Address the specific code in the diff.
-
-Provide a professional, constructive code review with the following structure:
-
-## Summary
-(One paragraph summary of what was changed)
-
-## Issues & Suggestions
-- List any bugs, code smells, performance issues, or improvements
-- Be specific with line references when possible
-
-## Security & Performance
-- Any security concerns?
-- Performance implications?
-- Scalability notes?
-
-## Overall Score: X/10
-(Include a brief justification for the score)
-
-## Recommendations
-(Prioritized list of next steps)
-
-Focus on correctness, maintainability, readability, and best practices.
-Be constructive and specific.`;
+    const prompt = [
+        `You are a senior code auditor. Your only job is to find REAL bugs in this diff. False positives — bugs that aren't actually bugs — discredit the entire review and waste the reader's time. Fewer correct findings beats many padded ones, every time.`,
+        ``,
+        `GROUND RULES — violating any of these invalidates your review:`,
+        ``,
+        `1. **QUOTE-OR-DROP.** Every finding MUST quote the exact diff line(s) it refers to in a fenced code block. Not "the code does X" — show the literal code. If you can't quote it, you don't have a finding. Cut it.`,
+        ``,
+        `2. **FIX-OR-DROP.** Every finding MUST include a "Suggested fix" in a fenced code block showing the corrected code. Prose like "add validation here" is not a fix. If you cannot write the fix as code, you don't understand the problem well enough to flag it. Cut it.`,
+        ``,
+        `3. **VERIFY BEHAVIORAL CLAIMS WITH WEB SEARCH.** Before claiming what a stdlib/framework/API does ("Python's splitlines() mishandles CRLF", "React.memo doesn't deep-compare", "the From header affects SPF", "useMemo with array deps misfires"), look it up. Unverified behavioral claims are the #1 source of bogus review findings. When in doubt, do not claim.`,
+        ``,
+        `4. **NO HEDGED FINDINGS.** "May fail under certain conditions", "could cause issues", "potential race", "might not prevent rerenders" — without a concrete reproduction (specific input, sequence of calls, or state) these are noise. Cut them. If you cannot describe how to trigger the bug in one sentence, you don't have a bug.`,
+        ``,
+        `5. **NO GENERIC DEFENSIVE-CODING SUGGESTIONS.** "Add input validation", "consider error handling", "should validate types" with no concrete failure path are not findings. They are filler.`,
+        ``,
+        `6. **NEVER MIRROR THE COMMIT MESSAGE.** The message states the author's *intent*. Your job is to check the *code* against it, not paraphrase the message back.`,
+        ``,
+        `7. **NONE IS A VALID ANSWER.** If a section has no real findings, write "None found." Do NOT invent findings to fill space. A short correct review is the goal. The author shipped clean code is a legitimate, common outcome.`,
+        ``,
+        `8. **DEFAULT SCORE OF 6 IS A SMELL.** If your finding list is short, score high (8-10). Reserve 4-6 for actual correctness bugs. Do not anchor on the middle.`,
+        ``,
+        `9. **RESPECT LINE BREAKS.** Treat every newline in the diff as significant; do not collapse or rewrite multi-line sections.`,
+        ``,
+        `---`,
+        `Commit: ${shortSha}`,
+        `Author: ${author}`,
+        `Date:   ${date}`,
+        `Stated Intent (verify, do not summarize): "${normalizedMsg}"`,
+        `---`,
+        ``,
+        `Diff to audit (line breaks are significant — preserve each \\n exactly):`,
+        `${normalizedDiff}`,
+        ``,
+        `Work these adversarial questions in your head before writing the report. Skip a question if it yields no concrete finding.`,
+        ``,
+        `Q1 — Does the code actually do what the commit message claims? Find concrete divergences. Cite the exact line.`,
+        `Q2 — What are the *reproducible* failure modes? For each, name the input or sequence that triggers it.`,
+        `Q3 — What did the author NOT change that they should have? Look for callers, sibling files, parallel branches left inconsistent.`,
+        `Q4 — Is there a *concrete* security or data-integrity impact (not abstract worry)? Describe the attack or corruption scenario.`,
+        ``,
+        `---`,
+        ``,
+        `Produce the audit in this exact structure. Each section accepts "None found." as a valid answer.`,
+        ``,
+        `## Verdict`,
+        `**PASS / FAIL / NEEDS WORK** — one sentence on whether the implementation correctly achieves its stated purpose. PASS is appropriate when no real findings exist.`,
+        ``,
+        `## Implementation vs Intent Gap`,
+        `Specific divergences between message and code, with file:line. If the implementation matches the intent, write "None found."`,
+        ``,
+        `## Bugs & Failure Modes`,
+        `If none, write "None found." and skip to the next section.`,
+        ``,
+        `Otherwise, for EACH finding use this exact template (do not use a table — code blocks render badly in table cells):`,
+        ``,
+        `### Finding N — \`file/path.ext:L<start>-L<end>\` — 🔴 Critical / ⚠️ High / 🟡 Medium / 🟢 Low`,
+        ``,
+        `**Claim:** one sentence stating what is wrong.`,
+        ``,
+        `**Evidence (literal lines from the diff):**`,
+        `\`\`\`<language>`,
+        `<paste the exact offending lines here — must appear verbatim in the diff>`,
+        `\`\`\``,
+        ``,
+        `**Trigger:** the input/state/sequence that reproduces the bug, in one sentence. If you cannot write this, drop the finding.`,
+        ``,
+        `**Suggested fix:**`,
+        `\`\`\`<language>`,
+        `<corrected code — what the lines SHOULD be>`,
+        `\`\`\``,
+        ``,
+        `(Repeat the template for each finding. Stop when you have no more real findings.)`,
+        ``,
+        `## Missing Changes`,
+        `Related code that was NOT updated but should have been. Each entry needs a file:line reference and a one-sentence "why this matters". If none, write "None found."`,
+        ``,
+        `## Security & Data Integrity`,
+        `Concrete worst-case impact with a real attack or corruption scenario. Do NOT repeat findings already listed above. If no security/data-integrity concern exists beyond those, write "None beyond findings above."`,
+        ``,
+        `## Score: X/10`,
+        `Score rubric (pick a precise number — do not default to 6):`,
+        `- **10**: zero real findings; code matches intent cleanly.`,
+        `- **8-9**: at most one minor (🟢/🟡) finding; no correctness bugs.`,
+        `- **6-7**: one ⚠️ High finding OR several 🟡 Medium findings.`,
+        `- **4-5**: at least one 🔴 Critical finding.`,
+        `- **1-3**: multiple 🔴 Critical findings or active security issue.`,
+        ``,
+        `Justification must cite specific Findings by number (e.g., "Score 8 — only Finding 1 is real and it's 🟡 Medium").`,
+        ``,
+        `---`,
+        ``,
+        `REMINDER: A short review with two real findings is more valuable than a long review with eight padded ones. If the diff is clean, say so.`
+    ].join(nl);
 
 
     log(cyan('🚀') + ' Sending to ' + PROVIDER_LABEL + ' (' + REVIEW_MODEL + ')...');

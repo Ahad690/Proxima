@@ -346,7 +346,12 @@ async function main() {
         process.stdout.write(`[${new Date().toLocaleTimeString()}] 🤖 Running Proxima review for ${shortSha}...\n`);
         await runReview(originalHeadSha, { outputDir: config.reviewDir, force: true });
 
-        const reviewFile = path.join(config.reviewDir, `${shortSha}.md`);
+        // Must match how the reviewer names the file. cli/proxima-review.cjs uses
+        // sha.substring(0, 8); `git rev-parse --short` auto-scales its length with
+        // repo size (7 here) so the two disagreed and review-only mode could never
+        // find the file it had just written.
+        const reviewSlug = originalHeadSha.substring(0, 8);
+        const reviewFile = path.join(config.reviewDir, `${reviewSlug}.md`);
         if (!fs.existsSync(reviewFile)) {
             process.stderr.write(`[${new Date().toLocaleTimeString()}] ❌ Review file was not generated: ${reviewFile}\n`);
             process.exit(1);

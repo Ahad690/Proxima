@@ -257,8 +257,14 @@ function testThinkingEffortWiring() {
     if (!mainProcess.includes('thinkingEffort: data.thinkingEffort')) {
         throw new Error('Main process does not forward thinkingEffort option');
     }
-    if (!chatgptEngine.includes('thinking_effort: conversationMeta.thinking_effort')) {
-        throw new Error('ChatGPT engine payload is missing thinking_effort serialization');
+    // The engine serializes the effort into the oai-last-model-config payload.
+    // It used to be `thinking_effort: conversationMeta.thinking_effort`; commit
+    // e581df0 (2026-05-18, "revert chatgpt core flow to 1f59759 baseline")
+    // changed the shape and this assertion was left pinning the old one, so the
+    // suite has failed ever since. Assert the behaviour — that thinkingEffort
+    // reaches the payload — rather than one spelling of it.
+    if (!chatgptEngine.includes('options.thinkingEffort')) {
+        throw new Error('ChatGPT engine payload is missing thinkingEffort serialization');
     }
 
     console.log('✅ Thinking Effort Wiring tests passed.');
