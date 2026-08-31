@@ -35,6 +35,11 @@ const SKIP_BRANCH_PREFIX = automationConfig.repairBranchPrefix || 'proxima/fix-'
 const SKIP_COMMIT_MARKER = '[proxima-auto-fix]';
 
 const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || automationConfig.reviewModel || 'gpt-5-5-thinking';
+// Qwen reasons only when asked. The engine does `!!o.thinking`, so a payload that
+// omits the flag silently runs qwen3.8-max with thinking_enabled:false — measured:
+// phases ["answer"] and zero thinking blocks, versus ["thinking_summary","answer"]
+// with it. Every review before this ran unreasoned.
+const REVIEW_THINKING = automationConfig.reviewThinking !== false;
 const REVIEW_PROVIDER = process.env.PROXIMA_REVIEW_PROVIDER || resolveProvider(REVIEW_MODEL);
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || automationConfig.reviewDir || path.join(findGitRoot(), 'perplexity-reviews');
 const REVIEW_THINKING_EFFORT = process.env.PROXIMA_REVIEW_THINKING_EFFORT || resolveThinkingEffort(REVIEW_MODEL);
@@ -190,9 +195,10 @@ function queryAI(message, model, provider) {
                 return { message, model, thinkingEffort: REVIEW_THINKING_EFFORT };
             }
             if (provider === 'qwen') {
-                // The Qwen engine picks its own default model; chat_type rides the
-                // provider:engine channel, not the payload.
-                return { message };
+                // The Qwen engine picks its own default model (qwen3.8-max); chat_type
+                // rides the provider:engine channel, not the payload. `thinking` does
+                // have to be passed — see REVIEW_THINKING above.
+                return { message, thinking: REVIEW_THINKING };
             }
             // perplexity (and any future provider)
             return { message, modelPreference: model, deepSearch: false };

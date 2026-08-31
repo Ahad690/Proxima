@@ -66,6 +66,14 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
             if (provider === 'chatgpt') {
                 return { message, model, thinkingEffort };
             }
+            if (provider === 'qwen') {
+                // There was no qwen branch here at all, so repairs fell through to the
+                // perplexity shape below and sent modelPreference + deepSearch — two
+                // fields the Qwen engine does not read. The effect was a repair running
+                // qwen3.8-max with thinking off, silently, which is the worst possible
+                // configuration for patch generation.
+                return { message, thinking: true };
+            }
             return { message, modelPreference: model, deepSearch: false };
         }
 

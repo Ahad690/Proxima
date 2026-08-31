@@ -3,6 +3,7 @@
   "baseUrl": "http://localhost:3210",
   "reviewModel": "qwen",
   "repairModel": "qwen",
+  "reviewThinking": true,
   "enableAutoFix": false,
   "maxIterations": 3,
   "pushBotBranches": false,

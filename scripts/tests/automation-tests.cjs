@@ -270,6 +270,35 @@ function testThinkingEffortWiring() {
     console.log('✅ Thinking Effort Wiring tests passed.');
 }
 
+function testQwenThinkingWiring() {
+    console.log('Testing Qwen Thinking Wiring...');
+
+    const reviewScript = fs.readFileSync(path.join(__dirname, '../../cli/proxima-review.cjs'), 'utf8');
+    const repairClient = fs.readFileSync(path.join(__dirname, '../lib/proxima-client.cjs'), 'utf8');
+    const mainProcess = fs.readFileSync(path.join(__dirname, '../../electron/main-v2.cjs'), 'utf8');
+    const qwenEngine = fs.readFileSync(path.join(__dirname, '../../electron/providers/qwen-engine.js'), 'utf8');
+
+    // Qwen reasons only when asked. The engine does `!!o.thinking`, so a payload that
+    // omits the flag runs qwen3.8-max with thinking_enabled:false and says nothing.
+    // Measured before the fix: phases ["answer"], zero thinking blocks. Every review
+    // and every repair had been running unreasoned since the provider was added.
+    if (!reviewScript.includes('thinking: REVIEW_THINKING')) {
+        throw new Error('Review qwen payload does not pass thinking');
+    }
+    if (!/provider === 'qwen'/.test(repairClient) || !/thinking: true/.test(repairClient)) {
+        throw new Error('Repair client has no qwen branch passing thinking');
+    }
+    // The allowlist in main-v2 drops any option not named in it, with no error.
+    if (!mainProcess.includes('thinking: data.thinking')) {
+        throw new Error('Main process does not forward the thinking option');
+    }
+    // Assert the behaviour, not a spelling: thinking has to reach feature_config.
+    if (!qwenEngine.includes('thinking_enabled')) {
+        throw new Error('Qwen engine does not serialize thinking_enabled');
+    }
+
+    console.log('✅ Qwen Thinking Wiring tests passed.');
+}
 try {
     testReviewParser();
     testSafetyValidator();
@@ -277,6 +306,7 @@ try {
     testPatchNormalization();
     testRepairRetryGuards();
     testThinkingEffortWiring();
+    testQwenThinkingWiring();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');
