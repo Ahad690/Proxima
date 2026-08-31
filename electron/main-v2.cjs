@@ -753,6 +753,17 @@ async function handleMCPRequest(request) {
                     `window.__proximaClaude.listArtifacts(${JSON.stringify(cid)}, 3).then(function(x){return JSON.stringify(x);})`);
                 let files = [];
                 try { files = JSON.parse(listed) || []; } catch (e) { files = []; }
+                // Generated outputs ONLY by default. The same listing also carries
+                // everything the user ever uploaded to the conversation — one real
+                // thread here has ~180 uploads against 49 outputs — and silently
+                // downloading those would be both useless and destructive.
+                const wantUploads = data.includeUploads === true;
+                const all = files;
+                files = files.filter((f) => f.kind === 'output' || (wantUploads && f.kind === 'upload'));
+                // A hard cap, because this fans out into one download per file.
+                const MAX_PULL = typeof data.limit === 'number' ? data.limit : 25;
+                const truncated = files.length > MAX_PULL;
+                if (truncated) files = files.slice(0, MAX_PULL);
                 const fetched = [];
                 for (const f of files) {
                     const text = await browserManager.executeScript('claude',
@@ -763,7 +774,15 @@ async function handleMCPRequest(request) {
                     }
                 }
                 const saved = saveClaudeArtifacts(fetched, cid);
-                return { success: true, provider, conversationId: cid, listed: files, artifacts: saved };
+                return {
+                    success: true, provider, conversationId: cid, artifacts: saved,
+                    counts: {
+                        outputs: all.filter((f) => f.kind === 'output').length,
+                        uploads: all.filter((f) => f.kind === 'upload').length,
+                        other: all.filter((f) => f.kind === 'other').length
+                    },
+                    truncated: truncated, limit: MAX_PULL, includedUploads: wantUploads
+                };
             }
 
             case 'getResponse':

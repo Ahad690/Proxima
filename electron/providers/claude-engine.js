@@ -328,6 +328,10 @@
     }
 
     // List the files a conversation's sandbox holds. This is the cold-retrieval path,
+    // and it is also the AUTHORITATIVE one: the send path only sees files announced as
+    // create_file blocks in a stream it was watching, so a file written by some other
+    // tool — a raw shell write, for instance — would never appear there. This endpoint
+    // does not care which tool wrote the file, only that it exists.
     // and it is stronger than the streaming one: it works for ANY conversation, no
     // matter how the message was sent.
     //
@@ -357,9 +361,26 @@
         if (!meta.length && j && Array.isArray(j.files)) {
             meta = j.files.map(function (p) { return { path: p }; });
         }
+        // CLASSIFY, do not lump. This endpoint lists everything attached to a
+        // conversation: files the MODEL wrote under /mnt/user-data/outputs/ and files
+        // the USER uploaded under /mnt/user-data/uploads/. There is no kind field —
+        // the path prefix is the only discriminator.
+        //
+        // Treating them alike is not a cosmetic mistake. One real conversation here
+        // holds ~180 uploads against 49 generated outputs, so a caller asking for
+        // "artifacts" and getting the lot would download and overwrite 180 of the
+        // user's own files. Callers filter on kind.
         var mapped = meta.map(function (m) {
+            var kind = "other";
+            if (String(m.path).indexOf("/mnt/user-data/outputs/") === 0) kind = "output";
+            else if (String(m.path).indexOf("/mnt/user-data/uploads/") === 0) kind = "upload";
+            var cm = m.custom_metadata || {};
             return {
                 path: m.path,
+                kind: kind,
+                // custom_metadata carries the original filename, which survives the
+                // sanitising applied to the sandbox path.
+                name: cm.filename || String(m.path).split("/").pop(),
                 bytes: typeof m.size === 'number' ? m.size : null,
                 contentType: m.content_type || null,
                 createdAt: m.created_at || null

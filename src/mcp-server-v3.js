@@ -1284,19 +1284,35 @@ server.tool(
 server.tool(
     'claude_artifacts',
     {
-        conversation_id: z.string().optional().describe('Conversation to pull artifacts from. Bare uuid or a full claude.ai/chat/<uuid> URL. Defaults to the conversation currently active in Proxima.')
+        conversation_id: z.string().optional().describe('Conversation to pull artifacts from. Bare uuid or a full claude.ai/chat/<uuid> URL. Defaults to the conversation currently active in Proxima.'),
+        include_uploads: z.boolean().optional().describe('Also pull files the USER uploaded to the conversation, not just files the model generated. Off by default: the listing mixes both, and a busy thread can hold far more uploads than outputs.'),
+        limit: z.number().optional().describe('Maximum files to download (default 25). Each one is a separate request.')
     },
-    async ({ conversation_id }) => {
+    async ({ conversation_id, include_uploads, limit }) => {
         const disabled = checkDisabled('claude');
         if (disabled) return disabled;
         try {
             await claude.ensureInitialized();
-            const res = await claude.ipc.send('claudeArtifacts', 'claude',
-                conversation_id ? { conversationId: conversation_id } : {});
+            const payload = {};
+            if (conversation_id) payload.conversationId = conversation_id;
+            if (include_uploads) payload.includeUploads = true;
+            if (typeof limit === 'number') payload.limit = limit;
+            const res = await claude.ipc.send('claudeArtifacts', 'claude', payload);
             if (!res.success) return toolError(new Error(res.error || 'claudeArtifacts failed'));
+
             const saved = res.artifacts || [];
+            const c = res.counts || {};
+            // Report the split, always. The listing mixes model-generated files with
+            // everything the user ever uploaded, and one real conversation here holds
+            // ~180 uploads against 49 outputs — so a bare count would be misleading.
+            const tally = '(conversation holds ' + (c.outputs || 0) + ' generated, ' +
+                (c.uploads || 0) + ' uploaded)';
+
             if (!saved.length) {
-                return toolResponse('No artifacts found for conversation ' + res.conversationId + '.');
+                return toolResponse('No generated files found for conversation ' +
+                    res.conversationId + ' ' + tally +
+                    (c.uploads && !res.includedUploads
+                        ? '. Pass include_uploads:true to fetch the uploaded ones.' : '.'));
             }
             const lines = saved.map((a) => {
                 const desc = a.description ? ' [' + a.description + ']' : '';
@@ -1304,7 +1320,9 @@ server.tool(
                     '\n    sandbox path: ' + a.path;
             });
             return toolResponse(
-                saved.length + ' artifact(s) from conversation ' + res.conversationId +
+                saved.length + ' file(s) from conversation ' + res.conversationId + ' ' + tally +
+                (res.truncated ? ' — TRUNCATED at limit ' + res.limit +
+                    ', raise it with the limit parameter' : '') +
                 ', saved locally:\n' + lines.join('\n')
             );
         } catch (err) {
