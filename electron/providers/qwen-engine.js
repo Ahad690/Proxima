@@ -380,7 +380,14 @@
         var searchy = (ct === 'search' || ct === 'deep_research');
         var autoSearch = (opts && opts.autoSearch !== undefined) ? !!opts.autoSearch : searchy;
         // 'deep' is a GUESS from the report and was never validated by the server.
-        var researchMode = (opts && opts.researchMode) || (ct === 'deep_research' ? 'deep' : 'normal');
+        // Was `deep` for deep_research. A full capture of a real 7-minute run shows
+        // research_mode staying 'normal' on BOTH turns — that field is not the switch,
+        // sub_chat_type is. The old value was a guess this engine shipped as if measured.
+        var researchMode = (opts && opts.researchMode) || 'normal';
+        // chat_type and sub_chat_type are identical in every mode EXCEPT deep research,
+        // where chat_type stays deep_research while sub_chat_type moves deep_thinking ->
+        // deep_research between the two turns. So they need to be separable.
+        var sct = (opts && opts.subChatType) || ct;
         // Attachment descriptors, already uploaded to OSS by qwen-upload.cjs. The app
         // omits the key entirely when there is nothing attached rather than sending
         // an empty array (main.js createUserMessage: `files.length > 0 ? files : void 0`),
@@ -417,8 +424,8 @@
                     thinking_format: 'summary',
                     auto_search: autoSearch
                 },
-                extra: { meta: { subChatType: ct } },
-                sub_chat_type: ct,
+                extra: { meta: { subChatType: sct } },
+                sub_chat_type: sct,
                 parent_id: parent
             }],
             timestamp: nowSec()
@@ -441,7 +448,9 @@
             dupChunks: 0,           // WEAK: chunk text seen before (noisy on tables/prose)
             restartFromStart: 0,    // STRONG: stream re-emitted its own opening
             firstChunk: null,
-            phases: {}              // phase -> { n, keys, samples } — see the tally below
+            phases: {},             // phase -> { n, keys, samples } — see the tally below
+            reportFiles: null,      // deep research: signed pdf/md links from PdfMdGen
+            researchQueries: []     // deep research: one per parallel thread
         };
         // Which response_id owns the answer we are assembling. Every frame carries a
         // top-level response_id; a single request has been observed returning answer
@@ -491,6 +500,29 @@
 
             // Thinking summary is re-broadcast byte-identical every frame —
             // REPLACE it, never append, or you get N copies of the same text.
+            // Deep research hangs its state off extra.deep_research. Two things are
+            // worth keeping: the terminal PdfMdGen frame, which carries signed links to
+            // the report as PDF and Markdown, and the WebResearch frames, which name
+            // the parallel research threads the model spawned.
+            if (d.extra && d.extra.deep_research) {
+                var dr = d.extra.deep_research;
+                if (dr.pdf || dr.md) {
+                    state.reportFiles = {
+                        pdf: dr.pdf ? { name: dr.pdf.name, size: dr.pdf.size, link: dr.pdf.link } : null,
+                        md: dr.md ? { name: dr.md.name, size: dr.md.size, link: dr.md.link } : null
+                    };
+                }
+                // WebResearch keys this dict by stringified thread index, not as a flat
+                // object, so walk it rather than reading fields off the top.
+                for (var rk in dr) {
+                    if (!Object.prototype.hasOwnProperty.call(dr, rk)) continue;
+                    var th = dr[rk];
+                    if (th && th.query && state.researchQueries.indexOf(th.query) === -1) {
+                        state.researchQueries.push(th.query);
+                    }
+                }
+            }
+
             if (d.phase === 'thinking_summary') {
                 if (d.extra) {
                     var st = d.extra.summary_title && d.extra.summary_title.content;
@@ -561,6 +593,74 @@
         return pump();
     }
 
+    // ─── deep_research is TWO turns ──────────────────
+    // A capture of a real run settled this, and it is not what this engine assumed:
+    //
+    //   chats/new              chat_type: "deep_research"     (NOT t2t)
+    //   turn 1                 sub_chat_type: "deep_thinking"    31 frames,   4.2s
+    //   turn 2                 sub_chat_type: "deep_research"  2537 frames, 436.7s
+    //
+    // Turn 1 does NOT research. It returns a ~550-char clarifying question asking what to
+    // focus on. Turn 2, chained on turn 1's response id, is the seven-minute run that
+    // actually does the work.
+    //
+    // So a single-turn deep_research call — which is what this engine did — returns the
+    // clarifying question and nothing else, and the caller has no way to tell that apart
+    // from a finished answer. It reads as a fast, oddly vague research result.
+    //
+    // The auto-reply below exists only to unblock turn 2. It is deliberately neutral and
+    // overridable via options.researchReply, because putting words in the user's mouth is
+    // the one thing that could quietly narrow the research.
+    var DEEP_RESEARCH_REPLY =
+        'You decide the scope and focus. Proceed with the research now.';
+
+    function deepResearch(message, o) {
+        var reply = o.researchReply || DEEP_RESEARCH_REPLY;
+        // Turn 1. Same chatType, so ensureChat creates/keeps ONE deep_research
+        // conversation and turn 2 chains onto it by parentId as usual.
+        var t1Opts = {};
+        for (var k in o) { if (Object.prototype.hasOwnProperty.call(o, k)) t1Opts[k] = o[k]; }
+        t1Opts.subChatType = 'deep_thinking';
+        t1Opts._drTurn = 1;
+
+        return send(message, t1Opts).then(function (clarifying) {
+            var m1 = _lastMeta || {};
+            console.log('[Proxima] Qwen deep_research turn 1 (deep_thinking): ' +
+                String(clarifying).length + ' chars — this is the clarifying question, ' +
+                'not the research. Proceeding to turn 2.');
+
+            var t2Opts = {};
+            for (var k2 in o) { if (Object.prototype.hasOwnProperty.call(o, k2)) t2Opts[k2] = o[k2]; }
+            t2Opts.subChatType = 'deep_research';
+            t2Opts._drTurn = 2;
+
+            return send(reply, t2Opts).then(function (research) {
+                // Keep turn 1's question on the meta: it is the only record of what the
+                // model wanted narrowed, and it explains the shape of the answer.
+                if (_lastMeta) {
+                    _lastMeta.clarifyingQuestion = String(clarifying);
+                    _lastMeta.researchReply = reply;
+                    _lastMeta.turns = 2;
+                }
+                return research;
+            });
+        });
+    }
+
+    // Abort an in-flight generation. Worth having when one call can run seven minutes:
+    // without it a caller that gives up leaves the model working server-side.
+    // Plain request, no bx-* signing.
+    function stopGeneration(chatId) {
+        var cid = chatId || _chatId;
+        if (!cid) return Promise.resolve(false);
+        return fetch(ORIGIN + '/api/v2/chat/completions/stop', {
+            method: 'POST',
+            credentials: 'include',
+            headers: headers(),
+            body: JSON.stringify({ chat_id: cid })
+        }).then(function (r) { return r.ok; }).catch(function () { return false; });
+    }
+
     // ─── send ────────────────────────────────────────
     // Resolves to a STRING (the answer text), matching the other four engines'
     // contract with provider-api.cjs. Thinking/usage go to __proximaQwen.lastMeta().
@@ -575,6 +675,11 @@
                 '". Valid: ' + CHAT_TYPES.join(', ')));
         }
         o.chatType = chatType;
+        // deep_research needs two turns; deepResearch() calls back into send() for each
+        // one with an explicit subChatType. The _drTurn guard stops that recursing.
+        if (chatType === 'deep_research' && !o._drTurn) {
+            return deepResearch(message, o);
+        }
         // deep_research is a long-running multi-step mode; 6 min is not enough.
         var timeout = (chatType === 'deep_research') ? DEEP_RESEARCH_TIMEOUT : TIMEOUT;
 
@@ -664,7 +769,9 @@
                         responseIds: Object.keys(r.state.ids),
                         dropped: r.state.dropped,
                         dupChunks: r.state.dupChunks,
-                        restartFromStart: r.state.restartFromStart
+                        restartFromStart: r.state.restartFromStart,
+                        reportFiles: r.state.reportFiles,
+                        researchQueries: r.state.researchQueries
                     };
                     return r.text;
                 });
@@ -789,6 +896,7 @@
         newConversation: newConversation,
         listModels: listModels,
         getUploadToken: getUploadToken,
+        stopGeneration: stopGeneration,
         checkAttachmentSupport: checkAttachmentSupport,
         defaultModel: function () { return DEFAULT_MODEL; },
         lastMeta: function () { return _lastMeta; },
