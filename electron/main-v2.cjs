@@ -585,10 +585,22 @@ async function handleMCPRequest(request) {
                     // Claude threads are addressable by uuid, and the caller cannot resume
                     // one it was never told about — so hand it back every time.
                     if (provider === 'claude') {
-                        const conversationId = await browserManager.executeScript('claude',
-                            'window.__proximaClaude && window.__proximaClaude.getConversation ? window.__proximaClaude.getConversation() : null')
+                        const meta = await browserManager.executeScript('claude',
+                            'window.__proximaClaude && window.__proximaClaude.lastMeta ? JSON.stringify(window.__proximaClaude.lastMeta()) : null')
                             .catch(() => null);
-                        return { success: true, provider, result, conversationId };
+                        let parsedMeta = null;
+                        try { parsedMeta = meta ? JSON.parse(meta) : null; } catch (e) { parsedMeta = null; }
+                        const conversationId = (parsedMeta && parsedMeta.conversationId) ||
+                            await browserManager.executeScript('claude',
+                                'window.__proximaClaude && window.__proximaClaude.getConversation ? window.__proximaClaude.getConversation() : null')
+                                .catch(() => null);
+                        const artifacts = saveClaudeArtifacts(
+                            parsedMeta && parsedMeta.artifacts, conversationId);
+                        return {
+                            success: true, provider, result, conversationId, artifacts,
+                            model: parsedMeta && parsedMeta.model,
+                            stopReason: parsedMeta && parsedMeta.stopReason
+                        };
                     }
                     return { success: true, provider, result };
                 }
@@ -3105,6 +3117,42 @@ function qwenAttachmentPaths(data) {
     else if (data.attachments) out.push(data.attachments);
     if (data.filePath) out.push(data.filePath);
     return out.filter(Boolean);
+}
+
+// ─── Claude artifacts ────────────────────────────
+// An artifact is a file the model wrote in its sandbox; the content arrives inside
+// the completion stream (see providers/claude-engine.js). Returning it as a string
+// through the MCP layer would be useless for anything sizeable, so it is written to
+// disk and the caller is handed real paths it can open, diff and edit with ordinary
+// tools. That is also what makes an artifact usable by an agent rather than just
+// readable by a human.
+const claudeArtifactDir = path.join(userDataPath, 'claude-artifacts');
+
+function saveClaudeArtifacts(artifacts, conversationId) {
+    if (!Array.isArray(artifacts) || !artifacts.length) return [];
+    const dir = path.join(claudeArtifactDir, conversationId || 'unknown');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return []; }
+    const saved = [];
+    for (const a of artifacts) {
+        try {
+            // The model picks a virtual sandbox path (/mnt/user-data/outputs/x.html).
+            // Only the basename is used, so a path it invents can never escape the
+            // artifact directory.
+            const base = path.basename(String(a.path || 'artifact')).replace(/[^w.-]/g, '_');
+            const local = path.join(dir, base || 'artifact');
+            fs.writeFileSync(local, a.fileText || '', 'utf8');
+            saved.push({
+                path: a.path, localPath: local, bytes: (a.fileText || '').length,
+                description: a.description || null
+            });
+        } catch (e) {
+            console.error('[Claude] failed to save artifact ' + a.path + ': ' + e.message);
+        }
+    }
+    if (saved.length) {
+        console.log('[Claude] saved ' + saved.length + ' artifact(s) to ' + dir);
+    }
+    return saved;
 }
 
 // Check if file is attached in chat

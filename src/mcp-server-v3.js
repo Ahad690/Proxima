@@ -343,7 +343,7 @@ class AIProvider {
         }
 
         console.error(`[${this.name}] Sending message...options: ${JSON.stringify(options)}`);
-        await this.ipc.send('sendMessage', this.name, { message, ...options });
+        const sendRes = await this.ipc.send('sendMessage', this.name, { message, ...options });
 
         console.error(`[${this.name}] Waiting for response (with typing detection)...`);
         const result = await this.ipc.send('getResponseWithTyping', this.name, {});
@@ -352,7 +352,26 @@ class AIProvider {
             console.error(`[${this.name}] Typing detected and completed`);
         }
 
-        return result.response || 'No response received';
+        let text = result.response || 'No response received';
+
+        // Artifacts are written to disk by the main process, because a multi-KB file
+        // inlined into a tool result is unusable. Announce the paths instead — the
+        // caller can then open, diff or edit them with ordinary file tools. Without
+        // this the files exist and nobody is told, which is the same as losing them.
+        if (sendRes && Array.isArray(sendRes.artifacts) && sendRes.artifacts.length) {
+            const lines = sendRes.artifacts.map((a) => {
+                const desc = a.description ? ', ' + a.description : '';
+                return '- ' + a.localPath + ' (' + a.bytes + ' bytes' + desc + ')';
+            });
+            text += '\n\n---\n**' + sendRes.artifacts.length +
+                ' artifact(s) saved to disk:**\n' + lines.join('\n');
+        }
+        // The conversation id is what makes a thread resumable later; a caller that is
+        // never told it cannot come back to this conversation.
+        if (sendRes && sendRes.conversationId) {
+            text += '\n\n_conversation_id: ' + sendRes.conversationId + '_';
+        }
+        return text;
     }
 
     async chat(message, useCache = true, options = {}) {
@@ -1182,7 +1201,7 @@ server.tool(
 server.tool(
     'ask_claude',
     {
-        message: z.string().describe('Message to send to Claude'),
+        message: z.string().describe('Message to send to Claude. If Claude produces an artifact (a file it writes — HTML, code, a document), the artifact is saved to disk and its absolute path is appended to the reply, so you can open and edit it with normal file tools rather than re-reading it out of chat text.'),
         files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.'),
         conversation_id: z.string().optional().describe('Resume a specific claude.ai conversation. Accepts the bare uuid or a full https://claude.ai/chat/<uuid> URL. Verified: a conversation can be resumed cold (after a restart) and it retains its full history — the server threads onto the current leaf of that conversation. Use this to keep one long-lived thread across many calls. If the conversation no longer exists the call FAILS rather than silently starting a blank one.'),
         new_chat: z.boolean().optional().describe('Start a fresh conversation instead of continuing the current one. the Claude conversation id is held in memory only, so it is already lost whenever the claude.ai tab reloads — pass conversation_id to survive that.')

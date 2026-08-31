@@ -13,6 +13,8 @@
     // true when a caller named a specific conversation. A pinned thread must never
     // be silently replaced on error — see the 404 branch in send().
     let _pinned = false;
+    // { artifacts:[{path,description,fileText}], model, stopReason, limit, format }
+    let _lastMeta = null;
 
     // --- Organization Management ---
     async function _getOrgId() {
@@ -102,11 +104,34 @@
     }
 
     // ─── SSE Stream Parser ──────────────────────────
+    // Handles BOTH wire formats, because rendering_mode decides which one arrives:
+    //
+    //   without rendering_mode  ->  legacy frames: {"type":"completion","completion":"..."}
+    //   rendering_mode:messages ->  modern Messages-API frames: message_start,
+    //                               content_block_start/delta/stop, message_delta,
+    //                               message_limit, message_stop
+    //
+    // The legacy branch is kept because a caller can still opt out, and because the
+    // account default could change under us again.
+    //
+    // ARTIFACTS. There is no artifact content-block type. An artifact is the generic
+    // sandbox tool sequence — the model reads a skill file (`view`), writes the file
+    // (`create_file`), then surfaces it (`present_files`) — and the body arrives as
+    // input_json_delta fragments on the create_file block that concatenate into
+    // {description, path, file_text}. A 12KB artifact was observed arriving as 1864
+    // separate fragments, so nothing can be parsed until content_block_stop.
+    //
+    // Filter on type==='tool_use', NOT on name: tool_use and tool_result share the
+    // name 'create_file', and the result block's input is empty, so keying on name
+    // alone means trying to JSON.parse('') on every artifact.
     async function _parseStream(response) {
         var reader = response.body.getReader();
         var decoder = new TextDecoder();
         var fullText = '';
         var buffer = '';
+        var blocks = {};          // index -> { type, name, pj }
+        var artifacts = [];       // { path, description, fileText }
+        var meta = { model: null, stopReason: null, limit: null, format: 'legacy' };
 
         while (true) {
             var chunk = await reader.read();
@@ -118,30 +143,90 @@
 
             for (var i = 0; i < lines.length; i++) {
                 var line = lines[i];
-                if (!line.startsWith('data: ')) continue;
-                var data = line.slice(6).trim();
+                if (line.indexOf('data:') !== 0) continue;
+                var data = line.slice(5).trim();
                 if (!data) continue;
 
-                try {
-                    var parsed = JSON.parse(data);
-                    if (parsed.type === 'content_block_delta' && parsed.delta && parsed.delta.type === 'text_delta') {
-                        fullText += parsed.delta.text;
+                var parsed;
+                try { parsed = JSON.parse(data); } catch (e) { continue; }
+
+                // legacy
+                if (parsed.type === 'completion' || parsed.completion) {
+                    if (typeof parsed.completion === 'string') fullText += parsed.completion;
+                    continue;
+                }
+
+                // modern
+                if (parsed.type === 'message_start') {
+                    meta.format = 'messages';
+                    if (parsed.message && parsed.message.model) meta.model = parsed.message.model;
+                    continue;
+                }
+                if (parsed.type === 'content_block_start') {
+                    var cb = parsed.content_block || {};
+                    blocks[parsed.index] = { type: cb.type, name: cb.name, pj: '' };
+                    continue;
+                }
+                if (parsed.type === 'content_block_delta') {
+                    var b = blocks[parsed.index];
+                    if (!b) continue;
+                    var d = parsed.delta || {};
+                    // Only `text` blocks are the answer. `thinking` blocks arrive on their
+                    // own path and must not be concatenated into it.
+                    if (d.type === 'text_delta' && b.type === 'text') {
+                        fullText += d.text || '';
+                    } else if (d.type === 'input_json_delta') {
+                        b.pj += d.partial_json || '';
                     }
-                    if (parsed.completion) {
-                        fullText += parsed.completion;
+                    continue;
+                }
+                if (parsed.type === 'content_block_stop') {
+                    var bs = blocks[parsed.index];
+                    if (bs && bs.type === 'tool_use' && bs.name === 'create_file' && bs.pj) {
+                        try {
+                            var f = JSON.parse(bs.pj);
+                            if (f && f.path) {
+                                artifacts.push({
+                                    path: f.path,
+                                    description: f.description || null,
+                                    fileText: f.file_text || ''
+                                });
+                            }
+                        } catch (e) {
+                            console.warn('[Proxima Claude] create_file input did not parse (' +
+                                bs.pj.length + ' chars) — artifact skipped');
+                        }
                     }
-                } catch(e) {}
+                    continue;
+                }
+                if (parsed.type === 'message_delta') {
+                    if (parsed.delta && parsed.delta.stop_reason) meta.stopReason = parsed.delta.stop_reason;
+                    continue;
+                }
+                if (parsed.type === 'message_limit') {
+                    // Usage lives here rather than in a header: 5h / 7d windows with a
+                    // utilization fraction. The only quota signal this API gives.
+                    meta.limit = parsed.message_limit || null;
+                    continue;
+                }
             }
         }
 
         reader.releaseLock();
-        return fullText;
+        return { text: fullText, artifacts: artifacts, meta: meta };
     }
 
     // ─── Completion body ────────────────────────────
-    // Pins a specific model / thinking mode when the caller supplies them
-    // (e.g. model="claude-haiku-4-5-20251001"); otherwise claude.ai uses the
-    // account default, matching the engine's original behavior.
+    // rendering_mode:'messages' is the single load-bearing field for artifacts, and it
+    // is also what negotiates the modern stream format — one switch, not two. Without
+    // it the server SUBSTITUTES every tool block with the literal string "This block is
+    // not supported on your current device yet.", so an artifact request returns the
+    // prose around the artifact and nothing else. That was silent data loss.
+    //
+    // Narrowed by deletion against the real app's 92-tool body: `tools` is NOT required
+    // (not even its {type:'artifacts_v0'} entry), nor are model/effort/thinking_mode/
+    // locale/parent_message_uuid/turn_message_uuids/completion_request_id/sync_sources.
+    // `prompt` is the only genuinely required field.
     function _completionBody(message, options) {
         var body = {
             prompt: message,
@@ -149,11 +234,32 @@
             attachments: [],
             files: []
         };
+        // Opt out with renderingMode:null to get the old legacy-frame behaviour back.
+        var rm = (options && Object.prototype.hasOwnProperty.call(options, 'renderingMode'))
+            ? options.renderingMode : 'messages';
+        if (rm) body.rendering_mode = rm;
         if (options && options.model) body.model = options.model;
         if (options && options.thinkingMode) body.thinking_mode = options.thinkingMode;
+        if (options && options.effort) body.effort = options.effort;
         if (options && options.locale) body.locale = options.locale;
         return JSON.stringify(body);
     }
+
+    // Fetch a file the sandbox wrote, by the virtual path from an artifact's create_file
+    // call. Returns raw text — the response is the file bytes, not JSON-wrapped.
+    // Note the path segment is /conversations/, not /chat_conversations/.
+    async function downloadArtifact(path, conversationId) {
+        var orgId = await _getOrgId();
+        var cid = conversationId || _convId;
+        if (!cid) throw new Error('downloadArtifact: no conversation');
+        if (!path) throw new Error('downloadArtifact: path required');
+        var res = await fetch('/api/organizations/' + orgId + '/conversations/' + cid +
+            '/wiggle/download-file?path=' + encodeURIComponent(path), { credentials: 'include' });
+        if (!res.ok) throw new Error('downloadArtifact failed (' + res.status + ') for ' + path);
+        return await res.text();
+    }
+
+    function lastMeta() { return _lastMeta; }
 
     // ─── Send Message ───────────────────────────────
     async function send(message, options) {
@@ -225,18 +331,28 @@
                         throw new Error('Claude completion failed on retry (' + res.status + ')');
                     }
 
-                    var result = await _parseStream(res);
+                    var r = await _parseStream(res);
                     clearTimeout(retryTimeoutId);
-                    return result;
+                    _lastMeta = { artifacts: r.artifacts, model: r.meta.model,
+                        stopReason: r.meta.stopReason, limit: r.meta.limit,
+                        format: r.meta.format, conversationId: _convId };
+                    return r.text;
                 }
 
                 if (res.status === 429) throw new Error('Claude rate limited');
                 throw new Error('Claude completion failed (' + res.status + '): ' + errBody.substring(0, 200));
             }
 
-            var result = await _parseStream(res);
+            var r = await _parseStream(res);
             clearTimeout(timeoutId);
-            return result;
+            _lastMeta = { artifacts: r.artifacts, model: r.meta.model,
+                stopReason: r.meta.stopReason, limit: r.meta.limit,
+                format: r.meta.format, conversationId: _convId };
+            if (r.artifacts.length) {
+            console.log('[Proxima Claude] ' + r.artifacts.length + ' artifact(s): ' +
+                r.artifacts.map(function (a) { return a.path + ' (' + a.fileText.length + 'B)'; }).join(', '));
+            }
+            return r.text;
         } catch(e) {
             // Reset on conversation-related errors so next call creates fresh
             if (e.message && (e.message.includes('404') || e.message.includes('410'))) {
@@ -256,7 +372,9 @@
     window.__proximaClaude = {
         send: send, newConversation: newConversation,
         setConversation: setConversation, getConversation: getConversation,
-        conversationInfo: conversationInfo
+        conversationInfo: conversationInfo,
+        downloadArtifact: downloadArtifact,
+        lastMeta: lastMeta
     };
     console.log('[Proxima] Claude engine loaded');
 })();
