@@ -10,6 +10,9 @@
     var TIMEOUT = 360000;
     let _orgId = null;
     let _convId = null;
+    // true when a caller named a specific conversation. A pinned thread must never
+    // be silently replaced on error — see the 404 branch in send().
+    let _pinned = false;
 
     // --- Organization Management ---
     async function _getOrgId() {
@@ -49,6 +52,53 @@
         }
         const data = await res.json();
         return data.uuid;
+    }
+
+    // ─── Conversation targeting ─────────────────────
+    // _convId is just the uuid in the claude.ai/chat/<uuid> URL, so any existing
+    // conversation can be resumed by naming it. Needed for a long-running supervisor
+    // thread: _convId is in-memory only (unlike the Qwen engine, which persists to
+    // localStorage), so a page reload would otherwise orphan the thread and silently
+    // start a fresh one.
+    //
+    // Whether resuming a conversation that already HAS history threads onto that
+    // history is a server-side question: every message carries parent_message_uuid and
+    // the conversation exposes current_leaf_message_uuid, yet the completion body sends
+    // neither. If a resumed chat comes back with no memory of its own history, that
+    // omission is the reason — see _completionBody.
+    function setConversation(uuid) {
+        if (!uuid || typeof uuid !== 'string') throw new Error('setConversation: uuid required');
+        // Accept a full claude.ai URL as well as a bare uuid; callers copy either.
+        var m = uuid.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        if (!m) throw new Error('setConversation: not a uuid or claude.ai chat URL: ' + String(uuid).slice(0, 80));
+        _convId = m[1];
+        _pinned = true;
+        console.log('[Proxima Claude] Conversation pinned:', _convId);
+        return _convId;
+    }
+
+    function getConversation() {
+        return _convId;
+    }
+
+    // Read the server's view of a conversation: how many messages it holds and which
+    // leaf a new message would thread onto. Lets an orchestrator confirm it is talking
+    // to the thread it thinks it is before sending.
+    async function conversationInfo(uuid) {
+        var orgId = await _getOrgId();
+        var id = uuid || _convId;
+        if (!id) return null;
+        var res = await fetch('/api/organizations/' + orgId + '/chat_conversations/' + id +
+            '?tree=True&rendering_mode=messages', { credentials: 'include' });
+        if (!res.ok) return { uuid: id, ok: false, status: res.status };
+        var j = await res.json();
+        var msgs = (j && j.chat_messages) || [];
+        return {
+            uuid: id, ok: true, name: j.name, model: j.model,
+            messages: msgs.length,
+            currentLeaf: j.current_leaf_message_uuid || null,
+            updatedAt: j.updated_at
+        };
     }
 
     // ─── SSE Stream Parser ──────────────────────────
@@ -110,12 +160,18 @@
         options = options || {};
         var orgId = await _getOrgId();
 
+        // An explicit conversationId wins: this is how a supervisor thread is resumed
+        // across restarts, and how one Proxima can drive several threads in turn.
+        if (options.conversationId) setConversation(options.conversationId);
+        if (options.newChat) { _convId = null; _pinned = false; }
+
         // Reuse existing conversation or create new one
         if (!_convId) {
             _convId = await _createConversation(orgId, message);
             console.log('[Proxima Claude] Created new conversation:', _convId);
         } else {
-            console.log('[Proxima Claude] Continuing conversation:', _convId);
+            console.log('[Proxima Claude] Continuing conversation:', _convId +
+                (_pinned ? ' (pinned)' : ''));
         }
 
         try {
@@ -139,6 +195,14 @@
 
                 // Conversation expired or deleted — create new and retry
                 if (res.status === 404 || res.status === 410) {
+                    // Recreating is right for "any conversation" and WRONG for "this
+                    // conversation": a caller resuming a supervisor thread would get a
+                    // blank one and never be told the history was lost.
+                    if (_pinned) {
+                        throw new Error('Claude: pinned conversation ' + _convId +
+                            ' is gone (' + res.status + '). Not creating a replacement — ' +
+                            'the caller asked for this specific thread.');
+                    }
                     console.log('[Proxima Claude] Conversation expired, creating new one...');
                     _convId = await _createConversation(orgId, message);
 
@@ -185,9 +249,14 @@
 
     function newConversation() {
         _convId = null;
+        _pinned = false;
         console.log('[Proxima Claude] Conversation reset');
     }
 
-    window.__proximaClaude = { send: send, newConversation: newConversation };
+    window.__proximaClaude = {
+        send: send, newConversation: newConversation,
+        setConversation: setConversation, getConversation: getConversation,
+        conversationInfo: conversationInfo
+    };
     console.log('[Proxima] Claude engine loaded');
 })();

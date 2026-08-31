@@ -1183,14 +1183,60 @@ server.tool(
     'ask_claude',
     {
         message: z.string().describe('Message to send to Claude'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.')
+        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.'),
+        conversation_id: z.string().optional().describe('Resume a specific claude.ai conversation. Accepts the bare uuid or a full https://claude.ai/chat/<uuid> URL. Verified: a conversation can be resumed cold (after a restart) and it retains its full history — the server threads onto the current leaf of that conversation. Use this to keep one long-lived thread across many calls. If the conversation no longer exists the call FAILS rather than silently starting a blank one.'),
+        new_chat: z.boolean().optional().describe('Start a fresh conversation instead of continuing the current one. the Claude conversation id is held in memory only, so it is already lost whenever the claude.ai tab reloads — pass conversation_id to survive that.')
     },
-    async ({ message, files }) => {
+    async ({ message, files, conversation_id, new_chat }) => {
         const disabled = checkDisabled('claude');
         if (disabled) return disabled;
         try {
             const fullMessage = buildMessageWithFiles(message, files);
-            return toolResponse(await claude.chat(fullMessage));
+            const opts = {};
+            if (conversation_id) opts.conversationId = conversation_id;
+            if (new_chat) opts.newChat = true;
+            // Pinning or resetting the thread changes what the answer depends on, so a
+            // cached reply keyed on prompt text alone would be wrong.
+            const useCache = !conversation_id && !new_chat;
+            return toolResponse(await claude.chat(fullMessage, useCache, opts));
+        } catch (err) {
+            return toolError(err);
+        }
+    }
+);
+
+// --- claude_conversation ---
+// ask_claude returns only the reply text, so a caller that starts a NEW thread has no
+// way to learn its id and can never resume it. This closes that loop: read the id
+// after the first call, persist it, then pass it as conversation_id from then on.
+// Also lets an orchestrator confirm it is addressing the thread it thinks it is
+// (message count and current leaf) before sending anything into it.
+server.tool(
+    'claude_conversation',
+    {
+        conversation_id: z.string().optional().describe('Inspect this conversation instead of the one currently active. Bare uuid or a full claude.ai/chat/<uuid> URL.')
+    },
+    async ({ conversation_id }) => {
+        const disabled = checkDisabled('claude');
+        if (disabled) return disabled;
+        try {
+            const arg = conversation_id ? JSON.stringify(conversation_id) : 'null';
+            const res = await claude.executeScript(
+                '(async function(){' +
+                '  var C = window.__proximaClaude;' +
+                '  if (!C) return JSON.stringify({error:"claude engine not injected"});' +
+                '  if (!C.getConversation) return JSON.stringify({error:"engine predates conversation targeting; reload the Claude tab"});' +
+                '  var id = ' + arg + ' || C.getConversation();' +
+                '  if (!id) return JSON.stringify({conversationId:null, note:"no active conversation yet — send a message first"});' +
+                '  var info = null;' +
+                '  try { info = await C.conversationInfo(id); } catch(e) { info = {error:String(e && e.message || e)}; }' +
+                '  return JSON.stringify({conversationId:id, url:"https://claude.ai/chat/"+id, info:info});' +
+                '})()'
+            );
+            const raw = res && res.result;
+            let parsed;
+            try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) { parsed = { raw: raw }; }
+            return toolResponse(JSON.stringify(parsed, null, 2));
         } catch (err) {
             return toolError(err);
         }
