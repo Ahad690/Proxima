@@ -1228,7 +1228,6 @@ server.tool(
             const opts = {};
             if (conversation_id) opts.conversationId = conversation_id;
             if (new_chat) opts.newChat = true;
-            if (conversation_id) opts.conversationId = conversation_id;
             if (model) opts.model = model;
             if (effort) opts.effort = effort;
             if (thinking_mode) opts.thinkingMode = thinking_mode;
@@ -1614,6 +1613,7 @@ server.tool(
             const opts = { chatType: mode || 't2t' };
             if (hasAttachments) opts.attachments = attachments;
             if (new_chat) opts.newChat = true;
+            if (conversation_id) opts.conversationId = conversation_id;
             return toolResponse(await qwen.chat(fullMessage, useCache, opts));
         } catch (err) {
             return toolError(err);
