@@ -19,6 +19,7 @@
  *                        [--context "what the app is"] [--model qwen3.8-max]
  *                        [--json out.json] [--port 19222] [--timeout-ms 1800000]
  *                        [--keep-context]   (default: each review gets a fresh chat)
+ *                        [--conversation-id <uuid>]  pin every review to one thread
  *
  * exit: 0 = PASS, 2 = FAIL, 3 = INCONCLUSIVE, 1 = error (upload/transport/etc)
  */
@@ -31,7 +32,7 @@ const VIDEO_EXT = ['.mp4', '.mov', '.mkv', '.avi', '.wmv', '.flv'];
 function parseArgs(argv) {
     const a = {
         video: null, images: [], checks: [], context: null, model: null, json: null,
-        port: null, timeoutMs: 1800000, raw: false, keepContext: false
+        port: null, timeoutMs: 1800000, raw: false, keepContext: false, conversationId: null
     };
     for (let i = 2; i < argv.length; i++) {
         const k = argv[i], v = argv[i + 1];
@@ -51,6 +52,7 @@ function parseArgs(argv) {
         else if (k === '--timeout-ms') { a.timeoutMs = Number(v); i++; }
         else if (k === '--raw') { a.raw = true; }
         else if (k === '--keep-context') { a.keepContext = true; }
+        else if (k === '--conversation-id') { a.conversationId = v; i++; }
     }
     return a;
 }
@@ -201,12 +203,17 @@ function extractVerdict(text) {
         message: prompt,
         attachments: [video].concat(args.images.map((i) => path.resolve(i))),
         chatType: 't2t',
+        conversationId: args.conversationId || undefined,
         // Fresh conversation by DEFAULT, which is the opposite of Qwen's normal
         // behaviour (it keeps context for 2h). A verdict has to stand on this video
         // alone: chained onto a previous review, the model carries over "the app
         // worked a moment ago" and starts reasoning about the wrong run. Opt back in
         // with --keep-context when you deliberately want a follow-up question.
-        newChat: !args.keepContext
+        // A pinned thread overrides the fresh-conversation default: an orchestrator can
+        // then send every run to ONE reviewer chat, which is worth the contamination
+        // risk when the reviews are meant to be compared against each other. Reviews
+        // that must stand alone should keep the default.
+        newChat: !args.keepContext && !args.conversationId
     };
     if (args.model) data.model = args.model;
 

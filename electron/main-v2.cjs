@@ -535,6 +535,22 @@ async function handleMCPRequest(request) {
                 const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files, conversationId: data.conversationId, newChat: data.newChat, effort: data.effort, renderingMode: data.renderingMode };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
 
+                // Stamp every outgoing prompt with the wall-clock time, for every
+                // provider. These models have no clock and no idea how long they have
+                // been idle, which matters most in an unattended loop: a supervisor
+                // resuming a thread after six hours otherwise reasons as though the
+                // previous turn just happened.
+                //
+                // Applied HERE rather than in the MCP layer on purpose. Every route into
+                // Proxima funnels through this action — the MCP tools, the review CLI,
+                // the repair loop, the REST gateway and the orchestrator — so one place
+                // covers all of them with no chance of a double stamp. It is also after
+                // the response cache has already keyed on the caller's original text,
+                // so a per-second-unique suffix cannot silently disable caching.
+                if (data.timestamp !== false && typeof data.message === 'string') {
+                    data.message += '\n\nCurrent time: ' + new Date().toISOString();
+                }
+
                 // Claude attachments: upload first, then reference the results in the
                 // completion body. Uploading is a separate request that must complete
                 // before the send, so a failure here must NOT fall through to a

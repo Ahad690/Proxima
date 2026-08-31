@@ -55,6 +55,9 @@
     var _parentId = null;          // previous turn's response_id
     var _chatMode = null;          // chat_type the CURRENT _chatId was created with
     var _lastMeta = null;          // { usage, thinking[], responseId, phases }
+    // True when a caller named a specific conversation. ensureChat must then trust the
+    // pin rather than starting a fresh chat because the mode looks wrong.
+    var _pinned = false;
 
     function loadState() {
         try {
@@ -247,6 +250,17 @@
     function ensureChat(model, chatType) {
         var want = chatType || 't2t';
         if (_chatId && _chatMode === want) return Promise.resolve(_chatId);
+        // A pinned conversation is used as given. Its real chat_type is unreadable, so
+        // replacing it on a suspected mismatch would throw away the thread the caller
+        // explicitly asked for — the one thing a pin must never do.
+        if (_chatId && _pinned) {
+            if (_chatMode && _chatMode !== want) {
+                console.warn('[Proxima] Qwen: pinned conversation was created as ' + _chatMode +
+                    ' but ' + want + ' was requested. chat_type is fixed at creation, so the ' +
+                    'conversation keeps its original mode.');
+            }
+            return Promise.resolve(_chatId);
+        }
         if (_chatId && _chatMode !== want) {
             console.log('[Proxima] Qwen: mode ' + _chatMode + ' -> ' + want +
                 '; starting a new conversation (chat_type is fixed at creation).');
@@ -370,6 +384,80 @@
             });
         });
     }
+
+    // The id the NEXT turn should chain from. Deliberately separate from
+    // latestAssistant(): that one exists to recover an answer's TEXT after a dead
+    // stream and returns nothing when the text is empty — and a re-read of a finished
+    // conversation shows assistant messages with empty content, so using it here
+    // silently produced a null parent and a branch from the root. The thread looked
+    // resumed and the model saw none of it.
+    //
+    // history.currentId is the server's own leaf pointer, the same idea as Claude's
+    // current_leaf_message_uuid, so prefer it and only fall back to scanning.
+    function latestResponseId(chatJson) {
+        try {
+            var d = chatJson && chatJson.data;
+            var chat = d && d.chat;
+            var hist = chat && chat.history;
+            var leaf = (hist && hist.currentId) || (d && d.currentId) || null;
+            var msgs = (hist && hist.messages) || {};
+            if (leaf && msgs[leaf] && msgs[leaf].role === 'assistant') return leaf;
+            // Fall back to the newest assistant message, by timestamp, text or not.
+            var best = null;
+            for (var k in msgs) {
+                if (!Object.prototype.hasOwnProperty.call(msgs, k)) continue;
+                var m = msgs[k];
+                if (!m || m.role !== 'assistant') continue;
+                if (!best || (m.timestamp || 0) > (best.timestamp || 0)) best = m;
+            }
+            return best ? (best.id || null) : (leaf || null);
+        } catch (e) { return null; }
+    }
+    // ─── Conversation targeting ─────────────────────
+    // Pin a specific Qwen conversation, so an orchestrator can keep one long-lived
+    // thread rather than depending on whatever this page last used.
+    //
+    // Harder than the Claude equivalent for two reasons, both protocol-level:
+    //
+    // 1. Qwen threads by parent_id, and it does NOT resolve the leaf for us. Sending
+    //    with parentId null into a chat that already has history starts a new branch
+    //    from the root, so the model sees none of it — the resume would look like it
+    //    worked and quietly lose the entire conversation. So the last assistant
+    //    response_id is recovered from the server first, via the same readChat() the
+    //    stream-death recovery path uses, and used as the parent.
+    // 2. chat_type is fixed when a conversation is CREATED and cannot change. A pinned
+    //    chat therefore carries whatever mode it was made with. We cannot read that
+    //    back, so _chatMode is set to null — "unknown" — which makes ensureChat trust
+    //    the pin instead of silently starting a fresh conversation on a mode mismatch.
+    //    The caller is warned when it asks for a mode we cannot verify.
+    function setConversation(chatId, wantedMode) {
+        if (!chatId || typeof chatId !== 'string') {
+            return Promise.reject(new Error('setConversation: chatId required'));
+        }
+        var m = chatId.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+        if (!m) {
+            return Promise.reject(new Error('setConversation: not a uuid or chat.qwen.ai URL: ' +
+                String(chatId).slice(0, 80)));
+        }
+        var id = m[1];
+        return readChat(id).then(function (j) {
+            if (!j || !j.data || !j.data.chat) {
+                throw new Error('Qwen: conversation ' + id + ' not found or not readable');
+            }
+            _chatId = id;
+            _pinned = true;
+            // Unknown until proven otherwise — see note 2 above.
+            _chatMode = wantedMode || null;
+            _parentId = latestResponseId(j);
+            saveState();
+            console.log('[Proxima] Qwen: pinned conversation ' + id +
+                (_parentId ? ' (chained to response ' + _parentId + ')'
+                           : ' (no prior assistant turn; starting at root)'));
+            return { chatId: _chatId, parentId: _parentId };
+        });
+    }
+
+    function getConversation() { return _chatId; }
 
     // ─── Request body ────────────────────────────────
     function buildBody(message, model, thinking, opts) {
@@ -675,6 +763,16 @@
                 '". Valid: ' + CHAT_TYPES.join(', ')));
         }
         o.chatType = chatType;
+        // An explicit conversationId pins the thread before anything else happens, so
+        // ensureChat below reuses it rather than creating a new one.
+        if (o.conversationId && o.conversationId !== _chatId) {
+            return setConversation(o.conversationId, chatType).then(function () {
+                var o2 = {};
+                for (var k in o) { if (Object.prototype.hasOwnProperty.call(o, k)) o2[k] = o[k]; }
+                delete o2.conversationId;
+                return send(message, o2);
+            });
+        }
         // deep_research needs two turns; deepResearch() calls back into send() for each
         // one with an explicit subChatType. The _drTurn guard stops that recursing.
         if (chatType === 'deep_research' && !o._drTurn) {
@@ -815,6 +913,7 @@
         _chatId = null;
         _parentId = null;
         _chatMode = null;
+        _pinned = false;
         _lastMeta = null;
         try { window.localStorage.removeItem(STORE_KEY); } catch (e) { }
         return true;
@@ -900,7 +999,9 @@
         checkAttachmentSupport: checkAttachmentSupport,
         defaultModel: function () { return DEFAULT_MODEL; },
         lastMeta: function () { return _lastMeta; },
-        state: function () { return { chatId: _chatId, parentId: _parentId }; }
+        setConversation: setConversation,
+        getConversation: getConversation,
+        state: function () { return { chatId: _chatId, parentId: _parentId, pinned: _pinned }; }
     };
 
     loadState();   // survive the re-injection that follows a CAPTCHA or navigation
