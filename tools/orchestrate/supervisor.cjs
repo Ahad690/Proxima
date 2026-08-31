@@ -36,7 +36,8 @@ function parseArgs(argv) {
     const a = {
         messageFile: null, message: null, attach: [], conversationId: null,
         isNew: false, state: path.join(process.cwd(), 'supervisor-state.json'),
-        effort: null, model: null, tag: true, timeoutMs: 1800000
+        effort: null, model: null, tag: true, timeoutMs: 1800000,
+        tool: null, toolArgs: {}
     };
     for (let i = 2; i < argv.length; i++) {
         const k = argv[i], v = argv[i + 1];
@@ -50,6 +51,19 @@ function parseArgs(argv) {
         else if (k === '--timeout-ms') { a.timeoutMs = Number(v); i++; }
         else if (k === '--new') { a.isNew = true; }
         else if (k === '--no-tag') { a.tag = false; }
+        // Escape hatch for the other Proxima tools (claude_conversation,
+        // claude_artifacts, ask_qwen...). Without it this script can only ever
+        // exercise ask_claude, which is a thin slice of the surface it fronts.
+        else if (k === '--tool') { a.tool = v; i++; }
+        else if (k === '--arg') {
+            const eq = String(v).indexOf('=');
+            const key = v.slice(0, eq), raw = v.slice(eq + 1);
+            let val = raw;
+            if (raw === 'true') val = true;
+            else if (raw === 'false') val = false;
+            else if (raw !== '' && !isNaN(Number(raw))) val = Number(raw);
+            a.toolArgs[key] = val; i++;
+        }
     }
     return a;
 }
@@ -131,6 +145,18 @@ const loadState = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); 
 
 (async () => {
     const args = parseArgs(process.argv);
+
+    // Generic tool mode: call any tool the MCP server exposes and print its reply.
+    if (args.tool) {
+        console.error('[supervisor] ' + args.tool + ' via MCP | args ' + JSON.stringify(args.toolArgs));
+        const t = Date.now();
+        const r = await mcpCall(args.tool, args.toolArgs, args.timeoutMs);
+        console.error('[supervisor] ' + ((Date.now() - t) / 1000).toFixed(1) + 's' +
+            (r.isError ? ' | TOOL REPORTED ERROR' : ''));
+        console.log(r.text);
+        process.exit(r.isError ? 2 : 0);
+    }
+
     const message = args.message !== null
         ? args.message
         : (args.messageFile ? fs.readFileSync(args.messageFile, 'utf8') : null);

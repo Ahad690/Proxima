@@ -964,6 +964,20 @@ async function sendMessageToProvider(provider, message, forceDOM = false, option
 
     // DOM fallback: types into currently open conversation
 
+    // ...which is precisely why it is refused when the caller named a thread. Typing
+    // cannot target a conversation: it goes to whichever one the tab happens to be
+    // showing. Observed before this guard existed: a send pinned to a dead uuid fell
+    // through to DOM and was answered in an unrelated conversation, and the caller was
+    // told it succeeded. A wrong-thread success is worse than any failure.
+    if (provider === 'claude' && (options.conversationId || options.newChat)) {
+        const why = providerAPI.lastError('claude');
+        throw new Error(
+            'Claude: the API send failed while a specific conversation was pinned (' +
+            (options.conversationId || 'new_chat') + '). Refusing to fall back to DOM ' +
+            'typing, which would deliver this message to whichever conversation the tab ' +
+            'currently has open.' + (why ? ' Engine error: ' + why : ''));
+    }
+
     switch (provider) {
         case 'perplexity':
             return await sendToPerplexity(webContents, message, options);

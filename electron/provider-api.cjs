@@ -9,6 +9,10 @@ const path = require('path');
 
 
 const _scripts = {};
+// Why the last API send failed, per provider. sendViaAPI returns null on error so the
+// caller can fall back to DOM, which throws the reason away — and the reason is
+// exactly what a caller needs when the fallback is not safe to take.
+const _lastError = {};
 
 
 function _loadScript(provider) {
@@ -121,6 +125,7 @@ async function sendViaAPI(provider, webContents, message, options = {}) {
         console.log(`[ProviderAPI] Sending via ${provider} API...options: ${escapedOptions}`);
         const startTime = Date.now();
 
+        delete _lastError[provider];
         const result = await webContents.executeJavaScript(
             `window.${apiObj}.send(${escapedMessage}, ${escapedOptions})`
         );
@@ -136,6 +141,7 @@ async function sendViaAPI(provider, webContents, message, options = {}) {
         return String(result);
     } catch (e) {
         console.error(`[ProviderAPI] ✘ ${provider} API error:`, e.message);
+        _lastError[provider] = e.message;
         return null;
     }
 }
@@ -182,7 +188,10 @@ async function resetConversation(provider, webContentsGetter) {
     }
 }
 
+function lastError(provider) { return _lastError[provider] || null; }
+
 module.exports = {
+    lastError,
     injectAPI,
     isAPIReady,
     ensureAPI,
