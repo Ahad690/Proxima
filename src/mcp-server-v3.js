@@ -345,6 +345,15 @@ class AIProvider {
         console.error(`[${this.name}] Sending message...options: ${JSON.stringify(options)}`);
         const sendRes = await this.ipc.send('sendMessage', this.name, { message, ...options });
 
+        // A failed send used to fall straight through to the response poll below, which
+        // then waited out its full timeout and returned 'No response captured' as a
+        // SUCCESS. Measured: a send pinned to a dead conversation took 314 seconds to
+        // report an empty answer with a zero exit code. The message never left, so there
+        // is nothing to wait for — say so immediately and let the caller decide.
+        if (sendRes && sendRes.success === false) {
+            throw new Error(sendRes.error || (this.name + ': sendMessage failed'));
+        }
+
         console.error(`[${this.name}] Waiting for response (with typing detection)...`);
         const result = await this.ipc.send('getResponseWithTyping', this.name, {});
 

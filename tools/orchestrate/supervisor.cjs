@@ -188,7 +188,11 @@ const loadState = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); 
     // learns the thread it just created.
     const m = res.text.match(/_conversation_id:\s*([0-9a-f-]{36})_/);
     const learned = m ? m[1] : convId;
-    if (learned) {
+    // Never persist on a failed turn. Without this, a call that failed BECAUSE the
+    // conversation id was bad writes that id into the state file as the remembered
+    // thread, so every later turn inherits the failure. Observed: two failing calls
+    // incremented the counter and stored a dead uuid.
+    if (learned && !res.isError) {
         st.conversationId = learned;
         st.turns = (st.turns || 0) + 1;
         st.updatedAt = new Date().toISOString();
