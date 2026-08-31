@@ -1590,13 +1590,14 @@ server.tool(
         message: z.string().describe('Message to send to Qwen (Alibaba Qwen3.8). Ordinary web search needs no flag — just ask for it in the prompt ("do a websearch, then ..."); that is measured working. Use `mode` only for deep_research, which cannot be triggered from the prompt.'),
         files: z.array(z.string()).optional().describe('Optional: file paths whose TEXT is pasted into the prompt. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only. For images/video/audio use `attachments` instead — this parameter would inline binary as garbage.'),
         attachments: z.array(z.string()).optional().describe('Optional: local file paths uploaded to Qwen as REAL multimodal attachments, so the model sees the image/video itself rather than a description. Images (png/jpg/webp/gif/bmp/tiff…): up to 5 per turn, 20MB each. Video (mp4/mov/mkv/avi/wmv/flv): 1 per turn, 500MB, 10 min. Audio (mp3/wav/m4a/aac/amr): 1 per turn, 100MB, 3 min. Documents (pdf/docx/xlsx/csv/md): 5 per turn, 20MB. Requires a vision-capable model — the default qwen3.8-max is one.'),
+        session: z.string().optional().describe('Isolate this caller onto its own Qwen conversation. One engine serves every caller on the page — MCP tools, the automation review loop, the QA video reviewer, the orchestrator — and without a session they all share ONE chat pointer, so one caller starting a new conversation silently moves everyone else. Name a session and you get your own thread, parent chain and mode. Omit it and you share "default".'),
         conversation_id: z.string().optional().describe('Resume a specific Qwen conversation. Bare uuid or a full chat.qwen.ai URL. Use this to keep ONE long-lived Qwen thread across calls — e.g. an orchestrator that sends several videos to the same reviewer chat. The last assistant response is recovered from the server and chained to, so a resumed thread keeps its history instead of branching from the root. Note Qwen fixes chat_type when a conversation is created, so a pinned thread keeps the mode it was made with and `mode` cannot change it.'),
         new_chat: z.boolean().optional().describe('Start a fresh Qwen conversation before sending. Qwen otherwise KEEPS CONTEXT across calls (its chat id is persisted in the page for 2 hours and survives a Proxima restart), which is usually what you want for follow-up questions. Set true when the answer must not be influenced by earlier turns — e.g. an independent QA verdict, or a new unrelated topic. Switching `mode` already forces a new conversation on its own.'),
         mode: z.enum(['t2t', 'search', 'deep_research', 'artifacts', 'web_dev', 'learn', 'slides', 'travel'])
             .optional()
             .describe('Qwen chat_type. Default t2t. "deep_research" is a long-running multi-step research mode — budget MINUTES per call, not seconds. Switching mode starts a fresh Qwen conversation because chat_type is fixed when the conversation is created.')
     },
-    async ({ message, files, attachments, mode, new_chat, conversation_id }) => {
+    async ({ message, files, attachments, mode, new_chat, conversation_id, session }) => {
         const disabled = checkDisabled('qwen');
         if (disabled) return disabled;
         try {
@@ -1609,11 +1610,12 @@ server.tool(
             const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
             // new_chat exists to get an uninfluenced answer, so serving it from cache
             // would defeat the whole point.
-            const useCache = (!mode || mode === 't2t') && !hasAttachments && !new_chat && !conversation_id;
+            const useCache = (!mode || mode === 't2t') && !hasAttachments && !new_chat && !conversation_id && !session;
             const opts = { chatType: mode || 't2t' };
             if (hasAttachments) opts.attachments = attachments;
             if (new_chat) opts.newChat = true;
             if (conversation_id) opts.conversationId = conversation_id;
+            if (session) opts.session = session;
             return toolResponse(await qwen.chat(fullMessage, useCache, opts));
         } catch (err) {
             return toolError(err);

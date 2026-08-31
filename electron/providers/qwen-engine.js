@@ -45,37 +45,93 @@
     // engine gives up first and reports which mode timed out.
     var DEEP_RESEARCH_TIMEOUT = 1500000;   // 25 min
 
-    // ─── State ───────────────────────────────────────
-    // Persisted, NOT just in-memory. A CAPTCHA, a manual click or any page
-    // navigation destroys this script and Proxima re-injects a fresh copy — which
-    // would otherwise lose the chat id of a conversation that is still generating
-    // server-side. An 11-minute deep_research run died exactly that way.
+    // ─── State, PER CALLER ───────────────────────────
+    // One engine instance serves every caller that reaches this page: the MCP tools, the
+    // automation review loop, the repair loop, the QA video reviewer and the
+    // orchestrator. They arrive over different sockets and are NOT serialised against
+    // each other, so a single shared chat pointer is a collision waiting to happen.
+    //
+    // It happened. A `git push` fired the review loop while an orchestrated thread was
+    // mid-conversation, and the review's "You are a senior code auditor" turn was
+    // appended into the middle of that thread. The reviewer got the wrong context and
+    // the orchestrator's conversation was polluted — with nothing logged anywhere.
+    //
+    // So state is keyed by session. A caller that names one gets its own conversation,
+    // parent chain and mode; callers that name none share 'default', which preserves the
+    // old single-thread behaviour for anything not yet updated.
+    //
+    // Still persisted, not merely in-memory: a CAPTCHA, a manual click or any navigation
+    // destroys this script and Proxima re-injects a fresh copy, which would otherwise
+    // lose the id of a conversation still generating server-side. An 11-minute
+    // deep_research run died exactly that way.
     var STORE_KEY = '__proxima_qwen_state';
-    var _chatId = null;
-    var _parentId = null;          // previous turn's response_id
-    var _chatMode = null;          // chat_type the CURRENT _chatId was created with
-    var _lastMeta = null;          // { usage, thinking[], responseId, phases }
-    // True when a caller named a specific conversation. ensureChat must then trust the
-    // pin rather than starting a fresh chat because the mode looks wrong.
-    var _pinned = false;
+    var STATE_TTL_MS = 7200000;          // 2h
+    var DEFAULT_SESSION = 'default';
+    var _sessions = {};                  // key -> session object
+
+    function newSession() {
+        return {
+            chatId: null,
+            parentId: null,              // previous turn's response_id
+            chatMode: null,              // chat_type the CURRENT chatId was created with
+            lastMeta: null,              // { usage, thinking[], responseId, phases }
+            // True when a caller named a specific conversation. ensureChat must then
+            // trust the pin rather than starting a fresh chat on a mode mismatch.
+            pinned: false
+        };
+    }
+
+    /** The session object for a key, created on first use. */
+    function sess(key) {
+        var k = key || DEFAULT_SESSION;
+        if (!_sessions[k]) _sessions[k] = newSession();
+        return _sessions[k];
+    }
 
     function loadState() {
         try {
             var raw = window.localStorage.getItem(STORE_KEY);
             if (!raw) return;
             var st = JSON.parse(raw);
-            // Only adopt state that is still plausibly live (2h).
-            if (!st || !st.chatId || (Date.now() - (st.ts || 0)) > 7200000) return;
-            _chatId = st.chatId; _parentId = st.parentId || null; _chatMode = st.chatMode || null;
-            console.log('[Proxima] Qwen: resumed conversation ' + _chatId + ' (mode ' + _chatMode + ')');
+            if (!st) return;
+            // Older builds stored a single flat conversation. Adopt it as 'default' so an
+            // upgrade in the middle of a live conversation does not strand it.
+            var stored = st.sessions || (st.chatId ? { 'default': st } : null);
+            if (!stored) return;
+            var restored = 0;
+            for (var k in stored) {
+                if (!Object.prototype.hasOwnProperty.call(stored, k)) continue;
+                var e = stored[k];
+                if (!e || !e.chatId || (Date.now() - (e.ts || 0)) > STATE_TTL_MS) continue;
+                var s = sess(k);
+                s.chatId = e.chatId;
+                s.parentId = e.parentId || null;
+                s.chatMode = e.chatMode || null;
+                s.pinned = !!e.pinned;
+                restored++;
+            }
+            if (restored) {
+                console.log('[Proxima] Qwen: resumed ' + restored + ' session(s): ' +
+                    Object.keys(_sessions).map(function (k2) {
+                        return k2 + '=' + _sessions[k2].chatId + '(' + _sessions[k2].chatMode + ')';
+                    }).join(', '));
+            }
         } catch (e) { /* storage blocked — degrade to in-memory */ }
     }
 
     function saveState() {
         try {
-            window.localStorage.setItem(STORE_KEY, JSON.stringify({
-                chatId: _chatId, parentId: _parentId, chatMode: _chatMode, ts: Date.now()
-            }));
+            var out = {};
+            for (var k in _sessions) {
+                if (!Object.prototype.hasOwnProperty.call(_sessions, k)) continue;
+                var s = _sessions[k];
+                if (!s.chatId) continue;
+                out[k] = {
+                    chatId: s.chatId, parentId: s.parentId, chatMode: s.chatMode,
+                    pinned: s.pinned, ts: Date.now()
+                };
+            }
+            window.localStorage.setItem(STORE_KEY, JSON.stringify({ sessions: out }));
         } catch (e) { /* ignore */ }
     }
 
@@ -247,28 +303,28 @@
     // The mode is baked into the conversation at chats/new time, so a chat created
     // as t2t can never become deep_research. Switching mode therefore has to start a
     // NEW conversation — reusing the cached id would silently run the old mode.
-    function ensureChat(model, chatType) {
+    function ensureChat(model, chatType, S) {
         var want = chatType || 't2t';
-        if (_chatId && _chatMode === want) return Promise.resolve(_chatId);
+        if (S.chatId && S.chatMode === want) return Promise.resolve(S.chatId);
         // A pinned conversation is used as given. Its real chat_type is unreadable, so
         // replacing it on a suspected mismatch would throw away the thread the caller
         // explicitly asked for — the one thing a pin must never do.
-        if (_chatId && _pinned) {
-            if (_chatMode && _chatMode !== want) {
-                console.warn('[Proxima] Qwen: pinned conversation was created as ' + _chatMode +
+        if (S.chatId && S.pinned) {
+            if (S.chatMode && S.chatMode !== want) {
+                console.warn('[Proxima] Qwen: pinned conversation was created as ' + S.chatMode +
                     ' but ' + want + ' was requested. chat_type is fixed at creation, so the ' +
                     'conversation keeps its original mode.');
             }
-            return Promise.resolve(_chatId);
+            return Promise.resolve(S.chatId);
         }
-        if (_chatId && _chatMode !== want) {
-            console.log('[Proxima] Qwen: mode ' + _chatMode + ' -> ' + want +
+        if (S.chatId && S.chatMode !== want) {
+            console.log('[Proxima] Qwen: mode ' + S.chatMode + ' -> ' + want +
                 '; starting a new conversation (chat_type is fixed at creation).');
-            _parentId = null;
+            S.parentId = null;
         }
         return createChat(model, want).then(function (id) {
-            _chatId = id;
-            _chatMode = want;
+            S.chatId = id;
+            S.chatMode = want;
             saveState();
             return id;
         });
@@ -430,7 +486,7 @@
     //    back, so _chatMode is set to null — "unknown" — which makes ensureChat trust
     //    the pin instead of silently starting a fresh conversation on a mode mismatch.
     //    The caller is warned when it asks for a mode we cannot verify.
-    function setConversation(chatId, wantedMode) {
+    function setConversation(chatId, wantedMode, S) {
         if (!chatId || typeof chatId !== 'string') {
             return Promise.reject(new Error('setConversation: chatId required'));
         }
@@ -444,24 +500,24 @@
             if (!j || !j.data || !j.data.chat) {
                 throw new Error('Qwen: conversation ' + id + ' not found or not readable');
             }
-            _chatId = id;
-            _pinned = true;
+            S.chatId = id;
+            S.pinned = true;
             // Unknown until proven otherwise — see note 2 above.
-            _chatMode = wantedMode || null;
-            _parentId = latestResponseId(j);
+            S.chatMode = wantedMode || null;
+            S.parentId = latestResponseId(j);
             saveState();
             console.log('[Proxima] Qwen: pinned conversation ' + id +
-                (_parentId ? ' (chained to response ' + _parentId + ')'
+                (S.parentId ? ' (chained to response ' + S.parentId + ')'
                            : ' (no prior assistant turn; starting at root)'));
-            return { chatId: _chatId, parentId: _parentId };
+            return { chatId: S.chatId, parentId: S.parentId };
         });
     }
 
-    function getConversation() { return _chatId; }
+    function getConversation(S) { return S.chatId; }
 
     // ─── Request body ────────────────────────────────
-    function buildBody(message, model, thinking, opts) {
-        var parent = _parentId;
+    function buildBody(message, model, thinking, opts, S) {
+        var parent = S.parentId;
         var ct = (opts && opts.chatType) || 't2t';
         // §11.5: which of chat_type / auto_search actually switches web search on was
         // never isolated, so for any search-ish mode we set BOTH.
@@ -485,9 +541,9 @@
             stream: true,
             version: '2.1',
             incremental_output: true,        // answer deltas are new chars only
-            chatId: _chatId,
+            chatId: S.chatId,
             parentId: parent === null ? '' : parent,
-            chat_id: _chatId,
+            chat_id: S.chatId,
             chat_mode: 'normal',
             model: model,
             parent_id: parent,
@@ -702,7 +758,7 @@
     var DEEP_RESEARCH_REPLY =
         'You decide the scope and focus. Proceed with the research now.';
 
-    function deepResearch(message, o) {
+    function deepResearch(message, o, S) {
         var reply = o.researchReply || DEEP_RESEARCH_REPLY;
         // Turn 1. Same chatType, so ensureChat creates/keeps ONE deep_research
         // conversation and turn 2 chains onto it by parentId as usual.
@@ -712,7 +768,7 @@
         t1Opts._drTurn = 1;
 
         return send(message, t1Opts).then(function (clarifying) {
-            var m1 = _lastMeta || {};
+            var m1 = S.lastMeta || {};
             console.log('[Proxima] Qwen deep_research turn 1 (deep_thinking): ' +
                 String(clarifying).length + ' chars — this is the clarifying question, ' +
                 'not the research. Proceeding to turn 2.');
@@ -725,10 +781,10 @@
             return send(reply, t2Opts).then(function (research) {
                 // Keep turn 1's question on the meta: it is the only record of what the
                 // model wanted narrowed, and it explains the shape of the answer.
-                if (_lastMeta) {
-                    _lastMeta.clarifyingQuestion = String(clarifying);
-                    _lastMeta.researchReply = reply;
-                    _lastMeta.turns = 2;
+                if (S.lastMeta) {
+                    S.lastMeta.clarifyingQuestion = String(clarifying);
+                    S.lastMeta.researchReply = reply;
+                    S.lastMeta.turns = 2;
                 }
                 return research;
             });
@@ -738,8 +794,8 @@
     // Abort an in-flight generation. Worth having when one call can run seven minutes:
     // without it a caller that gives up leaves the model working server-side.
     // Plain request, no bx-* signing.
-    function stopGeneration(chatId) {
-        var cid = chatId || _chatId;
+    function stopGeneration(chatId, S) {
+        var cid = chatId || S.chatId;
         if (!cid) return Promise.resolve(false);
         return fetch(ORIGIN + '/api/v2/chat/completions/stop', {
             method: 'POST',
@@ -754,6 +810,10 @@
     // contract with provider-api.cjs. Thinking/usage go to __proximaQwen.lastMeta().
     function send(message, options) {
         var o = options || {};
+        // Resolved ONCE, here, and threaded through everything below. Reading it
+        // again later would reintroduce the shared-pointer bug for any caller that
+        // interleaves with another.
+        var S = sess(o.session);
         var model = o.model || DEFAULT_MODEL;
         var thinking = !!o.thinking;
 
@@ -765,8 +825,8 @@
         o.chatType = chatType;
         // An explicit conversationId pins the thread before anything else happens, so
         // ensureChat below reuses it rather than creating a new one.
-        if (o.conversationId && o.conversationId !== _chatId) {
-            return setConversation(o.conversationId, chatType).then(function () {
+        if (o.conversationId && o.conversationId !== S.chatId) {
+            return setConversation(o.conversationId, chatType, S).then(function () {
                 var o2 = {};
                 for (var k in o) { if (Object.prototype.hasOwnProperty.call(o, k)) o2[k] = o[k]; }
                 delete o2.conversationId;
@@ -776,7 +836,7 @@
         // deep_research needs two turns; deepResearch() calls back into send() for each
         // one with an explicit subChatType. The _drTurn guard stops that recursing.
         if (chatType === 'deep_research' && !o._drTurn) {
-            return deepResearch(message, o);
+            return deepResearch(message, o, S);
         }
         // deep_research is a long-running multi-step mode; 6 min is not enough.
         var timeout = (chatType === 'deep_research') ? DEEP_RESEARCH_TIMEOUT : TIMEOUT;
@@ -784,9 +844,9 @@
         // Both requests below are signed, so wait out the SDK boot rather than
         // failing a send that was fired a second too early after a page load.
         return waitForSigning(10000).then(function () {
-            return ensureChat(model, chatType);
+            return ensureChat(model, chatType, S);
         }).then(function () {
-            var url = ORIGIN + '/api/v2/chat/completions?chat_id=' + encodeURIComponent(_chatId);
+            var url = ORIGIN + '/api/v2/chat/completions?chat_id=' + encodeURIComponent(S.chatId);
             var ctl = new AbortController();
             var tid = setTimeout(function () { ctl.abort(); }, timeout);
 
@@ -799,7 +859,7 @@
                 // them here would make our send the only one on the wire that looks
                 // unlike the app's. The four headers below are the whole requirement.
                 headers: headers(),
-                body: JSON.stringify(buildBody(message, model, thinking, o)),
+                body: JSON.stringify(buildBody(message, model, thinking, o, S)),
                 signal: ctl.signal
             }).then(function (res) {
                 var ct = res.headers.get('content-type') || '';
@@ -855,8 +915,8 @@
                     }
                     // Chain the next turn. History is NOT resent — turn 2 sends one
                     // message plus parent_id = this turn's response_id.
-                    if (r.state.responseId) { _parentId = r.state.responseId; saveState(); }
-                    _lastMeta = {
+                    if (r.state.responseId) { S.parentId = r.state.responseId; saveState(); }
+                    S.lastMeta = {
                         usage: r.state.usage,
                         thinking: r.state.thinking,
                         responseId: r.state.responseId,
@@ -882,20 +942,20 @@
 
                 console.warn('[Proxima] Qwen stream died (' + (aborted ? 'timeout' : (e && e.message)) +
                     ') in mode ' + chatType + '. The generation usually continues server-side, ' +
-                    'so re-reading conversation ' + _chatId + ' to recover it.');
+                    'so re-reading conversation ' + S.chatId + ' to recover it.');
 
-                if (!_chatId) {
+                if (!S.chatId) {
                     if (aborted) throw new Error('Qwen: timed out after ' + (timeout / 1000) + 's (mode ' + chatType + ')');
                     throw e;
                 }
                 // Long modes may still be writing; poll rather than asking once.
                 var tries = (chatType === 'deep_research') ? 20 : 3;
-                return recoverAnswer(_chatId, tries, 15000).then(function (got) {
+                return recoverAnswer(S.chatId, tries, 15000).then(function (got) {
                     if (got && got.text) {
                         console.log('[Proxima] Qwen: RECOVERED ' + got.text.length +
                             ' chars from the conversation after the stream died.');
-                        if (got.responseId) { _parentId = got.responseId; saveState(); }
-                        _lastMeta = {
+                        if (got.responseId) { S.parentId = got.responseId; saveState(); }
+                        S.lastMeta = {
                             recovered: true, chatType: chatType, responseId: got.responseId,
                             usage: null, thinking: [], phases: {}, responseIds: [], dropped: 0, dupChunks: 0, restartFromStart: 0
                         };
@@ -909,12 +969,12 @@
         });
     }
 
-    function newConversation() {
-        _chatId = null;
-        _parentId = null;
-        _chatMode = null;
-        _pinned = false;
-        _lastMeta = null;
+    function newConversation(S) {
+        S.chatId = null;
+        S.parentId = null;
+        S.chatMode = null;
+        S.pinned = false;
+        S.lastMeta = null;
         try { window.localStorage.removeItem(STORE_KEY); } catch (e) { }
         return true;
     }
@@ -990,18 +1050,37 @@
         });
     }
 
+    // Public surface. Every conversation-scoped entry point takes a SESSION KEY and
+    // resolves it here, so callers never see the internal session objects and a caller
+    // that passes nothing keeps the old single-thread behaviour under "default".
     window.__proximaQwen = {
         send: send,
-        newConversation: newConversation,
+        newConversation: function (session) { return newConversation(sess(session)); },
+        setConversation: function (chatId, session) {
+            return setConversation(chatId, null, sess(session));
+        },
+        getConversation: function (session) { return getConversation(sess(session)); },
+        stopGeneration: function (chatId, session) { return stopGeneration(chatId, sess(session)); },
+        lastMeta: function (session) { return sess(session).lastMeta; },
+        state: function (session) {
+            var S = sess(session);
+            return { chatId: S.chatId, parentId: S.parentId, pinned: S.pinned, chatMode: S.chatMode };
+        },
+        // Every live session at once — for diagnosing exactly the collision this
+        // design exists to prevent.
+        sessions: function () {
+            var out = {};
+            for (var k in _sessions) {
+                if (!Object.prototype.hasOwnProperty.call(_sessions, k)) continue;
+                out[k] = { chatId: _sessions[k].chatId, chatMode: _sessions[k].chatMode,
+                           pinned: _sessions[k].pinned };
+            }
+            return out;
+        },
         listModels: listModels,
         getUploadToken: getUploadToken,
-        stopGeneration: stopGeneration,
         checkAttachmentSupport: checkAttachmentSupport,
-        defaultModel: function () { return DEFAULT_MODEL; },
-        lastMeta: function () { return _lastMeta; },
-        setConversation: setConversation,
-        getConversation: getConversation,
-        state: function () { return { chatId: _chatId, parentId: _parentId, pinned: _pinned }; }
+        defaultModel: function () { return DEFAULT_MODEL; }
     };
 
     loadState();   // survive the re-injection that follows a CAPTCHA or navigation

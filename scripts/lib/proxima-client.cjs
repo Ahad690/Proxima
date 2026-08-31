@@ -72,7 +72,9 @@ async function askProxima(message, model, _baseUrl, opts = {}) {
                 // fields the Qwen engine does not read. The effect was a repair running
                 // qwen3.8-max with thinking off, silently, which is the worst possible
                 // configuration for patch generation.
-                return { message, thinking: true };
+                // Same session as the review CLI: the repair loop is the same actor and
+                // should share its thread, while staying clear of everyone else's.
+                return { message, thinking: true, session: 'automation' };
             }
             return { message, modelPreference: model, deepSearch: false };
         }

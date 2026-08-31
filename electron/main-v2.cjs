@@ -532,7 +532,7 @@ async function handleMCPRequest(request) {
                 // they will appear to be ignored with no error anywhere.
                 // qwen: autoSearch -> feature_config.auto_search, thinking -> thinking_enabled,
                 //       files -> messages[0].files (OSS descriptors, see uploadAttachmentsToQwen)
-                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files, conversationId: data.conversationId, newChat: data.newChat, effort: data.effort, renderingMode: data.renderingMode };
+                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files, conversationId: data.conversationId, newChat: data.newChat, session: data.session, effort: data.effort, renderingMode: data.renderingMode };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
 
                 // Stamp every outgoing prompt with the wall-clock time, for every
@@ -592,7 +592,7 @@ async function handleMCPRequest(request) {
                     // an independent answer (a QA verdict must not inherit a previous run).
                     if (data.newChat) {
                         await browserManager.executeScript('qwen',
-                            'window.__proximaQwen ? window.__proximaQwen.newConversation() : null');
+                            `window.__proximaQwen ? window.__proximaQwen.newConversation(${JSON.stringify(data.session || null)}) : null`);
                         console.log('[Qwen] newChat requested — conversation state cleared');
                     }
                     const wanted = qwenAttachmentPaths(data);

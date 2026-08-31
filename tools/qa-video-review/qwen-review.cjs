@@ -203,6 +203,9 @@ function extractVerdict(text) {
         message: prompt,
         attachments: [video].concat(args.images.map((i) => path.resolve(i))),
         chatType: 't2t',
+        // Its own session: video reviews must not inherit, or be inherited by, the
+        // automation loop's review thread.
+        session: 'qa-review',
         conversationId: args.conversationId || undefined,
         // Fresh conversation by DEFAULT, which is the opposite of Qwen's normal
         // behaviour (it keeps context for 2h). A verdict has to stand on this video

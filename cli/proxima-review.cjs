@@ -198,7 +198,10 @@ function queryAI(message, model, provider) {
                 // The Qwen engine picks its own default model (qwen3.8-max); chat_type
                 // rides the provider:engine channel, not the payload. `thinking` does
                 // have to be passed — see REVIEW_THINKING above.
-                return { message, thinking: REVIEW_THINKING };
+                // Its own session, so a review fired by a git push cannot land in the
+                // middle of somebody else's conversation. That happened: an orchestrated
+                // thread ended up with a 'You are a senior code auditor' turn spliced in.
+                return { message, thinking: REVIEW_THINKING, session: 'automation' };
             }
             // perplexity (and any future provider)
             return { message, modelPreference: model, deepSearch: false };
