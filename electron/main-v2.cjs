@@ -22,6 +22,12 @@ console.error = (...args) => originalError(`[${getTimestamp()}]`, ...args);
 // Cache for API responses — when API captures response, DOM scraping is skipped
 const _apiResponseCache = {};
 
+// When this main process loaded. Reported by getStatus so a preflight can compare it
+// against the mtime of the source files and tell whether Proxima is running code older
+// than what is on disk. Half the 'verified' failures in this project's history were
+// actually an un-restarted main process, which looks identical to a broken feature.
+const PROCESS_STARTED_AT = new Date().toISOString();
+
 // Anti-detection: must run before any Electron APIs
 // These MUST be set before app is ready or any windows are created
 
@@ -513,7 +519,10 @@ async function handleMCPRequest(request) {
                 return {
                     success: true,
                     providers: browserManager.getInitializedProviders(),
-                    activeProvider: browserManager.activeProvider
+                    activeProvider: browserManager.activeProvider,
+                    startedAt: PROCESS_STARTED_AT,
+                    pid: process.pid,
+                    fileReferenceEnabled
                 };
 
             case 'initProvider':
