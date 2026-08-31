@@ -56,6 +56,19 @@
         return data.uuid;
     }
 
+    // Uploads are addressed to /conversations/{uuid}/wiggle/upload-file, so a file
+    // cannot be attached until a conversation exists. send() creates one lazily, which
+    // is too late — hence an explicit way to materialise it first. Returns the id.
+    async function ensureConversation(promptPreview) {
+        if (_convId) return _convId;
+        var orgId = await _getOrgId();
+        _convId = await _createConversation(orgId, promptPreview || 'proxima');
+        console.log('[Proxima Claude] Pre-created conversation for upload:', _convId);
+        return _convId;
+    }
+
+    async function getOrgId() { return await _getOrgId(); }
+
     // ─── Conversation targeting ─────────────────────
     // _convId is just the uuid in the claude.ai/chat/<uuid> URL, so any existing
     // conversation can be resumed by naming it. Needed for a long-running supervisor
@@ -224,6 +237,22 @@
     // whatever the claude.ai UI is set to.
     //
     // Pass model:null / effort:null to fall back to the account+conversation default.
+    // Wire-confirmed ids (picker switched, message sent, model read back off
+    // message_start — not derived from labels):
+    //   Opus 5     claude-opus-5
+    //   Sonnet 5   claude-sonnet-5
+    //   Fable 5    claude-fable-5
+    //   Opus 4.8   claude-opus-4-8
+    //   Haiku 4.5  claude-haiku-4-5-20251001   <- NOT the short form
+    //
+    // That last one is why ids must not be guessed from labels: the "strip the dot,
+    // join with hyphens" pattern holds for four of the five and breaks on Haiku, which
+    // carries a dated snapshot suffix. Opus 4.7 / 4.6 / 3 and Sonnet 4.6 are still
+    // unconfirmed — any of them could carry a date too. An unavailable id returns 403
+    // permission_error/model_not_available, not a 400.
+    //
+    // There is no models-list endpoint; two capture passes watched for one and found
+    // nothing, so this list can only grow by observation.
     var DEFAULT_MODEL = 'claude-opus-5';
     var DEFAULT_EFFORT = 'high';
 
@@ -234,6 +263,11 @@
     // and 'off' IS a valid thinking_mode — a capture pass had left that unknown.
     var EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
     var THINKING_MODES = ['extended', 'standard', 'auto', 'off'];
+    // Scope differs between the two, which is measured, not assumed: per-request
+    // `effort` WRITES THROUGH to the conversation's settings.effort_level, while
+    // per-request `thinking_mode` applies to that turn only and leaves the stored
+    // setting alone. So pinning effort here changes the conversation; pinning thinking
+    // does not.
 
     // ─── Completion body ────────────────────────────
     // rendering_mode:'messages' is the single load-bearing field for artifacts, and it
@@ -282,6 +316,14 @@
             body.thinking_mode = options.thinkingMode;
         }
         if (options.locale) body.locale = options.locale;
+        // The two upload slots. Which one a file belongs in is decided by the
+        // server's own file_kind sniffing at upload time, not by us — see
+        // providers/claude-upload.cjs. Both are always present in the real app, so
+        // they stay as empty arrays when there is nothing attached.
+        if (options.files && options.files.length) body.files = options.files;
+        if (options.attachments && options.attachments.length) {
+            body.attachments = options.attachments;
+        }
         return JSON.stringify(body);
     }
 
@@ -461,6 +503,8 @@
         conversationInfo: conversationInfo,
         downloadArtifact: downloadArtifact,
         listArtifacts: listArtifacts,
+        ensureConversation: ensureConversation,
+        getOrgId: getOrgId,
         lastMeta: lastMeta
     };
     console.log('[Proxima] Claude engine loaded');

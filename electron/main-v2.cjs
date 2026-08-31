@@ -1,6 +1,8 @@
 // Proxima main process — embedded browser + anti-detection + IPC server
 
-const { app, BrowserWindow, ipcMain, shell, session, clipboard } = require('electron');
+// electronNet, not net: Node's net is already required below for the IPC server.
+// Electron's net is needed because it can carry a BrowserView session's cookies.
+const { app, BrowserWindow, ipcMain, shell, session, clipboard, net: electronNet } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
@@ -8,6 +10,7 @@ const BrowserManager = require('./browser-manager.cjs');
 const { initRestAPI, startRestAPI, stopRestAPI, isRestAPIRunning } = require('./rest-api.cjs');
 const providerAPI = require('./provider-api.cjs');
 const qwenUpload = require('./providers/qwen-upload.cjs');
+const claudeUpload = require('./providers/claude-upload.cjs');
 
 // Add timestamps to console logs
 const originalLog = console.log;
@@ -532,6 +535,27 @@ async function handleMCPRequest(request) {
                 const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files, conversationId: data.conversationId, newChat: data.newChat, effort: data.effort, renderingMode: data.renderingMode };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
 
+                // Claude attachments: upload first, then reference the results in the
+                // completion body. Uploading is a separate request that must complete
+                // before the send, so a failure here must NOT fall through to a
+                // text-only turn pretending the file was included.
+                if (provider === 'claude') {
+                    const wantedCl = qwenAttachmentPaths(data);
+                    if (wantedCl.length) {
+                        if (!fileReferenceEnabled) {
+                            return { success: false, error: 'File reference is disabled. Enable it in Agent Hub settings.' };
+                        }
+                        const up = await uploadAttachmentsToClaude(wantedCl, data.message);
+                        if (up) {
+                            // These two are the completion-body slots, not file paths.
+                            // Which upload goes in which is the server's file_kind call.
+                            sendOptions.files = up.files;
+                            sendOptions.attachments = up.attachments;
+                            _claudeUploadSummary = up.summary;
+                        }
+                    }
+                }
+
                 // Qwen: real attachments, uploaded to OSS and named in the request body.
                 // Deliberately NOT routed through uploadFileToProvider — see the comment
                 // on uploadAttachmentsToQwen.
@@ -596,8 +620,11 @@ async function handleMCPRequest(request) {
                                 .catch(() => null);
                         const artifacts = saveClaudeArtifacts(
                             parsedMeta && parsedMeta.artifacts, conversationId);
+                        const attachedNow = _claudeUploadSummary;
+                        _claudeUploadSummary = null;
                         return {
                             success: true, provider, result, conversationId, artifacts,
+                            attachments: attachedNow,
                             model: parsedMeta && parsedMeta.model,
                             stopReason: parsedMeta && parsedMeta.stopReason
                         };
@@ -3089,6 +3116,8 @@ ipcMain.handle('uninstall-cli', async () => {
 // messages[0].files. See providers/qwen-upload.cjs for why the PUT is done from
 // Node rather than in-page.
 const _qwenPendingAttachments = [];
+// What the last claude send attached, so the IPC reply can report it.
+let _claudeUploadSummary = null;
 
 async function uploadAttachmentsToQwen(filePaths, model) {
     const webContents = browserManager.getWebContents('qwen');
@@ -3146,6 +3175,43 @@ function qwenAttachmentPaths(data) {
     else if (data.attachments) out.push(data.attachments);
     if (data.filePath) out.push(data.filePath);
     return out.filter(Boolean);
+}
+
+// ─── Claude attachments ──────────────────────────
+// Files are uploaded at ATTACH time, not send time: the file goes up first and the
+// completion request only references what is already on the server. That is why this
+// has to materialise the conversation before uploading — the upload URL contains the
+// conversation uuid.
+//
+// Deliberately NOT routed through uploadFileToProvider. That helper drives the page
+// composer, and Claude sends by API, so a file parked in the composer is invisible to
+// the request — the same silent drop Qwen had.
+async function uploadAttachmentsToClaude(filePaths, promptPreview) {
+    const webContents = browserManager.getWebContents('claude');
+    if (!webContents) throw new Error('Provider claude not initialized');
+
+    const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean);
+    if (!paths.length) return null;
+
+    // Validate everything before a single byte goes out.
+    paths.forEach((f) => claudeUpload.validate(f));
+
+    const orgId = await webContents.executeJavaScript('window.__proximaClaude.getOrgId()');
+    const convId = await webContents.executeJavaScript(
+        `window.__proximaClaude.ensureConversation(${JSON.stringify(String(promptPreview || 'proxima').slice(0, 50))})`);
+    if (!orgId || !convId) throw new Error('Claude: could not resolve org/conversation for upload');
+
+    const ses = session.fromPartition('persist:claude', { cache: true });
+    const uploads = [];
+    for (const f of paths) {
+        const t0 = Date.now();
+        const u = await claudeUpload.uploadOne(electronNet.request, ses, orgId, convId, f);
+        console.log(`[Claude] uploaded ${u.name} — file_kind=${u.fileKind}, ` +
+            `${(u.bytes / 1024).toFixed(1)}KB, ${Date.now() - t0}ms`);
+        uploads.push(u);
+    }
+    const slots = claudeUpload.toCompletionSlots(uploads);
+    return { conversationId: convId, files: slots.files, attachments: slots.attachments, summary: slots.summary };
 }
 
 // ─── Claude artifacts ────────────────────────────

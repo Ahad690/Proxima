@@ -1203,13 +1203,14 @@ server.tool(
     {
         message: z.string().describe('Message to send to Claude. If Claude produces an artifact (a file it writes — HTML, code, a document), the artifact is saved to disk and its absolute path is appended to the reply, so you can open and edit it with normal file tools rather than re-reading it out of chat text.'),
         files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.'),
+        attachments: z.array(z.string()).optional().describe('Local file paths uploaded to Claude as REAL attachments, so the model sees the file itself. Images and PDFs are referenced by id; plain-text and code files are carried inline as extracted text. Distinct from `files`, which only pastes text into the prompt. Upload happens before the message is sent, and a failed upload fails the call rather than quietly sending a text-only turn.'),
         conversation_id: z.string().optional().describe('Resume a specific claude.ai conversation. Accepts the bare uuid or a full https://claude.ai/chat/<uuid> URL. Verified: a conversation can be resumed cold (after a restart) and it retains its full history — the server threads onto the current leaf of that conversation. Use this to keep one long-lived thread across many calls. If the conversation no longer exists the call FAILS rather than silently starting a blank one.'),
         model: z.string().optional().describe('claude.ai model id. Defaults to claude-opus-5. Wire-confirmed ids: claude-opus-5, claude-sonnet-5. This is per-request and does NOT change the conversation stored model. An unavailable id returns 403.'),
         effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Reasoning effort. Defaults to high. These five values are quoted from the server validation error, not guessed.'),
         thinking_mode: z.enum(['extended', 'standard', 'auto', 'off']).optional().describe('Thinking mode. Omitted by default, which leaves the conversation setting alone. Values quoted from the server validation error.'),
         new_chat: z.boolean().optional().describe('Start a fresh conversation instead of continuing the current one. the Claude conversation id is held in memory only, so it is already lost whenever the claude.ai tab reloads — pass conversation_id to survive that.')
     },
-    async ({ message, files, conversation_id, new_chat, model, effort, thinking_mode }) => {
+    async ({ message, files, attachments, conversation_id, new_chat, model, effort, thinking_mode }) => {
         const disabled = checkDisabled('claude');
         if (disabled) return disabled;
         try {
@@ -1220,9 +1221,14 @@ server.tool(
             if (model) opts.model = model;
             if (effort) opts.effort = effort;
             if (thinking_mode) opts.thinkingMode = thinking_mode;
+            const hasAtt = Array.isArray(attachments) && attachments.length > 0;
+            // Same reasoning as the qwen path: the cache is keyed on prompt text, so
+            // two different images under one question would answer from the first.
+            if (hasAtt) opts.attachments = attachments;
             // Pinning or resetting the thread changes what the answer depends on, so a
             // cached reply keyed on prompt text alone would be wrong.
-            const useCache = !conversation_id && !new_chat && !model && !effort && !thinking_mode;
+            const useCache = !conversation_id && !new_chat && !model && !effort && !thinking_mode &&
+                !(Array.isArray(attachments) && attachments.length);
             return toolResponse(await claude.chat(fullMessage, useCache, opts));
         } catch (err) {
             return toolError(err);
