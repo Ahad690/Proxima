@@ -216,6 +216,25 @@
         return { text: fullText, artifacts: artifacts, meta: meta };
     }
 
+    // ─── Defaults, model and effort ─────────────────
+    // Opus 5 at high effort. Both are PER-REQUEST: verified by sending
+    // model:'claude-sonnet-5' into a conversation whose own stored model was
+    // claude-opus-5 — message_start echoed claude-sonnet-5 and the conversation's
+    // stored model did not change. So this pins what Proxima sends without fighting
+    // whatever the claude.ai UI is set to.
+    //
+    // Pass model:null / effort:null to fall back to the account+conversation default.
+    var DEFAULT_MODEL = 'claude-opus-5';
+    var DEFAULT_EFFORT = 'high';
+
+    // These enums are quoted from the server's OWN validation errors, not guessed:
+    //   effort:        "Input should be 'low', 'medium', 'high', 'xhigh' or 'max'"
+    //   thinking_mode: "Input should be 'extended', 'standard', 'auto' or 'off'"
+    // Worth noting two guesses this killed: 'extra' is not a value (it is 'xhigh'),
+    // and 'off' IS a valid thinking_mode — a capture pass had left that unknown.
+    var EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+    var THINKING_MODES = ['extended', 'standard', 'auto', 'off'];
+
     // ─── Completion body ────────────────────────────
     // rendering_mode:'messages' is the single load-bearing field for artifacts, and it
     // is also what negotiates the modern stream format — one switch, not two. Without
@@ -228,6 +247,7 @@
     // locale/parent_message_uuid/turn_message_uuids/completion_request_id/sync_sources.
     // `prompt` is the only genuinely required field.
     function _completionBody(message, options) {
+        options = options || {};
         var body = {
             prompt: message,
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata',
@@ -235,14 +255,80 @@
             files: []
         };
         // Opt out with renderingMode:null to get the old legacy-frame behaviour back.
-        var rm = (options && Object.prototype.hasOwnProperty.call(options, 'renderingMode'))
+        var rm = Object.prototype.hasOwnProperty.call(options, 'renderingMode')
             ? options.renderingMode : 'messages';
         if (rm) body.rendering_mode = rm;
-        if (options && options.model) body.model = options.model;
-        if (options && options.thinkingMode) body.thinking_mode = options.thinkingMode;
-        if (options && options.effort) body.effort = options.effort;
-        if (options && options.locale) body.locale = options.locale;
+
+        var model = Object.prototype.hasOwnProperty.call(options, 'model')
+            ? options.model : DEFAULT_MODEL;
+        if (model) body.model = model;
+
+        var effort = Object.prototype.hasOwnProperty.call(options, 'effort')
+            ? options.effort : DEFAULT_EFFORT;
+        if (effort) {
+            // Fail here rather than after a round trip: an unknown effort costs a 400
+            // and an unknown model a 403, and neither error names the caller's mistake
+            // as clearly as this does.
+            if (EFFORTS.indexOf(effort) === -1) {
+                throw new Error('Claude: invalid effort "' + effort + '". Valid: ' + EFFORTS.join(', '));
+            }
+            body.effort = effort;
+        }
+        if (options.thinkingMode) {
+            if (THINKING_MODES.indexOf(options.thinkingMode) === -1) {
+                throw new Error('Claude: invalid thinking_mode "' + options.thinkingMode +
+                    '". Valid: ' + THINKING_MODES.join(', '));
+            }
+            body.thinking_mode = options.thinkingMode;
+        }
+        if (options.locale) body.locale = options.locale;
         return JSON.stringify(body);
+    }
+
+    // List the files a conversation's sandbox holds. This is the cold-retrieval path,
+    // and it is stronger than the streaming one: it works for ANY conversation, no
+    // matter how the message was sent.
+    //
+    // Worth stating plainly, because it changes what counts as data loss: conversations
+    // sent WITHOUT rendering_mode — whose transcript shows only "This block is not
+    // supported on your current device yet." — still have their artifact files here,
+    // listable and downloadable. Verified against three such conversations. The
+    // placeholder hid the artifact from the transcript; it never destroyed the file.
+    //
+    // Note /conversations/, not /chat_conversations/ — the wiggle routes use the short
+    // form while the chat routes use the long one.
+    // `attempts` exists because the sandbox listing is EVENTUALLY CONSISTENT. A file
+    // whose content had already fully streamed did not appear here immediately after
+    // the turn ended, and did appear on a retry moments later. Freshly created files
+    // therefore need a moment; old conversations answer first time. Default is 1, so
+    // listing a conversation that genuinely has no artifacts stays fast.
+    async function listArtifacts(conversationId, attempts) {
+        var orgId = await _getOrgId();
+        var cid = conversationId || _convId;
+        if (!cid) throw new Error('listArtifacts: no conversation');
+        var res = await fetch('/api/organizations/' + orgId + '/conversations/' + cid +
+            '/wiggle/list-files', { credentials: 'include' });
+        if (!res.ok) throw new Error('listArtifacts failed (' + res.status + ') for ' + cid);
+        var j = await res.json();
+        var meta = (j && j.files_metadata) || [];
+        // Fall back to the bare `files` array if metadata is ever absent.
+        if (!meta.length && j && Array.isArray(j.files)) {
+            meta = j.files.map(function (p) { return { path: p }; });
+        }
+        var mapped = meta.map(function (m) {
+            return {
+                path: m.path,
+                bytes: typeof m.size === 'number' ? m.size : null,
+                contentType: m.content_type || null,
+                createdAt: m.created_at || null
+            };
+        });
+        var tries = attempts || 1;
+        if (!mapped.length && tries > 1) {
+            await new Promise(function (r) { setTimeout(r, 3000); });
+            return listArtifacts(cid, tries - 1);
+        }
+        return mapped;
     }
 
     // Fetch a file the sandbox wrote, by the virtual path from an artifact's create_file
@@ -374,6 +460,7 @@
         setConversation: setConversation, getConversation: getConversation,
         conversationInfo: conversationInfo,
         downloadArtifact: downloadArtifact,
+        listArtifacts: listArtifacts,
         lastMeta: lastMeta
     };
     console.log('[Proxima] Claude engine loaded');

@@ -529,7 +529,7 @@ async function handleMCPRequest(request) {
                 // they will appear to be ignored with no error anywhere.
                 // qwen: autoSearch -> feature_config.auto_search, thinking -> thinking_enabled,
                 //       files -> messages[0].files (OSS descriptors, see uploadAttachmentsToQwen)
-                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files, conversationId: data.conversationId, newChat: data.newChat };
+                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files, conversationId: data.conversationId, newChat: data.newChat, effort: data.effort, renderingMode: data.renderingMode };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
 
                 // Qwen: real attachments, uploaded to OSS and named in the request body.
@@ -709,6 +709,35 @@ async function handleMCPRequest(request) {
                 } catch (err) {
                     return { success: false, error: err.message };
                 }
+
+            case 'claudeArtifacts': {
+                // Cold retrieval: list the conversation's sandbox files, pull each one
+                // and save it locally. Works for conversations this process never
+                // streamed, including ones whose transcript only ever held the
+                // 'not supported on your current device' placeholder.
+                if (provider !== 'claude') {
+                    return { success: false, error: 'claudeArtifacts is claude-only' };
+                }
+                const cid = data.conversationId ||
+                    await browserManager.executeScript('claude',
+                        'window.__proximaClaude ? window.__proximaClaude.getConversation() : null').catch(() => null);
+                if (!cid) return { success: false, error: 'no conversation id' };
+                const listed = await browserManager.executeScript('claude',
+                    `window.__proximaClaude.listArtifacts(${JSON.stringify(cid)}, 3).then(function(x){return JSON.stringify(x);})`);
+                let files = [];
+                try { files = JSON.parse(listed) || []; } catch (e) { files = []; }
+                const fetched = [];
+                for (const f of files) {
+                    const text = await browserManager.executeScript('claude',
+                        `window.__proximaClaude.downloadArtifact(${JSON.stringify(f.path)}, ${JSON.stringify(cid)})`)
+                        .catch(() => null);
+                    if (typeof text === 'string') {
+                        fetched.push({ path: f.path, fileText: text, description: f.contentType });
+                    }
+                }
+                const saved = saveClaudeArtifacts(fetched, cid);
+                return { success: true, provider, conversationId: cid, listed: files, artifacts: saved };
+            }
 
             case 'getResponse':
                 const response = await getProviderResponse(provider, data.selector);
