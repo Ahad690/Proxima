@@ -1443,20 +1443,31 @@ server.tool(
     'ask_qwen',
     {
         message: z.string().describe('Message to send to Qwen (Alibaba Qwen3.8). Ordinary web search needs no flag — just ask for it in the prompt ("do a websearch, then ..."); that is measured working. Use `mode` only for deep_research, which cannot be triggered from the prompt.'),
-        files: z.array(z.string()).optional().describe('Optional: file paths to include as context. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only.'),
+        files: z.array(z.string()).optional().describe('Optional: file paths whose TEXT is pasted into the prompt. Supports line ranges like "path/file.js:10-50". For large files, always specify relevant line ranges only. For images/video/audio use `attachments` instead — this parameter would inline binary as garbage.'),
+        attachments: z.array(z.string()).optional().describe('Optional: local file paths uploaded to Qwen as REAL multimodal attachments, so the model sees the image/video itself rather than a description. Images (png/jpg/webp/gif/bmp/tiff…): up to 5 per turn, 20MB each. Video (mp4/mov/mkv/avi/wmv/flv): 1 per turn, 500MB, 10 min. Audio (mp3/wav/m4a/aac/amr): 1 per turn, 100MB, 3 min. Documents (pdf/docx/xlsx/csv/md): 5 per turn, 20MB. Requires a vision-capable model — the default qwen3.8-max is one.'),
+        new_chat: z.boolean().optional().describe('Start a fresh Qwen conversation before sending. Qwen otherwise KEEPS CONTEXT across calls (its chat id is persisted in the page for 2 hours and survives a Proxima restart), which is usually what you want for follow-up questions. Set true when the answer must not be influenced by earlier turns — e.g. an independent QA verdict, or a new unrelated topic. Switching `mode` already forces a new conversation on its own.'),
         mode: z.enum(['t2t', 'search', 'deep_research', 'artifacts', 'web_dev', 'learn', 'slides', 'travel'])
             .optional()
             .describe('Qwen chat_type. Default t2t. "deep_research" is a long-running multi-step research mode — budget MINUTES per call, not seconds. Switching mode starts a fresh Qwen conversation because chat_type is fixed when the conversation is created.')
     },
-    async ({ message, files, mode }) => {
+    async ({ message, files, attachments, mode, new_chat }) => {
         const disabled = checkDisabled('qwen');
         if (disabled) return disabled;
         try {
             const fullMessage = buildMessageWithFiles(message, files);
             // Never serve deep_research from cache — the whole point is fresh research,
             // and a cache hit would also hide the phase diagnostics we still need.
-            const useCache = !mode || mode === 't2t';
-            return toolResponse(await qwen.chat(fullMessage, useCache, { chatType: mode || 't2t' }));
+            // Attachments bypass the cache too: it is keyed on prompt text alone, so
+            // "what is in this image?" over two different images would answer twice
+            // from the first one.
+            const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+            // new_chat exists to get an uninfluenced answer, so serving it from cache
+            // would defeat the whole point.
+            const useCache = (!mode || mode === 't2t') && !hasAttachments && !new_chat;
+            const opts = { chatType: mode || 't2t' };
+            if (hasAttachments) opts.attachments = attachments;
+            if (new_chat) opts.newChat = true;
+            return toolResponse(await qwen.chat(fullMessage, useCache, opts));
         } catch (err) {
             return toolError(err);
         }

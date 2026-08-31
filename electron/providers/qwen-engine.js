@@ -12,11 +12,15 @@
  * 1. Every failure is HTTP 200 — validation errors, WAF blocks and logged-out
  *    alike. There is no 401 anywhere in this API. We branch on
  *    `content-type: text/event-stream`, never on res.status.
- * 2. POST /api/v2/chats/new must be SIGNED. Unsigned replays hung for ~3 min and
- *    then tripped an interactive slider CAPTCHA. The signing values come from the
- *    Alibaba baxia/sufei_data SDKs on the page, so this engine only works injected
- *    into the real page's main world — which is exactly how Proxima runs it.
- *    The send endpoint itself needs no signature.
+ * 2. SIGNING IS PER-ENDPOINT, and matching the app matters more than signing hard.
+ *    A capture of the real app shows bx-ua/bx-umidtoken/bx-v on chats/new and the
+ *    chats/* GETs, and NOT on chat/completions or files/getstsToken. bx-* is not a
+ *    hard gate anywhere — omitting it is served, it just accrues WAF risk score, and
+ *    that accrual is what eventually plants a slider CAPTCHA on the session. So the
+ *    rule is: sign exactly what the app signs. The values come from the Alibaba baxia
+ *    SDK on the page, so this engine only works injected into the real page's main
+ *    world — which is how Proxima runs it. See sign() for the bug that made this
+ *    engine sign nothing at all for its first two days.
  * 3. There is NO DOM fallback. Unlike the other providers, if the API path fails
  *    there is nothing to fall back to; main-v2 raises instead of typing.
  */
@@ -93,13 +97,85 @@
     // Accept / Accept-Language / Timezone / X-Accel-Buffering were each deleted
     // with no effect. X-Request-Id only has to exist and be UUID-shaped; it is
     // not a server-issued nonce.
+    // The four above are load-bearing. The rest are the app's own trimmings — each was
+    // deleted individually with no effect — but they are sent anyway so our request
+    // matches the app's header set byte for byte. After being CAPTCHA'd once for
+    // looking unlike the app (see sign()), fidelity is worth four free headers.
+    // Timezone is the first 33 chars of JS Date.toString(), which is what the app does.
     function headers() {
         return {
             'Content-Type': 'application/json',
             'Version': FE_VERSION,
             'source': 'web',
-            'X-Request-Id': uuid4()
+            'X-Request-Id': uuid4(),
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Timezone': new Date().toString().slice(0, 33),
+            'X-Accel-Buffering': 'no'
         };
+    }
+
+    // ─── baxia request signing ───────────────────────
+    // Applied to chats/new and the chats/* GETs only, because that is exactly where a
+    // header capture of the real app shows it. bx-* is not required by any endpoint —
+    // unsigned requests are served — but omitting it accrues WAF risk score, and the
+    // accrual is what eventually plants a slider CAPTCHA that then breaks everything.
+    //
+    // THE BUG THIS FIXES: the first cut gated signing on `window.baxiaCommon &&
+    // window.um`. window.um does not exist on build 0.2.87 at all — the page's own
+    // readiness gate (main.js `Bu`) reads __baxia__.getFYModule.getUidToken(). So the
+    // condition was never true, sign() silently did nothing on every call, the session
+    // submitted no fingerprint for two days, and the score ran up until
+    // chat/completions started answering with a punish redirect instead of a stream.
+    function umidToken() {
+        try {
+            if (window.__baxia__ && window.__baxia__.getFYModule) {
+                return window.__baxia__.getFYModule.getUidToken();
+            }
+        } catch (e) { /* fall through */ }
+        try { if (window.um && window.um.getToken) return window.um.getToken(); } catch (e) { }
+        return null;
+    }
+
+    function signingReady() {
+        try {
+            return !!(window.baxiaCommon && window.baxiaCommon.getUA && window.baxiaInitialized && umidToken());
+        } catch (e) { return false; }
+    }
+
+    function sign(h) {
+        var ua = null, tok = null;
+        try { ua = window.baxiaCommon && window.baxiaCommon.getUA({}); } catch (e) { }
+        try { tok = umidToken(); } catch (e) { }
+        if (!ua || !tok) {
+            // Fatal on purpose. "Send unsigned and hope" is what the first cut did, and
+            // the cost is not one failed request: it is a CAPTCHA'd session and a
+            // multi-minute hang with no error. One second and a clear message beats it.
+            var e = new Error('Qwen: baxia signing unavailable (' +
+                (ua ? '' : 'no bx-ua; ') + (tok ? '' : 'no bx-umidtoken; ') +
+                'baxiaInitialized=' + !!window.baxiaInitialized +
+                '). Reload the Qwen tab and let the page finish booting its Alibaba SDKs.');
+            e.failure = { kind: 'unsigned', hint: 'signing SDK not available on the page' };
+            throw e;
+        }
+        h['bx-ua'] = ua;
+        h['bx-umidtoken'] = tok;
+        h['bx-v'] = (window.baxiaCommon && window.baxiaCommon.version) || '2.5.37';
+        return h;
+    }
+
+    // The SDKs finish booting a moment after load, and a send fired in that window
+    // would otherwise take the fatal path above for a condition that fixes itself.
+    function waitForSigning(timeoutMs) {
+        if (signingReady()) return Promise.resolve(true);
+        var deadline = Date.now() + (timeoutMs || 10000);
+        return new Promise(function (resolve) {
+            (function poll() {
+                if (signingReady()) return resolve(true);
+                if (Date.now() > deadline) return resolve(false);
+                setTimeout(poll, 250);
+            })();
+        });
     }
 
     // ─── Failure classification ──────────────────────
@@ -135,17 +211,8 @@
 
     // ─── Conversation creation (MUST be signed) ──────
     function createChat(model, chatType) {
-        var h = headers();
-        // baxia/sufei_data are page globals. Present because we are injected into
-        // the real page's main world. Without these the request hangs and the
-        // session gets a CAPTCHA — see header comment #2.
-        try {
-            if (window.baxiaCommon && window.um) {
-                h['bx-ua'] = window.baxiaCommon.getUA({});
-                h['bx-umidtoken'] = window.um.getToken();
-                h['bx-v'] = '2.5.37';
-            }
-        } catch (e) { /* SDK not ready — send unsigned and hope */ }
+        // baxia/sufei_data are page globals — see sign() and header comment #2.
+        var h = sign(headers());
 
         return fetch(ORIGIN + '/api/v2/chats/new', {
             method: 'POST',
@@ -199,9 +266,13 @@
     // dead stream is not the same as a failed answer. GET /api/v2/chats/{id} is
     // documented as the resume path and needs no bx-* signing.
     function readChat(chatId) {
+        // Signed: the app fingerprints every /api/v2/chats/* GET, and these recovery
+        // reads are the cheapest place to keep the session's score healthy.
+        var h = { 'Accept': 'application/json', 'source': 'web', 'Version': FE_VERSION };
+        try { sign(h); } catch (e) { /* recovery must not fail over a missing SDK */ }
         return fetch(ORIGIN + '/api/v2/chats/' + encodeURIComponent(chatId), {
             credentials: 'include',
-            headers: { 'Accept': 'application/json', 'source': 'web', 'Version': FE_VERSION }
+            headers: h
         }).then(function (r) { return r.json(); });
     }
 
@@ -245,6 +316,61 @@
         return attempt(1);
     }
 
+    // ─── Attachments ─────────────────────────────────
+    // Step 1 of 3. Qwen takes no bytes on the chat endpoint: the client asks for
+    // short-lived Alibaba STS credentials, PUTs the file straight to OSS itself, and
+    // then names the result in messages[0].files. Only this step has to happen in the
+    // page — it is a baxia-signed path and it rides the session cookie. The upload
+    // and the descriptor live in electron/providers/qwen-upload.cjs, where Node can
+    // stream a 500MB video off disk instead of pushing base64 through
+    // executeJavaScript.
+    //
+    // `meta` is { filename, filesize (string), filetype: image|video|audio|file }.
+    // Note filesize is a STRING on the wire — the app stringifies it and a number was
+    // never tested.
+    // Resolves to the camelCased token, or throws through the usual classifier.
+    function getUploadToken(meta) {
+        // NOT signed. A capture of the app's own image and video uploads shows exactly
+        // Accept, Content-Type, Accept-Language, Version, source, X-Request-Id and
+        // Timezone on this request — no bx-* and no bearer.
+        var h = headers();
+        // The one exception: the app's uploader adds a bearer if localStorage.token is
+        // set, which it is under Proxima. It was absent in the capture because that
+        // session had no such key. Conditional, so we match the app either way.
+        try { if (window.localStorage.token) h['Authorization'] = 'Bearer ' + window.localStorage.token; } catch (e) { }
+
+        return fetch(ORIGIN + '/api/v2/files/getstsToken', {
+            method: 'POST',
+            credentials: 'include',
+            headers: h,
+            body: JSON.stringify(meta || {})
+        }).then(function (res) {
+            var ct = res.headers.get('content-type') || '';
+            return res.text().then(function (txt) {
+                var j = null;
+                try { j = JSON.parse(txt); } catch (e) { /* handled below */ }
+                if (!j || !j.success || !j.data) {
+                    // Same rule as everywhere else in this API: 200 is not success.
+                    var f = classifyFailure(ct, txt);
+                    if (f) throw failureError(f, res.status);
+                    throw new Error('Qwen getstsToken: ' + txt.slice(0, 300));
+                }
+                var d = j.data;
+                return {
+                    accessKeyId: d.access_key_id,
+                    accessKeySecret: d.access_key_secret,
+                    stsToken: d.security_token,
+                    bucket: d.bucketname,
+                    region: d.region,
+                    endpoint: d.endpoint,
+                    fileId: d.file_id,
+                    filePath: d.file_path,
+                    fileCDNUrl: d.file_url
+                };
+            });
+        });
+    }
+
     // ─── Request body ────────────────────────────────
     function buildBody(message, model, thinking, opts) {
         var parent = _parentId;
@@ -255,7 +381,12 @@
         var autoSearch = (opts && opts.autoSearch !== undefined) ? !!opts.autoSearch : searchy;
         // 'deep' is a GUESS from the report and was never validated by the server.
         var researchMode = (opts && opts.researchMode) || (ct === 'deep_research' ? 'deep' : 'normal');
-        return {
+        // Attachment descriptors, already uploaded to OSS by qwen-upload.cjs. The app
+        // omits the key entirely when there is nothing attached rather than sending
+        // an empty array (main.js createUserMessage: `files.length > 0 ? files : void 0`),
+        // so match that instead of inventing a third state the server never sees.
+        var files = (opts && opts.files) || [];
+        var body = {
             stream: true,
             version: '2.1',
             incremental_output: true,        // answer deltas are new chars only
@@ -273,7 +404,6 @@
                 role: 'user',
                 content: message,
                 user_action: 'chat',
-                files: (opts && opts.files) || [],
                 timestamp: nowSec(),
                 models: [model],
                 model: '',
@@ -293,6 +423,8 @@
             }],
             timestamp: nowSec()
         };
+        if (files.length) body.messages[0].files = files;
+        return body;
     }
 
     // ─── SSE stream parser ───────────────────────────
@@ -446,7 +578,11 @@
         // deep_research is a long-running multi-step mode; 6 min is not enough.
         var timeout = (chatType === 'deep_research') ? DEEP_RESEARCH_TIMEOUT : TIMEOUT;
 
-        return ensureChat(model, chatType).then(function () {
+        // Both requests below are signed, so wait out the SDK boot rather than
+        // failing a send that was fired a second too early after a page load.
+        return waitForSigning(10000).then(function () {
+            return ensureChat(model, chatType);
+        }).then(function () {
             var url = ORIGIN + '/api/v2/chat/completions?chat_id=' + encodeURIComponent(_chatId);
             var ctl = new AbortController();
             var tid = setTimeout(function () { ctl.abort(); }, timeout);
@@ -454,6 +590,11 @@
             return fetch(url, {
                 method: 'POST',
                 credentials: 'include',
+                // NOT signed, deliberately. A header capture of the real app across 27
+                // requests shows chat/completions is the one request it does not
+                // fingerprint — no bx-ua, no bx-umidtoken, no bx-v, no bearer. Adding
+                // them here would make our send the only one on the wire that looks
+                // unlike the app's. The four headers below are the whole requirement.
                 headers: headers(),
                 body: JSON.stringify(buildBody(message, model, thinking, o)),
                 signal: ctl.signal
@@ -476,6 +617,7 @@
                     var idCount = Object.keys(r.state.ids).length;
                     var phaseNames = Object.keys(r.state.phases);
                     console.log('[Proxima] Qwen turn: mode=' + (o.chatType || 't2t') +
+                        ' attachments=' + ((o.files && o.files.length) || 0) +
                         ' chars=' + r.text.length +
                         ' answerFrames=' + r.state.answerFrames +
                         ' responseIds=' + idCount +
@@ -571,14 +713,74 @@
         return true;
     }
 
-    function listModels() {
+    // Cached for the page's lifetime: the roster changes on Qwen's release cadence,
+    // not within a session, and checkAttachmentSupport() would otherwise refetch it on
+    // every attached turn.
+    var _models = null;
+
+    function fetchModels() {
+        if (_models) return Promise.resolve(_models);
         return fetch(ORIGIN + '/api/v2/models', {
             credentials: 'include',
             headers: { 'Accept': 'application/json', 'source': 'web', 'Version': FE_VERSION }
         }).then(function (r) { return r.json(); }).then(function (j) {
-            return (j.data && j.data.data ? j.data.data : []).map(function (m) {
-                return { id: m.id, name: m.name };
+            _models = (j.data && j.data.data ? j.data.data : []).map(function (m) {
+                var meta = (m.info && m.info.meta) || {};
+                return {
+                    id: m.id, name: m.name,
+                    capabilities: meta.capabilities || {},
+                    modality: meta.modality || [],
+                    chatTypes: meta.chat_type || []
+                };
             });
+            return _models;
+        });
+    }
+
+    function listModels() {
+        return fetchModels().then(function (list) {
+            return list.map(function (m) {
+                return { id: m.id, name: m.name, modality: m.modality };
+            });
+        });
+    }
+
+    // file_class (what qwen-upload classified the file as) -> the capability flag the
+    // model has to declare in GET /api/v2/models.
+    var CLASS_CAPABILITY = {
+        vision: 'vision', video: 'video', audio: 'audio',
+        document: 'document', 'default': 'document'
+    };
+
+    // Guards against the quietest failure in this whole path: pin a text-only model
+    // (qwen3.7-max declares modality ['text']) and the attachment uploads fine, the
+    // send succeeds, and the model simply never sees the file. No error anywhere.
+    // Called BEFORE the upload so a 226MB video is not pushed for nothing.
+    function checkAttachmentSupport(model, fileClasses) {
+        var classes = fileClasses || [];
+        if (!classes.length) return Promise.resolve({ ok: true, model: model || DEFAULT_MODEL });
+        var target = model || DEFAULT_MODEL;
+        var needed = {};
+        classes.forEach(function (c) {
+            var cap = CLASS_CAPABILITY[c];
+            if (cap) needed[cap] = true;
+        });
+        var names = Object.keys(needed);
+        return fetchModels().then(function (list) {
+            var m = null;
+            for (var i = 0; i < list.length; i++) { if (list[i].id === target) { m = list[i]; break; } }
+            // An id we do not recognise is not necessarily wrong — the roster changes.
+            // Let the server be the judge rather than blocking on stale local knowledge.
+            if (!m) return { ok: true, model: target, unverified: true };
+            var missing = names.filter(function (n) { return !m.capabilities[n]; });
+            if (missing.length) {
+                var has = Object.keys(m.capabilities).filter(function (k) { return m.capabilities[k]; });
+                throw new Error('Qwen: model "' + target + '" does not accept ' +
+                    missing.join('/') + ' input (it declares: ' + (has.join(', ') || 'none') +
+                    '; modality ' + JSON.stringify(m.modality) + '). The attachment would upload ' +
+                    'and then be silently ignored. Use a multimodal model such as ' + DEFAULT_MODEL + '.');
+            }
+            return { ok: true, model: target, modality: m.modality };
         });
     }
 
@@ -586,6 +788,9 @@
         send: send,
         newConversation: newConversation,
         listModels: listModels,
+        getUploadToken: getUploadToken,
+        checkAttachmentSupport: checkAttachmentSupport,
+        defaultModel: function () { return DEFAULT_MODEL; },
         lastMeta: function () { return _lastMeta; },
         state: function () { return { chatId: _chatId, parentId: _parentId }; }
     };

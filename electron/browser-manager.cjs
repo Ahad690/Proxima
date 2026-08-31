@@ -594,6 +594,30 @@ class BrowserManager {
                             return hasInput && !hasSignIn;
                         })()
                     `);
+                case 'qwen':
+                    // Qwen has no usable negative signal on the network side: this API
+                    // answers 200 for everything, so a logged-out session looks exactly
+                    // like a WAF block (see providers/qwen-engine.js classifyFailure).
+                    // That rules out probing an endpoint to decide, so this is a DOM +
+                    // localStorage check like the other four. Without a qwen case here
+                    // the switch fell through to `default: return false`, so Qwen
+                    // reported logged-out permanently even with a live session.
+                    return await webContents.executeJavaScript(`
+                        (function() {
+                            const hasInput = !!document.querySelector('textarea') ||
+                                           !!document.querySelector('[contenteditable="true"]');
+                            const buttons = Array.from(document.querySelectorAll('button, a'))
+                                .map(b => (b.innerText || '').trim());
+                            const hasLoginBtn = buttons.some(t =>
+                                /^(log ?in|sign ?in|sign ?up)$/i.test(t));
+                            // The JWT in localStorage is not what authenticates requests
+                            // (the httpOnly cookie is), but it only appears once the page
+                            // has completed a login, so it is a useful extra signal.
+                            let hasToken = false;
+                            try { hasToken = !!localStorage.getItem('token'); } catch (e) {}
+                            return hasInput && !hasLoginBtn && hasToken;
+                        })()
+                    `);
                 default:
                     return false;
             }

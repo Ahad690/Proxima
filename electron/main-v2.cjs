@@ -7,6 +7,7 @@ const net = require('net');
 const BrowserManager = require('./browser-manager.cjs');
 const { initRestAPI, startRestAPI, stopRestAPI, isRestAPIRunning } = require('./rest-api.cjs');
 const providerAPI = require('./provider-api.cjs');
+const qwenUpload = require('./providers/qwen-upload.cjs');
 
 // Add timestamps to console logs
 const originalLog = console.log;
@@ -526,9 +527,45 @@ async function handleMCPRequest(request) {
                 // This is an ALLOWLIST — anything not named here is silently dropped
                 // before it reaches the engine. Add new per-provider options here or
                 // they will appear to be ignored with no error anywhere.
-                // qwen: autoSearch -> feature_config.auto_search, thinking -> thinking_enabled
-                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode };
+                // qwen: autoSearch -> feature_config.auto_search, thinking -> thinking_enabled,
+                //       files -> messages[0].files (OSS descriptors, see uploadAttachmentsToQwen)
+                const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files };
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
+
+                // Qwen: real attachments, uploaded to OSS and named in the request body.
+                // Deliberately NOT routed through uploadFileToProvider — see the comment
+                // on uploadAttachmentsToQwen.
+                if (provider === 'qwen') {
+                    // Qwen persists its conversation in the page's localStorage for 2h, so
+                    // consecutive calls chain onto the same chat and keep context. That is
+                    // usually what you want; newChat forces a clean one for callers that need
+                    // an independent answer (a QA verdict must not inherit a previous run).
+                    if (data.newChat) {
+                        await browserManager.executeScript('qwen',
+                            'window.__proximaQwen ? window.__proximaQwen.newConversation() : null');
+                        console.log('[Qwen] newChat requested — conversation state cleared');
+                    }
+                    const wanted = qwenAttachmentPaths(data);
+                    if (wanted.length && !fileReferenceEnabled) {
+                        return { success: false, error: 'File reference is disabled. Enable it in Agent Hub settings.' };
+                    }
+                    // Drain anything staged by an earlier `uploadFile` call.
+                    const staged = _qwenPendingAttachments.splice(0, _qwenPendingAttachments.length);
+                    let uploaded = [];
+                    if (wanted.length) uploaded = await uploadAttachmentsToQwen(wanted, sendOptions.model);
+                    const attached = staged.concat(uploaded);
+                    // An explicit attachment that failed to upload must not turn into a
+                    // silent text-only turn: uploadAttachmentsToQwen throws and we let it.
+                    if (attached.length) sendOptions.files = (sendOptions.files || []).concat(attached);
+                    // forceDOM is still honoured so it keeps raising the explicit
+                    // "Qwen has no DOM fallback" error instead of being ignored here.
+                    const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
+                    return {
+                        success: true, provider, result,
+                        attachments: attached.map((d) => ({ name: d.name, id: d.id, type: d.showType, size: d.size }))
+                    };
+                }
+
                 // Check if file should be uploaded
                 if (data.filePath && fileReferenceEnabled) {
                     try {
@@ -554,6 +591,19 @@ async function handleMCPRequest(request) {
                     return { success: false, error: 'File reference is disabled. Enable it in Agent Hub settings.' };
                 }
                 try {
+                    if (provider === 'qwen') {
+                        // Nothing to park in a composer, so the descriptors are staged
+                        // here and drained by the next sendMessage to qwen.
+                        const descs = await uploadAttachmentsToQwen(qwenAttachmentPaths(data), data.model);
+                        _qwenPendingAttachments.push(...descs);
+                        return {
+                            success: true, provider,
+                            fileAttached: descs.length > 0,
+                            method: 'oss-sts',
+                            pending: _qwenPendingAttachments.length,
+                            files: descs.map((d) => ({ name: d.name, id: d.id, type: d.showType, size: d.size }))
+                        };
+                    }
                     const uploadResult = await uploadFileToProvider(provider, data.filePath);
 
                     return { success: true, provider, ...uploadResult };
@@ -567,6 +617,22 @@ async function handleMCPRequest(request) {
                     return { success: false, error: 'File reference is disabled. Enable it in Agent Hub settings.' };
                 }
                 try {
+                    if (provider === 'qwen') {
+                        // No composer to wait on and no attachment chip to poll for:
+                        // the OSS PUT either completed or threw, so the retry/verify
+                        // loop the DOM path needs below has nothing to do here.
+                        const staged = _qwenPendingAttachments.splice(0, _qwenPendingAttachments.length);
+                        const uploaded = await uploadAttachmentsToQwen(qwenAttachmentPaths(data), data.model);
+                        const attached = staged.concat(uploaded);
+                        const qOptions = { chatType: data.chatType, thinking: data.thinking, model: data.model };
+                        if (attached.length) qOptions.files = attached;
+                        const qResult = await sendMessageToProvider(provider, data.message, false, qOptions);
+                        return {
+                            success: true, provider,
+                            fileUploaded: attached.map((d) => ({ name: d.name, id: d.id, type: d.showType, size: d.size })),
+                            response: (qResult && qResult.response) || ''
+                        };
+                    }
                     let fileResult = null;
                     if (data.filePath && fileReferenceEnabled) {
 
@@ -2962,6 +3028,76 @@ ipcMain.handle('uninstall-cli', async () => {
         return { success: false, error: err.message };
     }
 });
+
+// ─── Qwen attachments (API path, not DOM) ────────────
+// uploadFileToProvider below drives the page's composer: find the hidden
+// input[type=file], hand it a DataTransfer, let the site's own JS upload it. That
+// cannot work for Qwen. The Qwen engine builds its request body itself and posts it
+// with fetch, so a file sitting in the composer is invisible to it — the upload
+// would appear to succeed and the model would never see the file.
+//
+// The real path is getstsToken -> PUT to Alibaba OSS -> name the object in
+// messages[0].files. See providers/qwen-upload.cjs for why the PUT is done from
+// Node rather than in-page.
+const _qwenPendingAttachments = [];
+
+async function uploadAttachmentsToQwen(filePaths, model) {
+    const webContents = browserManager.getWebContents('qwen');
+    if (!webContents) throw new Error('Provider qwen not initialized');
+
+    const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean);
+    if (!paths.length) return [];
+
+    // Classify and size-check the whole batch before a single byte goes out. Failing
+    // on file 2 after file 1 has already uploaded would leave a half-attached turn
+    // with no way for the caller to tell which part landed.
+    const kinds = paths.map((p) => qwenUpload.classify(p));
+    const stats = paths.map((p, i) => qwenUpload.validate(p, kinds[i]));
+    qwenUpload.validateBatch(kinds);
+
+    // Pre-flight the model against the media types. A text-only model
+    // (qwen3.7-max declares modality ["text"]) accepts the upload, accepts the send,
+    // and never looks at the file — no error on any layer. Checking here rather than
+    // at send time means a 226MB video is not pushed before we find out.
+    const support = await webContents.executeJavaScript(
+        `window.__proximaQwen.checkAttachmentSupport(${JSON.stringify(model || null)}, ${JSON.stringify(kinds.map((k) => k.fileClass))})`
+    );
+    if (support && support.unverified) {
+        console.log(`[Qwen] model "${support.model}" not in the local roster — sending anyway, letting the server judge`);
+    }
+
+    const descriptors = [];
+    for (let i = 0; i < paths.length; i++) {
+        const name = path.basename(paths[i]);
+        const meta = { filename: name, filesize: String(stats[i].size), filetype: kinds[i].stsType };
+        // Issued from the page: baxia-signed path, cookie-authed session.
+        const sts = await webContents.executeJavaScript(
+            `window.__proximaQwen.getUploadToken(${JSON.stringify(meta)})`
+        );
+        if (!sts || !sts.accessKeyId) {
+            throw new Error(`Qwen: no upload token returned for ${name}`);
+        }
+        const t0 = Date.now();
+        await qwenUpload.putToOss(sts, paths[i], stats[i].size, kinds[i].mime);
+        console.log(`[Qwen] attached ${name} — ${kinds[i].fileClass}, ` +
+            `${(stats[i].size / 1024 / 1024).toFixed(2)}MB, ${Date.now() - t0}ms`);
+        // One token, one PUT. The web app fires getstsToken and the upload TWICE per
+        // file (a double-firing effect in its uploader) and then references only the
+        // second file_id, orphaning the first. Not protocol — do not copy it.
+        descriptors.push(qwenUpload.buildDescriptor(
+            sts, paths[i], stats[i].size, kinds[i], stats[i].mtimeMs));
+    }
+    return descriptors;
+}
+
+/** Paths the caller wants attached, from either the new or the legacy field. */
+function qwenAttachmentPaths(data) {
+    const out = [];
+    if (Array.isArray(data.attachments)) out.push(...data.attachments);
+    else if (data.attachments) out.push(data.attachments);
+    if (data.filePath) out.push(data.filePath);
+    return out.filter(Boolean);
+}
 
 // Check if file is attached in chat
 async function checkFileAttachment(provider) {
