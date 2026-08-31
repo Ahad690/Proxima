@@ -53,44 +53,63 @@ more than anything else here.
 
 ## Setup
 
-**Prerequisites:** Proxima running with Qwen logged in, `ffmpeg` + `ffprobe` on PATH,
-and Node. The recorder needs `ws`, which Proxima already has.
+**This file is meant to be self-sufficient.** Paths below are absolute so an agent
+working in any repo can run them unchanged.
 
-Neither browser MCP is installed on this machine yet. Chrome DevTools MCP is the one
-to add for this loop:
-
-```bash
-claude mcp add chrome-devtools --scope user -- npx chrome-devtools-mcp@latest
+```
+TOOLS = C:/Users/subha/Documents/PROJECTS/Proxima/tools/qa-video-review
 ```
 
-`--scope user` matters. Without it the server is registered only for the directory you
-ran the command in — which is exactly why `proxima` is registered under
-`C:/Users/subha/Documents/PROJECTS` and therefore invisible to a session started in
-`PROJECTS/Proxima`.
+**Prerequisites**
 
-Start one Chrome that both the MCP and the recorder share:
+| need | check | note |
+|---|---|---|
+| Proxima running, Qwen logged in | `netstat -ano | findstr 19222` | supplies the Qwen upload path |
+| `ffmpeg` + `ffprobe` on PATH | `ffmpeg -version` | encodes frames, probes duration |
+| Node | `node -v` | — |
+| Chrome or Edge | — | auto-detected; override with `CHROME_PATH` |
 
-```bash
-chrome.exe --remote-debugging-port=9333 \
-           --remote-debugging-address=127.0.0.1 \
-           --user-data-dir=/tmp/qa-profile \
-           --window-size=1280,800 --hide-scrollbars \
-           --headless=new                       # drop for a visible browser
+`ws` is required by the recorder and resolves out of Proxima's own `node_modules`
+via the script's location — so call the scripts by their absolute path and do **not**
+copy them elsewhere.
+
+### The browser, and why the port is not negotiable
+
+Chrome DevTools MCP is installed user-scoped on this machine as:
+
+```
+npx chrome-devtools-mcp@latest --browserUrl=http://127.0.0.1:9333
 ```
 
-Then point the MCP at it rather than letting it launch its own:
+`--browserUrl` means the MCP **attaches to an existing browser instead of launching
+one**. Two consequences, and both bite:
+
+1. **Port 9333 is mandatory.** It is baked into the MCP registration, so the browser
+   has to be there. Using another port means the MCP and the recorder look at
+   different browsers, or the MCP fails outright.
+2. **Chrome must be listening before the MCP server starts.** The MCP server starts
+   with the Claude Code session, so start the browser *first*. If it is not up, the
+   MCP may launch a browser of its own to cope — leaving a second Chrome on the port
+   and a confusing split.
+
+So always begin with:
 
 ```bash
-claude mcp add chrome-devtools --scope user -- \
-  npx chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9333
+node C:/Users/subha/Documents/PROJECTS/Proxima/tools/qa-video-review/start-browser.cjs --port 9333 --url http://localhost:4173
 ```
 
-> **Pass `--remote-debugging-address=127.0.0.1`.** If something already holds
-> `127.0.0.1:PORT`, Chrome silently falls back to binding `[::1]:PORT` and logs a
-> `bind() returned an error` you never see. A probe of `127.0.0.1` then finds a
-> *different* browser, or nothing. Hit during verification, with two Chromes on 9222 —
-> one per loopback family. `record-cdp.cjs` now tries both, but pinning the address is
-> better.
+```json
+{"ok":true,"launched":true,"port":9333,"host":"127.0.0.1","headed":false,
+ "profile":"...\qa-chrome-profile","pages":["http://localhost:4173/"]}
+```
+
+It is idempotent: if something already listens on the port it reports
+`"reused":true` and launches nothing. Add `--headed` to watch it work,
+`--kill` to stop whatever holds the port.
+
+> After changing MCP registration you must **start a new Claude Code session** — MCP
+> servers are loaded at session start, so the tools do not appear in a session that
+> was already running.
 
 ---
 
@@ -99,13 +118,22 @@ claude mcp add chrome-devtools --scope user -- \
 ### 1. Record
 
 ```bash
-node record-cdp.cjs --port 9333 --url-filter localhost:4173 \
+node C:/Users/subha/Documents/PROJECTS/Proxima/tools/qa-video-review/record-cdp.cjs --port 9333 --url-filter localhost:4173 \
                     --out run.mp4 --last-frame run-last.jpg \
                     --stop-file .stop --max-seconds 120
 ```
 
 Runs until `--stop-file` appears, `--max-seconds` elapses, or SIGINT. Start it, have
-the agent drive the app, then `touch .stop`. Prints one line of JSON:
+the agent drive the app, then create the stop file — note `touch` does not exist in
+cmd or PowerShell:
+
+```bash
+node -e "require('fs').writeFileSync('.stop','x')"    # portable, use this
+cmd /c "type nul > .stop"                             # cmd
+New-Item .stop -Force | Out-Null                      # PowerShell
+```
+
+The recorder then prints one line of JSON and exits:
 
 ```json
 {"ok":true,"out":"...run.mp4","frames":151,"seconds":20.72,"capturedSeconds":12.25,
@@ -128,7 +156,7 @@ the agent drive the app, then `touch .stop`. Prints one line of JSON:
 ### 2. Review
 
 ```bash
-node qwen-review.cjs --video run.mp4 --image run-last.jpg \
+node C:/Users/subha/Documents/PROJECTS/Proxima/tools/qa-video-review/qwen-review.cjs --video run.mp4 --image run-last.jpg \
                      --checklist checks.txt \
                      --context "AttendEase login route, production build, no backend running" \
                      --json review.json
@@ -228,24 +256,59 @@ was right**.
 
 ## Agent recipe
 
+Copy-pasteable. Set `APP` to the URL of the app under test.
+
+```bash
+T="C:/Users/subha/Documents/PROJECTS/Proxima/tools/qa-video-review"
+APP="http://localhost:4173"
+
+# 1. Browser FIRST — the MCP attaches to this one, it does not launch its own.
+node "$T/start-browser.cjs" --port 9333 --url "$APP"
+
+# 2. Start recording in the background. It exits by itself when .stop appears.
+node "$T/record-cdp.cjs" --port 9333 --url-filter "localhost:4173" \
+     --out run.mp4 --last-frame run-last.jpg \
+     --stop-file .stop --max-seconds 180 &
+
+# 3. Drive the app with the chrome-devtools MCP tools now.
+#    Dwell ~2s on each state you want reviewed: a state that never stays on screen
+#    for about a second may not survive frame sampling.
+
+# 4. Stop the recording. `touch` does not exist in cmd/PowerShell, so use node.
+node -e "require('fs').writeFileSync('.stop','x')"
+
+# 5. Review. The exit code IS the result.
+node "$T/qwen-review.cjs" --video run.mp4 --image run-last.jpg \
+     --checklist checks.txt \
+     --context "<one or two sentences: what this app is, what the run did>" \
+     --json review.json
+echo "verdict exit: $?"     # 0 PASS · 2 FAIL · 3 INCONCLUSIVE · 1 error
 ```
-1. Start the app under test.
-2. Start Chrome with --remote-debugging-port=9333 --remote-debugging-address=127.0.0.1
-3. Point chrome-devtools MCP at it:  --browserUrl http://127.0.0.1:9333
-4. Spawn:  node record-cdp.cjs --port 9333 --out run.mp4 --last-frame run-last.jpg
-                               --stop-file .stop --max-seconds 180
-5. Drive the app through the MCP. Dwell ~2s after each state you want reviewed.
-6. Write .stop  → wait for the recorder's JSON on stdout.
-7. node qwen-review.cjs --video run.mp4 --image run-last.jpg --checklist checks.txt
-                        --context "<what this app is>" --json review.json
-8. Branch on the exit code. On FAIL, read review.json .parsed.issues and .checks
-   for the failing check and its evidence.
+
+On a non-zero verdict, `review.json` holds the detail worth acting on. Print the
+checks that did not pass, with the evidence the model committed to:
+
+```bash
+node -e "
+const r = require('./review.json');
+console.log(r.verdict, '(' + r.parsed.confidence + ')');
+r.parsed.checks.filter(c => c.result !== 'pass').forEach(c => {
+  console.log('-', c.result.toUpperCase(), '::', c.check);
+  console.log('  evidence:', c.evidence);
+});
+(r.parsed.issues || []).forEach(i => console.log('  issue:', i));
+"
 ```
+
+Read the `evidence` fields, not just the verdict. That is where the model has to
+commit to something it actually saw on screen, and it is how you catch a confident
+answer built on nothing.
 
 ## Files
 
 | file | what it is |
 |---|---|
+| `start-browser.cjs` | launches/reuses the Chrome that the MCP **and** recorder share |
 | `record-cdp.cjs` | CDP screencast → mp4 (+ optional final still) |
 | `qwen-review.cjs` | mp4 (+ stills) → Qwen 3.8 → verdict + exit code |
 | `README.md` | this |
