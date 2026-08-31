@@ -89,10 +89,13 @@ function uploadOne(netRequest, ses, orgId, convId, filePath) {
             useSessionCookies: true      // without this the request is anonymous and 401s
         });
         req.setHeader('Content-Type', 'multipart/form-data; boundary=' + boundary);
-        req.setHeader('Content-Length', String(head.length + st.size + tail.length));
-        // claude.ai rejects requests it cannot attribute to a browser origin.
-        req.setHeader('Origin', 'https://claude.ai');
-        req.setHeader('Referer', 'https://claude.ai/');
+        // Content-Length, Origin and Referer are all set here in the first version and
+        // that is what made every request fail with net::ERR_INVALID_ARGUMENT before it
+        // left the process. Chromium treats them as forbidden request headers: the
+        // network stack owns them, and setHeader rejects the whole request rather than
+        // ignoring the field. Content-Length is computed from what we write, and Origin
+        // and Referer are derived from the session, so none of the three were ours to
+        // set in the first place.
 
         req.on('response', (res) => {
             let body = '';

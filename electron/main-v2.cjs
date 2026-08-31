@@ -540,6 +540,16 @@ async function handleMCPRequest(request) {
                 // before the send, so a failure here must NOT fall through to a
                 // text-only turn pretending the file was included.
                 if (provider === 'claude') {
+                    // Mark every message Proxima sends to claude.ai, so a human reading
+                    // the thread later can tell orchestrated turns from ones they typed
+                    // themselves. Applied HERE rather than in the engine on purpose: the
+                    // engine is shared, and this must never leak into the other four
+                    // providers. A newline follows the tag, which is what shift+enter
+                    // produces in the real composer. Opt out with tag:false.
+                    if (data.tag !== false && typeof data.message === 'string' &&
+                        data.message.indexOf('[PROXIMA]') !== 0) {
+                        data.message = '[PROXIMA]\n' + data.message;
+                    }
                     const wantedCl = qwenAttachmentPaths(data);
                     if (wantedCl.length) {
                         if (!fileReferenceEnabled) {
@@ -3252,7 +3262,7 @@ function saveClaudeArtifacts(artifacts, conversationId) {
             // The model picks a virtual sandbox path (/mnt/user-data/outputs/x.html).
             // Only the basename is used, so a path it invents can never escape the
             // artifact directory.
-            const base = path.basename(String(a.path || 'artifact')).replace(/[^w.-]/g, '_');
+            const base = path.basename(String(a.path || 'artifact')).replace(/[^\w.\-]/g, '_');
             const local = path.join(dir, base || 'artifact');
             fs.writeFileSync(local, a.fileText || '', 'utf8');
             saved.push({

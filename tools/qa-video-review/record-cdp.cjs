@@ -23,7 +23,7 @@
  * usage:
  *   node record-cdp.cjs --out run.mp4 [--port 9222] [--url-filter localhost]
  *                       [--quality 70] [--max-width 1280] [--max-seconds 300]
- *                       [--stop-file .stop] [--keep-frames]
+ *                       [--stop-file .stop] [--keep-frames] [--navigate URL]
  *
  * Stops on: --max-seconds, the appearance of --stop-file, or SIGINT/SIGTERM.
  * Prints a one-line JSON summary to stdout on exit; progress goes to stderr.
@@ -39,7 +39,7 @@ function parseArgs(argv) {
     const a = {
         port: 9222, out: 'run.mp4', quality: 70, maxWidth: 1280, maxHeight: 800,
         maxSeconds: 300, urlFilter: null, stopFile: null, keepFrames: false, target: null,
-        host: '127.0.0.1', tailMax: 4, lastFrame: null
+        host: '127.0.0.1', tailMax: 4, lastFrame: null, navigate: null
     };
     for (let i = 2; i < argv.length; i++) {
         const k = argv[i], v = argv[i + 1];
@@ -55,6 +55,7 @@ function parseArgs(argv) {
         else if (k === '--host') { a.host = v; i++; }
         else if (k === '--tail-max') { a.tailMax = Number(v); i++; }
         else if (k === '--last-frame') { a.lastFrame = v; i++; }
+        else if (k === '--navigate') { a.navigate = v; i++; }
         else if (k === '--keep-frames') { a.keepFrames = true; }
     }
     return a;
@@ -228,6 +229,15 @@ async function pickTarget(args) {
             maxWidth: args.maxWidth, maxHeight: args.maxHeight, everyNthFrame: 1
         });
         console.error('[rec] recording -> ' + args.out + ' (max ' + args.maxSeconds + 's)');
+        // Navigate AFTER the screencast is live, so frame one is the page loading rather
+        // than whatever the tab happened to be showing. Attaching to an already-loaded
+        // tab and reloading separately leaves several seconds of the PREVIOUS run at the
+        // head of the video — and a reviewer with no way to know that reads the stale
+        // end screen as the app's initial state. That produced a false FAIL once already.
+        if (args.navigate) {
+            await send('Page.navigate', { url: args.navigate });
+            console.error('[rec] navigated to ' + args.navigate + ' with the recorder already running');
+        }
         if (args.stopFile) {
             const iv = setInterval(() => {
                 if (fs.existsSync(args.stopFile)) { clearInterval(iv); stop('stop-file'); }

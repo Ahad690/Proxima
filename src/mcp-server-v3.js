@@ -1208,9 +1208,10 @@ server.tool(
         model: z.string().optional().describe('claude.ai model id. Defaults to claude-opus-5. Wire-confirmed ids: claude-opus-5, claude-sonnet-5. This is per-request and does NOT change the conversation stored model. An unavailable id returns 403.'),
         effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional().describe('Reasoning effort. Defaults to high. These five values are quoted from the server validation error, not guessed.'),
         thinking_mode: z.enum(['extended', 'standard', 'auto', 'off']).optional().describe('Thinking mode. Omitted by default, which leaves the conversation setting alone. Values quoted from the server validation error.'),
+        tag: z.boolean().optional().describe('Set false to suppress the [PROXIMA] marker that is otherwise prefixed to every message Proxima sends to claude.ai. The marker exists so a human reading the thread can tell orchestrated turns from ones they typed; it is claude.ai-only and never applied to the other providers.'),
         new_chat: z.boolean().optional().describe('Start a fresh conversation instead of continuing the current one. the Claude conversation id is held in memory only, so it is already lost whenever the claude.ai tab reloads — pass conversation_id to survive that.')
     },
-    async ({ message, files, attachments, conversation_id, new_chat, model, effort, thinking_mode }) => {
+    async ({ message, files, attachments, conversation_id, new_chat, model, effort, thinking_mode, tag }) => {
         const disabled = checkDisabled('claude');
         if (disabled) return disabled;
         try {
@@ -1225,6 +1226,7 @@ server.tool(
             // Same reasoning as the qwen path: the cache is keyed on prompt text, so
             // two different images under one question would answer from the first.
             if (hasAtt) opts.attachments = attachments;
+            if (tag === false) opts.tag = false;
             // Pinning or resetting the thread changes what the answer depends on, so a
             // cached reply keyed on prompt text alone would be wrong.
             const useCache = !conversation_id && !new_chat && !model && !effort && !thinking_mode &&
