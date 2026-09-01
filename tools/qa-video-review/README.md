@@ -304,6 +304,41 @@ Read the `evidence` fields, not just the verdict. That is where the model has to
 commit to something it actually saw on screen, and it is how you catch a confident
 answer built on nothing.
 
+
+## Reasoning is on, and it is checked
+
+Qwen reasons only when `feature_config.thinking_enabled` is set, and the engine reads a
+missing flag as *off*. This script omitted it, so **every verdict it produced before
+2026-09-01 was reached with no reasoning pass** — measured, not inferred:
+
+| request | phases seen in the SSE stream | reasoning tokens |
+|---|---|---|
+| `thinking` omitted (the old behaviour) | `answer` | *field absent* |
+| `thinking: true` (now the default) | `thinking_summary`, `answer` | 2522 on a 20s clip |
+
+Nothing errored either way. The verdicts still arrived, still parsed, still read like
+considered judgements — which is exactly why this went unnoticed. Watching a multi-minute
+recording and reconciling it against a checklist is the work reasoning is *for*, so it is
+on by default here and has to be switched off deliberately with `--no-thinking`.
+
+Because "I asked for thinking" is not evidence that thinking happened, the reply now
+carries proof. The engine tallies every SSE phase, and `thinking_summary` appears if and
+only if reasoning frames arrived. `thinkingStatus` in the JSON output reports one of:
+
+- **`verified`** — asked for it, and the stream proves it happened.
+- **`contradicted`** — asked for it, and the stream proves it did not. The verdict is
+  suppressed and reported as `INCONCLUSIVE` (exit 3): a judgement reached without the
+  reasoning pass it was configured for is not one this script will pass along as PASS.
+  `--allow-no-thinking` accepts it anyway.
+- **`unverifiable`** — the running Proxima predates the metadata field. Warns; never
+  fails, because "older build" and "broken reviewer" are different things. **Restart
+  Proxima** to turn this into `verified`.
+- **`not requested`** — `--no-thinking` was passed.
+
+The same evidence rides `ask_qwen` (thinking defaults **on** there too, `thinking: false`
+to opt out). An `ask_qwen` reply annotates itself when thinking was requested and did not
+happen — silence on that mismatch is precisely how it hid for weeks.
+
 ## Files
 
 | file | what it is |

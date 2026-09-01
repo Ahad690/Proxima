@@ -619,8 +619,15 @@ async function handleMCPRequest(request) {
                     // forceDOM is still honoured so it keeps raising the explicit
                     // "Qwen has no DOM fallback" error instead of being ignored here.
                     const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
+                    // See readQwenMeta: the reply carries the proof that it reasoned, so
+                    // callers that require thinking can verify rather than hope. Reading
+                    // meta must never fail the send — the answer is already in hand.
+                    const qMeta = await readQwenMeta(sendOptions.session);
                     return {
                         success: true, provider, result,
+                        meta: qMeta,
+                        thinkingRequested: !!sendOptions.thinking,
+                        thinkingUsed: qwenDidThink(qMeta),
                         attachments: attached.map((d) => ({ name: d.name, id: d.id, type: d.showType, size: d.size }))
                     };
                 }
@@ -706,7 +713,15 @@ async function handleMCPRequest(request) {
                         const staged = _qwenPendingAttachments.splice(0, _qwenPendingAttachments.length);
                         const uploaded = await uploadAttachmentsToQwen(qwenAttachmentPaths(data), data.model);
                         const attached = staged.concat(uploaded);
-                        const qOptions = { chatType: data.chatType, thinking: data.thinking, model: data.model };
+                        // Second allowlist, same trap as the one in sendMessage: an option
+                        // missing here is dropped with no error. session in particular —
+                        // without it this route silently sends into the shared 'default'
+                        // conversation, whatever the caller asked for.
+                        const qOptions = {
+                            chatType: data.chatType, thinking: data.thinking, model: data.model,
+                            session: data.session, conversationId: data.conversationId,
+                            autoSearch: data.autoSearch, researchMode: data.researchMode
+                        };
                         if (attached.length) qOptions.files = attached;
                         const qResult = await sendMessageToProvider(provider, data.message, false, qOptions);
                         return {
@@ -3244,6 +3259,60 @@ function qwenAttachmentPaths(data) {
     if (data.filePath) out.push(data.filePath);
     return out.filter(Boolean);
 }
+
+// ─── Qwen response evidence ──────────────────────
+// Qwen reasons ONLY when feature_config.thinking_enabled is set, and the engine does
+// `!!o.thinking` — so a payload that simply omits the flag runs qwen3.8-max unreasoned
+// and looks, from out here, exactly like one that did think. That is not a theory: the
+// automation review loop, the repair loop and the QA video reviewer each shipped in that
+// state and nobody could tell, because the answers still arrived and still read fine.
+//
+// The cure is evidence rather than trust. `phases` is a tally of every SSE phase the
+// stream carried, and `thinking_summary` appears there if and only if the model actually
+// produced reasoning. So the answer comes back with proof attached and a caller can
+// ASSERT it reasoned instead of assuming its own request took effect.
+//
+// Compacted on the way out: phases carry up to three 600-char raw frame samples each,
+// which are for debugging at the engine, not for every consumer of every reply.
+async function readQwenMeta(session) {
+    const raw = await browserManager.executeScript('qwen',
+        `window.__proximaQwen && window.__proximaQwen.lastMeta ? JSON.stringify(window.__proximaQwen.lastMeta(${JSON.stringify(session || null)}) || null) : null`)
+        .catch(() => null);
+    let m = null;
+    try { m = raw ? JSON.parse(raw) : null; } catch (e) { m = null; }
+    if (!m) return null;
+    const phases = {};
+    if (m.phases && typeof m.phases === 'object') {
+        for (const k of Object.keys(m.phases)) {
+            phases[k] = (m.phases[k] && m.phases[k].n) || 0;
+        }
+    }
+    return {
+        responseId: m.responseId || null,
+        model: m.model || null,
+        chatType: m.chatType || null,
+        finished: !!m.finished,
+        usage: m.usage || null,
+        phases,
+        // Titles plus a bounded excerpt. The full thought is a summary already, but an
+        // unbounded field on every reply is how a response payload quietly turns into
+        // a megabyte.
+        thinking: Array.isArray(m.thinking) ? m.thinking.map((t) => ({
+            title: (t && t.title) || '',
+            thought: String((t && t.thought) || '').slice(0, 2000)
+        })) : [],
+        dropped: m.dropped || 0,
+        dupChunks: m.dupChunks || 0,
+        restartFromStart: m.restartFromStart || 0,
+        turns: m.turns || 1
+    };
+}
+
+/** True only when the stream actually carried reasoning frames. */
+function qwenDidThink(meta) {
+    return !!(meta && meta.phases && meta.phases.thinking_summary > 0);
+}
+
 
 // ─── Claude attachments ──────────────────────────
 // Files are uploaded at ATTACH time, not send time: the file goes up first and the

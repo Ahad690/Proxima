@@ -189,6 +189,20 @@ Three things that decide whether the review is trustworthy, all learned the hard
   returns a *clarifying question*, turn 2 does the 7-minute work. Handled automatically.
 - Attachments: image ≤20MB ×5, video ≤500MB ×1, audio ≤100MB ×1, doc ≤20MB ×5. A
   text-only model (`qwen3.7-max`) accepts the upload and silently ignores it — guarded.
+- **Thinking is off unless you ask, and asking is not proof.** The engine reads a missing
+  `thinking` flag as *off*, so `qwen3.8-max` answers with no reasoning pass and the reply
+  is indistinguishable from a reasoned one. Three separate callers shipped that way (the
+  code-review loop, the repair loop, the QA video reviewer) and nobody could tell.
+  Measured: `thinking` omitted → phases `["answer"]`, no `reasoning_tokens`;
+  `thinking: true` → phases `["thinking_summary","answer"]`, 2522 reasoning tokens on a
+  20-second clip. `ask_qwen` and the video reviewer now default it **on**, and the reply
+  carries the phase tally so a caller can *verify* rather than trust its own request.
+  Anything new that talks to Qwen: pass `thinking`, then check `thinkingUsed`.
+- **`conversation_id` resume genuinely works** — verified with a falsifier, not a smoke
+  test. Codeword planted in one session, read back from a *different* session pinned to
+  that id: same chat id, no fork, codeword recalled. This needs server-side parent
+  recovery, because Qwen threads by `parent_id` and does not resolve the leaf itself — a
+  naive resume branches from the root and loses the whole history while looking fine.
 - **Sessions matter.** One engine serves every caller. Pass `session: "<name>"` or you
   share the `default` conversation pointer with whatever else is running. The automation
   review loop uses `automation`; the QA reviewer uses `qa-review`.
@@ -208,7 +222,7 @@ something looks fine, that is not evidence.
 
 | Symptom | Cause |
 |---|---|
-| Answer is oddly shallow or generic | Wrong thread, or thinking disabled |
+| Answer is oddly shallow or generic | Wrong thread, or thinking disabled — check `thinkingUsed` on the reply |
 | Artifact "missing" but the model says it wrote one | Placeholder substitution — check `rendering_mode` |
 | Qwen send hangs for minutes | CAPTCHA pending. Run preflight. |
 | A change "doesn't work" | Proxima not restarted. Run preflight. |

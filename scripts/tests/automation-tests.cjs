@@ -297,6 +297,32 @@ function testQwenThinkingWiring() {
         throw new Error('Qwen engine does not serialize thinking_enabled');
     }
 
+    // The QA video reviewer was the third caller running unreasoned, and it survived the
+    // first fix because that fix only checked the two callers already known about. So
+    // this asserts every Qwen entry point, not a list of the ones that broke.
+    const videoReview = fs.readFileSync(path.join(__dirname, '../../tools/qa-video-review/qwen-review.cjs'), 'utf8');
+    if (!/thinking: args\.thinking/.test(videoReview) || !/thinking: true/.test(videoReview)) {
+        throw new Error('QA video reviewer does not pass thinking (default on)');
+    }
+    const mcp = fs.readFileSync(path.join(__dirname, '../../src/mcp-server-v3.js'), 'utf8');
+    if (!/opts\.thinking = thinking !== false/.test(mcp)) {
+        throw new Error('ask_qwen does not default thinking on');
+    }
+
+    // Passing the flag is not the same as the model having reasoned. The engine tallies
+    // SSE phases, and thinking_summary appears only when reasoning frames arrived, so
+    // that tally is the falsifier — without it back on the response, "I asked for
+    // thinking" is the only evidence anyone has, which is how this bug lasted so long.
+    if (!mainProcess.includes('function qwenDidThink') || !mainProcess.includes('thinkingUsed:')) {
+        throw new Error('Main process does not report whether Qwen actually reasoned');
+    }
+    if (!qwenEngine.includes('phases: r.state.phases')) {
+        throw new Error('Qwen engine does not expose the phase tally that proves reasoning');
+    }
+    if (!/thinkingStatus === 'contradicted'/.test(videoReview)) {
+        throw new Error('QA video reviewer does not act on an unreasoned verdict');
+    }
+
     console.log('✅ Qwen Thinking Wiring tests passed.');
 }
 try {

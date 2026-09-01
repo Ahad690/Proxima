@@ -20,6 +20,9 @@
  *                        [--json out.json] [--port 19222] [--timeout-ms 1800000]
  *                        [--keep-context]   (default: each review gets a fresh chat)
  *                        [--conversation-id <uuid>]  pin every review to one thread
+ *                        [--no-thinking]    (default: thinking ON — Qwen reasons only
+ *                                            when asked; see the note on the payload)
+ *                        [--allow-no-thinking]  accept a verdict reached unreasoned
  *
  * exit: 0 = PASS, 2 = FAIL, 3 = INCONCLUSIVE, 1 = error (upload/transport/etc)
  */
@@ -32,7 +35,8 @@ const VIDEO_EXT = ['.mp4', '.mov', '.mkv', '.avi', '.wmv', '.flv'];
 function parseArgs(argv) {
     const a = {
         video: null, images: [], checks: [], context: null, model: null, json: null,
-        port: null, timeoutMs: 1800000, raw: false, keepContext: false, conversationId: null
+        port: null, timeoutMs: 1800000, raw: false, keepContext: false, conversationId: null,
+        thinking: true, allowNoThinking: false
     };
     for (let i = 2; i < argv.length; i++) {
         const k = argv[i], v = argv[i + 1];
@@ -53,6 +57,9 @@ function parseArgs(argv) {
         else if (k === '--raw') { a.raw = true; }
         else if (k === '--keep-context') { a.keepContext = true; }
         else if (k === '--conversation-id') { a.conversationId = v; i++; }
+        else if (k === '--no-thinking') { a.thinking = false; }
+        else if (k === '--thinking') { a.thinking = true; }
+        else if (k === '--allow-no-thinking') { a.allowNoThinking = true; }
     }
     return a;
 }
@@ -216,13 +223,24 @@ function extractVerdict(text) {
         // then send every run to ONE reviewer chat, which is worth the contamination
         // risk when the reviews are meant to be compared against each other. Reviews
         // that must stand alone should keep the default.
-        newChat: !args.keepContext && !args.conversationId
+        newChat: !args.keepContext && !args.conversationId,
+        // THINKING. Not optional for a reviewer, and not the default in the protocol:
+        // the engine does `!!o.thinking`, so a payload that omits this key runs
+        // qwen3.8-max with thinking_enabled:false. This script omitted it, which means
+        // every video verdict it produced was reached with no reasoning pass at all —
+        // the same silent default that had been running the code-review and repair
+        // loops before they were fixed. Nothing errors, nothing logs; the verdict just
+        // arrives shallower than it looks. Watching a multi-minute recording and
+        // reconciling it against a checklist is precisely the work reasoning is for,
+        // so it is ON here and has to be switched off explicitly.
+        thinking: args.thinking
     };
     if (args.model) data.model = args.model;
 
     console.error('[review] ' + path.basename(video) + ' (' + mb.toFixed(2) + 'MB)' +
         (args.images.length ? ' + ' + args.images.length + ' still(s)' : '') +
-        ' -> Qwen via Proxima :' + port);
+        ' -> Qwen via Proxima :' + port +
+        ' [' + (args.model || 'qwen3.8-max') + (args.thinking ? ', thinking' : ', NO thinking') + ']');
     const t0 = Date.now();
     const res = await ipc(port, { action: 'sendMessage', provider: 'qwen', data: data }, args.timeoutMs);
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
@@ -231,6 +249,36 @@ function extractVerdict(text) {
         console.error('[review] FAILED after ' + secs + 's: ' + res.error);
         process.exit(1);
     }
+    // Did it actually reason? main-v2 returns the engine's phase tally with the answer,
+    // and 'thinking_summary' is present there if and only if reasoning frames arrived.
+    // Three distinct states, kept distinct on purpose:
+    //   verified  — asked for thinking and the stream proves it happened.
+    //   unverifiable — the running Proxima predates the meta field. Warn; do not fail,
+    //     or this script breaks against a build that is merely older, not broken.
+    //   contradicted — thinking was requested and the stream shows it did NOT happen.
+    //     That is a reviewer defect, and a verdict reached without the reasoning pass
+    //     it was configured for is not a verdict this script will report as PASS. It
+    //     becomes INCONCLUSIVE, which is what exit 3 already means: the reviewer did
+    //     not properly answer. --allow-no-thinking downgrades it back to a warning.
+    const canVerify = res.meta && res.meta.phases;
+    const didThink = !!res.thinkingUsed;
+    let thinkingStatus = 'not requested';
+    if (args.thinking) {
+        thinkingStatus = !canVerify ? 'unverifiable' : (didThink ? 'verified' : 'contradicted');
+    }
+    if (thinkingStatus === 'unverifiable') {
+        console.error('[review] WARNING: cannot confirm the reviewer reasoned — this ' +
+            'Proxima build does not report Qwen phase metadata. Restart Proxima to enable it.');
+    } else if (thinkingStatus === 'contradicted') {
+        console.error('[review] WARNING: thinking was requested but the response carried NO ' +
+            'thinking_summary phase — phases seen: ' + Object.keys(res.meta.phases).join(', ') +
+            '. The verdict was reached WITHOUT a reasoning pass.');
+    } else if (thinkingStatus === 'verified') {
+        console.error('[review] reasoning confirmed (' + res.meta.phases.thinking_summary +
+            ' thinking frames' + (res.meta.usage && res.meta.usage.output_tokens
+                ? ', ' + res.meta.usage.output_tokens + ' output tokens' : '') + ')');
+    }
+
     const text = (res.result && res.result.response) || '';
     if (args.raw || !text) console.log(text || '(empty response)');
 
@@ -238,6 +286,12 @@ function extractVerdict(text) {
     const out = {
         video: video, seconds: Number(secs),
         attachments: res.attachments || null,
+        model: (res.meta && res.meta.model) || args.model || 'qwen3.8-max',
+        thinkingRequested: args.thinking,
+        thinkingStatus: thinkingStatus,
+        phases: (res.meta && res.meta.phases) || null,
+        reasoning: (res.meta && res.meta.thinking) || null,
+        usage: (res.meta && res.meta.usage) || null,
         verdict: verdict ? verdict.verdict : 'INCONCLUSIVE',
         parsed: verdict, response: text
     };
@@ -245,6 +299,16 @@ function extractVerdict(text) {
 
     if (!verdict) {
         console.error('[review] INCONCLUSIVE — no parseable verdict block in the reply (' + secs + 's)');
+        if (!args.raw) console.log(text);
+        process.exit(3);
+    }
+    if (thinkingStatus === 'contradicted' && !args.allowNoThinking) {
+        console.error('[review] INCONCLUSIVE — the reviewer returned ' + verdict.verdict +
+            ' but reached it with thinking disabled server-side, despite being asked for it. ' +
+            'Not reporting that as a verdict. Re-run, or pass --allow-no-thinking to accept it.');
+        out.verdict = 'INCONCLUSIVE';
+        out.suppressedVerdict = verdict.verdict;
+        if (args.json) fs.writeFileSync(args.json, JSON.stringify(out, null, 2));
         if (!args.raw) console.log(text);
         process.exit(3);
     }
