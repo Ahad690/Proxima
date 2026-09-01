@@ -3401,8 +3401,8 @@ async function uploadAttachmentsToClaude(filePaths, promptPreview) {
 // The listing is EVENTUALLY CONSISTENT: immediately after the turn it still showed the
 // pre-edit size, and caught up a few seconds later. So it polls, and stops the moment it
 // sees a change rather than always waiting out the deadline.
-const CLAUDE_RECONCILE_MS = 15000;      // ceiling; the observed lag was ~6s
-const CLAUDE_RECONCILE_EVERY = 2500;
+const CLAUDE_RECONCILE_MS = 25000;      // ceiling; the observed lag was ~6s
+const CLAUDE_RECONCILE_EVERY = 1500;
 // Tools that only READ. A turn using nothing else wrote nothing, so it can skip the
 // listing entirely and pay no latency at all. Anything not on this list is treated as a
 // possible write, because guessing wrong in that direction only costs one HTTP call,
@@ -3424,6 +3424,34 @@ function claudeFingerprint(files) {
     const m = {};
     for (const f of files) m[f.path] = String(f.bytes) + '|' + String(f.createdAt);
     return m;
+}
+
+/**
+ * Sandbox paths named by this turn's tool calls. `str_replace` — the tool that performs
+ * an edit, confirmed on the wire as {path, description, old_str, new_str} — names the
+ * file outright, so the changed file is usually known without inferring it from the
+ * listing. Used to NARROW the download set: a conversation here holds 60+ outputs, and
+ * pulling files this turn never touched is the waste that made the bulk-download
+ * workaround unpleasant in the first place.
+ *
+ * Never the sole signal. A tool that writes without naming a path — a raw shell write —
+ * would go invisible again, which is this same bug in a new costume.
+ */
+function claudeToolPaths(toolCalls) {
+    const out = {};
+    for (const t of (toolCalls || [])) {
+        const p = t && t.input && t.input.path;
+        if (typeof p === 'string' && p) out[p] = true;
+    }
+    return out;
+}
+
+/** One file's contents out of a conversation's sandbox, or null. */
+async function downloadClaudeFile(cid, filePath) {
+    return browserManager.executeScript('claude',
+        'window.__proximaClaude.downloadArtifact(' + JSON.stringify(filePath) + ', ' +
+        JSON.stringify(cid) + ')')
+        .catch(() => null);
 }
 
 /** True when the turn used a tool that might have written to the sandbox. */
@@ -3448,15 +3476,35 @@ async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls)
     const hadBaseline = Object.keys(baseline).length > 0;
     const deadline = Date.now() + CLAUDE_RECONCILE_MS;
     let changed = [];
+    let settled = false;
     try {
+        // Wait for the listing to SETTLE, not merely to differ. The listing and the
+        // download endpoint lag independently and by different amounts: right after an
+        // edit the listing reported a NEW created_at while still reporting the OLD size,
+        // and a download taken at that moment returned the OLD content — 12 bytes of
+        // "VERSION ONE" for a file that was already 24 bytes on the server.
+        //
+        // Byte-matching the download against the listing does NOT catch that, because
+        // both were stale at 12 and agreed with each other. Two stale sources corroborate
+        // each other perfectly. So the condition is two consecutive identical polls, by
+        // which point size and content have converged.
+        let prev = null;
         for (;;) {
             const now = await claudeListOutputs(cid, 1);
-            changed = now.filter((f) => baseline[f.path] !==
-                (String(f.bytes) + '|' + String(f.createdAt)));
+            const fp = claudeFingerprint(now);
+            changed = now.filter((f) => baseline[f.path] !== fp[f.path]);
+            const stable = prev && changed.length &&
+                changed.every((f) => prev[f.path] === fp[f.path]);
             // A new conversation has no baseline, so everything present is from this turn
             // and there is nothing to wait for.
-            if (changed.length || !hadBaseline || Date.now() >= deadline) break;
+            if (stable || !hadBaseline) { settled = true; break; }
+            if (Date.now() >= deadline) break;
+            prev = fp;
             await sleep(CLAUDE_RECONCILE_EVERY);
+        }
+        if (!settled && changed.length) {
+            console.error('[Artifacts] sandbox listing for ' + cid + ' never settled within ' +
+                (CLAUDE_RECONCILE_MS / 1000) + 's — the recovered copy may lag the real file');
         }
     } catch (e) {
         console.error('[Artifacts] reconciliation could not list ' + cid + ': ' + e.message +
@@ -3464,7 +3512,16 @@ async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls)
         return [];
     }
 
-    const missing = changed.filter((f) => !known[f.path]);
+    // Prefer the paths the tool calls actually named; fall back to the whole diff when
+    // none were named.
+    const named = claudeToolPaths(toolCalls);
+    let missing = changed.filter((f) => !known[f.path]);
+    if (Object.keys(named).length) {
+        const narrowed = missing.filter((f) => named[f.path]);
+        // Narrow only if it leaves something. A tool naming a path we cannot match must
+        // not suppress a file the diff genuinely found.
+        if (narrowed.length) missing = narrowed;
+    }
     if (!missing.length) return [];
     console.log('[Artifacts] ' + missing.length + ' file(s) changed in the sandbox that the ' +
         'stream never announced (' + missing.map((f) => f.name).join(', ') + ') — tools used: ' +
@@ -3472,11 +3529,32 @@ async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls)
 
     const out = [];
     for (const f of missing) {
-        const text = await browserManager.executeScript('claude',
-            `window.__proximaClaude.downloadArtifact(${JSON.stringify(f.path)}, ${JSON.stringify(cid)})`)
-            .catch(() => null);
+        let text = null;
+        // The listing's byte count is one last independent cross-check. It only means
+        // anything once the listing has settled, which is what the loop above waits for —
+        // but a mismatch still says the download is behind, so retry rather than save it.
+        for (let attempt = 0; attempt < 3; attempt++) {
+            text = await downloadClaudeFile(cid, f.path);
+            if (typeof text !== 'string') break;
+            if (typeof f.bytes !== 'number') break;
+            if (Buffer.byteLength(text, 'utf8') === f.bytes) break;
+            console.error('[Artifacts] ' + f.path + ' downloaded ' +
+                Buffer.byteLength(text, 'utf8') + 'B against a listed ' + f.bytes +
+                'B — download is stale, retrying');
+            await sleep(CLAUDE_RECONCILE_EVERY);
+        }
         if (typeof text === 'string') {
-            out.push({ path: f.path, fileText: text, description: f.contentType, viaListing: true });
+            const stale = typeof f.bytes === 'number' &&
+                Buffer.byteLength(text, 'utf8') !== f.bytes;
+            if (stale) {
+                console.error('[Artifacts] ' + f.path + ' is still ' +
+                    Buffer.byteLength(text, 'utf8') + 'B against a listed ' + f.bytes +
+                    'B after retries — saved anyway, and flagged');
+            }
+            out.push({
+                path: f.path, fileText: text, description: f.contentType,
+                viaListing: true, stale: stale
+            });
         } else {
             console.error('[Artifacts] ' + f.path + ' changed but could not be downloaded');
         }

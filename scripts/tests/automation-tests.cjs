@@ -386,6 +386,21 @@ function testQwenSessionState() {
     console.log('✅ Qwen Session State tests passed.');
 }
 
+// The sandbox reconciliation is async and needs stubs, so it lives in its own file and
+// runs as a child. It guards the subtler half of the edited-file bug: the listing and
+// the download endpoint lag independently, so a download taken the moment the listing
+// first moved returned the PRE-edit body while agreeing with the PRE-edit size. Two
+// stale sources corroborating each other is why byte-matching alone was not enough.
+function testClaudeReconcile() {
+    console.log('Testing Claude Sandbox Reconciliation...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'claude-reconcile-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('claude-reconcile-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
+    }
+    console.log('✅ Claude Sandbox Reconciliation tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
@@ -395,6 +410,7 @@ try {
     testThinkingEffortWiring();
     testQwenThinkingWiring();
     testQwenSessionState();
+    testClaudeReconcile();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');
