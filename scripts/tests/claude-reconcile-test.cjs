@@ -1,13 +1,16 @@
 /**
- * Lift reconcileClaudeArtifacts out of main-v2 and drive it against a simulated sandbox
- * that lags exactly the way the real one was measured to lag:
+ * Drives reconcileClaudeArtifacts against a sandbox stubbed to lag the way the real one
+ * was measured to lag — and specifically the way that defeated two earlier attempts.
  *
- *   poll 1  created_at bumped, size STILL 12   <- the trap: it "changed", so the old code
- *                                                 downloaded here and got stale content
- *   poll 2  size now 24
- *   poll 3  size 24, identical to poll 2       <- settled
+ * Observed on a live edit of a 49-byte file:
+ *   - the listing bumped created_at immediately but kept reporting 49 bytes
+ *   - it then sat STABLE on 49 across consecutive polls for several seconds
+ *   - the download endpoint served the 49-byte pre-edit body throughout
  *
- * and a download endpoint that serves the old 12-byte body until the listing has caught up.
+ * So "it changed", "it settled", and "the download matches the listing" were all true
+ * while the file was stale. The only signal that cannot be fooled is the size the tool
+ * call itself dictates: str_replace swaps old_str for new_str, so the result is exactly
+ * previous + (new_str - old_str) bytes.
  */
 const fs = require('fs');
 const path = require('path');
@@ -19,24 +22,36 @@ const grab = (re, what) => {
     return m[0];
 };
 
-const OLD = 'VERSION ONE\n';                 // 12 bytes
-const NEW = 'VERSION ONE\nVERSION TWO\n';    // 24 bytes
-const P = '/mnt/user-data/outputs/probe.md';
+const P = '/mnt/user-data/outputs/PRD.md';
+const OLD = '# Product Requirements\nSection A: initial scope.\n';               // 49 bytes
+const NEW = '# Product Requirements\nSection A: initial scope.\nSection B.\n';   // 61 bytes
+const OLD_B = Buffer.byteLength(OLD, 'utf8');
+const NEW_B = Buffer.byteLength(NEW, 'utf8');
 const T1 = '2026-09-01T09:39:35.000000Z';
 const T2 = '2026-09-01T09:39:48.000000Z';
 
-let listPolls = 0;
-let downloads = 0;
-const entry = (bytes, createdAt) => [{
-    path: P, kind: 'output', name: 'probe.md', bytes, createdAt, contentType: 'text/markdown'
+// str_replace('Section A: initial scope.\n' -> 'Section A: initial scope.\nSection B.\n')
+const OLD_STR = 'Section A: initial scope.\n';
+const NEW_STR = 'Section A: initial scope.\nSection B.\n';
+const TOOLS = [{
+    name: 'str_replace',
+    input: { path: P, old_str: OLD_STR, new_str: NEW_STR },
+    inputBytes: {
+        path: Buffer.byteLength(P, 'utf8'),
+        old_str: Buffer.byteLength(OLD_STR, 'utf8'),
+        new_str: Buffer.byteLength(NEW_STR, 'utf8')
+    }
 }];
 
-// The listing lags: created_at moves first, size follows a poll later.
-const LISTING = [
-    entry(12, T2),   // poll 1 — differs from baseline but size is stale
-    entry(24, T2),   // poll 2 — size caught up
-    entry(24, T2)    // poll 3 — identical to poll 2, therefore settled
-];
+const entry = (bytes, createdAt) => [{
+    path: P, kind: 'output', name: 'PRD.md', bytes, createdAt, contentType: 'text/markdown'
+}];
+
+let listPolls = 0;
+let downloads = 0;
+let LISTING = [];
+let CONTENT = [];
+const reset = (listing, content) => { LISTING = listing; CONTENT = content; listPolls = 0; downloads = 0; };
 
 const browserManager = {
     executeScript: async (provider, script) => {
@@ -46,60 +61,103 @@ const browserManager = {
             return JSON.stringify(LISTING[i]);
         }
         if (script.indexOf('downloadArtifact') !== -1) {
+            const i = Math.min(downloads, CONTENT.length - 1);
             downloads++;
-            // Content is stale until the listing has moved past its first poll.
-            return listPolls >= 2 ? NEW : OLD;
+            return CONTENT[i];
         }
         throw new Error('unexpected script: ' + script.slice(0, 60));
     }
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5)));   // keep the test fast
+// Keep the suite fast; the logic under test cares about ordering, not wall-clock.
+const sleep = (ms) => new Promise((r) => setTimeout(r, 1));
 
 const code = [
-    grab(/const CLAUDE_RECONCILE_MS[\s\S]*?const CLAUDE_READ_ONLY_TOOLS = \['view'\];/, 'consts'),
+    grab(/const CLAUDE_RECONCILE_MS[\s\S]*?const CLAUDE_RECONCILE_FLOOR_MS = \d+;/, 'consts'),
+    grab(/const CLAUDE_READ_ONLY_TOOLS = \['view'\];/, 'read-only list'),
     grab(/async function claudeListOutputs\([\s\S]*?\n\}/, 'claudeListOutputs'),
     grab(/function claudeFingerprint\([\s\S]*?\n\}/, 'claudeFingerprint'),
     grab(/function claudeToolPaths\([\s\S]*?\n\}/, 'claudeToolPaths'),
     grab(/async function downloadClaudeFile\([\s\S]*?\n\}/, 'downloadClaudeFile'),
     grab(/function claudeTouchedFiles\([\s\S]*?\n\}/, 'claudeTouchedFiles'),
+    grab(/function claudeExpectedBytes\([\s\S]*?\n\}/, 'claudeExpectedBytes'),
     grab(/async function reconcileClaudeArtifacts\([\s\S]*?\n\}/, 'reconcileClaudeArtifacts')
 ].join('\n');
 
-const reconcile = new Function('browserManager', 'sleep', 'Buffer', 'console',
-    code + '\n return reconcileClaudeArtifacts;')(browserManager, sleep, Buffer, console);
+const api = new Function('browserManager', 'sleep', 'Buffer', 'console',
+    code + '\n return { reconcileClaudeArtifacts, claudeExpectedBytes };')(
+    browserManager, sleep, Buffer, console);
 
 let fails = 0;
-const ok = (cond, label) => { console.log((cond ? '  PASS  ' : '  FAIL  ') + label); if (!cond) fails++; };
+const ok = (cond, label) => {
+    console.log((cond ? '  PASS  ' : '  FAIL  ') + label);
+    if (!cond) fails++;
+};
 
 (async () => {
-    // ── The reported bug: an edit, with the listing lagging.
-    const baseline = { [P]: '12|' + T1 };
-    const toolCalls = [{ name: 'str_replace', input: { path: P, old_str: 'x', new_str: 'y' } }];
-    const got = await reconcile('conv-1', baseline, [], toolCalls);
+    const baseline = entry(OLD_B, T1);
 
+    // ── The prediction itself.
+    ok(api.claudeExpectedBytes(P, OLD_B, TOOLS) === NEW_B,
+        'expected size is derived from old_str/new_str (' + OLD_B + ' -> ' + NEW_B + ')');
+    ok(api.claudeExpectedBytes(P, OLD_B, [{ name: 'mystery_tool', input: { path: P } }]) === null,
+        'an unrecognised tool refuses to predict rather than predicting wrongly');
+
+    // ── THE REGRESSION. The listing sits stably on the stale size, then catches up.
+    // Stability, difference and listing/download agreement are all satisfied while stale.
+    reset(
+        [entry(OLD_B, T2), entry(OLD_B, T2), entry(OLD_B, T2), entry(NEW_B, T2)],
+        [OLD, OLD, OLD, NEW]
+    );
+    const got = await api.reconcileClaudeArtifacts('c1', baseline, [], TOOLS);
     ok(got.length === 1, 'the edited file is recovered');
     ok(got[0] && got[0].fileText === NEW,
-        'recovered content is the EDITED body, not the stale one' +
-        (got[0] ? ' (got ' + JSON.stringify(got[0].fileText) + ')' : ''));
+        'recovered body is the EDITED one, despite a stably-stale listing' +
+        (got[0] ? ' (got ' + JSON.stringify(got[0].fileText.slice(0, 40)) + ')' : ''));
     ok(got[0] && got[0].stale === false, 'not flagged stale');
     ok(got[0] && got[0].viaListing === true, 'tagged as recovered via the listing');
-    ok(listPolls >= 3, 'waited for two identical polls before trusting the listing (' + listPolls + ' polls)');
 
-    // ── A turn that only read must cost nothing at all.
-    const before = listPolls;
-    const none = await reconcile('conv-1', baseline, [], [{ name: 'view', input: {} }]);
-    ok(none.length === 0 && listPolls === before, 'a read-only turn does not touch the listing');
+    // ── A turn that only read must cost nothing.
+    reset([entry(OLD_B, T1)], [OLD]);
+    const none = await api.reconcileClaudeArtifacts('c1', baseline, [], [{ name: 'view', input: {} }]);
+    ok(none.length === 0 && listPolls === 0, 'a read-only turn never touches the listing');
 
-    // ── A file the stream already reported must not be downloaded twice.
-    listPolls = 0; downloads = 0;
-    const dup = await reconcile('conv-1', baseline, [{ path: P }], toolCalls);
+    // ── A file the stream already delivered AT THE RIGHT SIZE is not fetched again. The
+    // size is the whole test: a plain create_file with no follow-up edit leaves the
+    // stream's copy authoritative, and re-downloading it would be pure waste.
+    const createOnly = [{
+        name: 'create_file',
+        input: { path: P, file_text: NEW },
+        inputBytes: { path: Buffer.byteLength(P, 'utf8'), file_text: NEW_B }
+    }];
+    reset([entry(NEW_B, T2)], [NEW]);
+    const dup = await api.reconcileClaudeArtifacts('c1', baseline,
+        [{ path: P, fileText: NEW }], createOnly);
     ok(dup.length === 0 && downloads === 0, 'a stream-reported file is not re-downloaded');
 
-    // ── A new conversation has no baseline: everything present is this turn's.
-    listPolls = 0; downloads = 0;
-    const fresh = await reconcile('conv-2', null, [], toolCalls);
-    ok(fresh.length === 1, 'with no baseline the file is still recovered');
+    // ── A download that never catches up is saved but flagged, never reported as clean.
+    reset([entry(NEW_B, T2)], [OLD, OLD, OLD, OLD, OLD]);
+    const st = await api.reconcileClaudeArtifacts('c1', baseline, [], TOOLS);
+    ok(st.length === 1 && st[0].stale === true,
+        'a download that never converges is flagged stale rather than trusted');
 
+    // == create_file then str_replace on the SAME path, in one turn. The stream holds the
+    // pre-edit body, so "the stream mentioned it" must not count as delivered.
+    const CREATED = 'draft\n';
+    const createThenEdit = [
+        { name: 'create_file', input: { path: P, file_text: CREATED },
+          inputBytes: { path: 1, file_text: Buffer.byteLength(CREATED, 'utf8') } },
+        { name: 'str_replace', input: { path: P, old_str: 'draft', new_str: 'final version' },
+          inputBytes: { path: 1, old_str: 5, new_str: 13 } }
+    ];
+    const FINAL = 'final version\n';
+    const FINAL_B = Buffer.byteLength(FINAL, 'utf8');
+    ok(api.claudeExpectedBytes(P, null, createThenEdit) === FINAL_B,
+        'create-then-edit predicts the POST-edit size (' + FINAL_B + 'B)');
+    reset([entry(FINAL_B, T2)], [FINAL]);
+    const cte = await api.reconcileClaudeArtifacts('c1', [],
+        [{ path: P, fileText: CREATED }], createThenEdit);
+    ok(cte.length === 1 && cte[0].fileText === FINAL,
+        'a file created AND edited in one turn is re-fetched, not left at the streamed body');
     console.log(fails ? '\n' + fails + ' FAILURE(S)' : '\nall reconciliation assertions passed');
     process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error('ERR ' + e.message); process.exit(1); });

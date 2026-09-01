@@ -214,9 +214,24 @@
                             try {
                                 var inp = JSON.parse(bs.pj);
                                 rec.input = {};
+                                // UTF-8 byte length of every string field, recorded BEFORE
+                                // truncation. This is what makes an edit verifiable rather
+                                // than merely detectable: str_replace swaps old_str for
+                                // new_str, so the file's resulting size is exactly
+                                // previous + (new_str - old_str) bytes. main-v2 polls the
+                                // sandbox until it reports that precise number, instead of
+                                // guessing from whether the listing looks settled — the
+                                // listing sat stable on the PRE-edit size for seconds and
+                                // fooled exactly that guess.
+                                rec.inputBytes = {};
                                 for (var ik in inp) {
                                     if (!Object.prototype.hasOwnProperty.call(inp, ik)) continue;
                                     var iv = inp[ik];
+                                    if (typeof iv === 'string') {
+                                        try {
+                                            rec.inputBytes[ik] = new TextEncoder().encode(iv).length;
+                                        } catch (e2) { rec.inputBytes[ik] = iv.length; }
+                                    }
                                     rec.input[ik] = (typeof iv === 'string' && iv.length > 200)
                                         ? iv.slice(0, 200) + '…(' + iv.length + ' chars)'
                                         : iv;

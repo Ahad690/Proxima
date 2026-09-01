@@ -657,7 +657,9 @@ async function handleMCPRequest(request) {
                                 'window.__proximaClaude && window.__proximaClaude.getConversation ? window.__proximaClaude.getConversation() : null')
                                 .catch(() => null);
                         if (preCid) {
-                            claudePre = claudeFingerprint(await claudeListOutputs(preCid, 1));
+                            // Raw entries, not a fingerprint: the predicted-size logic needs the
+                            // baseline BYTE COUNT of each file, not just whether it moved.
+                            claudePre = await claudeListOutputs(preCid, 1);
                         }
                     }
                     const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
@@ -3403,6 +3405,10 @@ async function uploadAttachmentsToClaude(filePaths, promptPreview) {
 // sees a change rather than always waiting out the deadline.
 const CLAUDE_RECONCILE_MS = 25000;      // ceiling; the observed lag was ~6s
 const CLAUDE_RECONCILE_EVERY = 1500;
+// Only used when the expected size cannot be predicted: refuse to trust a "settled"
+// listing until this much of the window has elapsed. Stability alone was reached in
+// under 3s on a file that was still stale, while the real lag ran to ~13s.
+const CLAUDE_RECONCILE_FLOOR_MS = 10000;
 // Tools that only READ. A turn using nothing else wrote nothing, so it can skip the
 // listing entirely and pay no latency at all. Anything not on this list is treated as a
 // possible write, because guessing wrong in that direction only costs one HTTP call,
@@ -3461,50 +3467,119 @@ function claudeTouchedFiles(toolCalls) {
 }
 
 /**
+ * The size a file MUST end up at, derived from the tool calls themselves, or null when it
+ * cannot be derived.
+ *
+ * This exists because every observational signal lies for a while. After an edit the
+ * sandbox listing bumped created_at but kept reporting the OLD size, the download endpoint
+ * served the OLD body, and — the part that defeated the first two attempts — the listing
+ * then sat perfectly STABLE on that old size across consecutive polls. Detection said
+ * "changed", stability said "settled", byte-matching said "consistent", and all three were
+ * describing a stale file. Two stale sources corroborate each other; three do too.
+ *
+ * So stop observing and start predicting. str_replace swaps old_str for new_str, so the
+ * result is exactly previous + (new_str - old_str) bytes. create_file sets an absolute
+ * size. Both are known from the stream, before the sandbox is asked anything. Polling to a
+ * number the tool call itself dictates cannot be fooled by a lagging endpoint.
+ */
+function claudeExpectedBytes(filePath, baselineBytes, toolCalls) {
+    let size = typeof baselineBytes === 'number' ? baselineBytes : null;
+    let sawAny = false;
+    for (const t of (toolCalls || [])) {
+        if (!t || !t.input || t.input.path !== filePath) continue;
+        const b = t.inputBytes || {};
+        if (t.name === 'create_file') {
+            if (typeof b.file_text !== 'number') return null;
+            size = b.file_text;
+            sawAny = true;
+        } else if (t.name === 'str_replace') {
+            if (size === null) return null;
+            if (typeof b.old_str !== 'number' || typeof b.new_str !== 'number') return null;
+            size = size + (b.new_str - b.old_str);
+            sawAny = true;
+        } else {
+            // An unrecognised tool may have written anything. Refuse to predict rather
+            // than predict wrongly — the caller falls back to waiting it out.
+            return null;
+        }
+    }
+    return sawAny ? size : null;
+}
+
+/**
  * Files this turn created or modified that the stream never announced. Returns entries
  * shaped like stream artifacts so they merge straight into saveClaudeArtifacts.
+ *
  * Never throws: a reconciliation failure must not fail a send whose answer is already in
- * hand — it degrades to the old behaviour, and says so in the log.
+ * hand — it degrades to the old behaviour and says so in the log.
  */
 async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls) {
     if (!cid) return [];
     if (!claudeTouchedFiles(toolCalls)) return [];
-    const known = {};
-    for (const a of (streamArtifacts || [])) if (a && a.path) known[a.path] = true;
 
-    const baseline = before || {};
-    const hadBaseline = Object.keys(baseline).length > 0;
+    // What the stream delivered, and how big it was. The size matters: a turn can
+    // create_file a path and then str_replace the SAME path, in which case the stream
+    // holds the file as it was before the edit. Treating "the stream mentioned it" as
+    // "the stream delivered it" would then hand over the pre-edit body and call it done.
+    const streamBytes = {};
+    for (const a of (streamArtifacts || [])) {
+        if (a && a.path) streamBytes[a.path] = Buffer.byteLength(a.fileText || '', 'utf8');
+    }
+
+    const baseFiles = Array.isArray(before) ? before : [];
+    const baseFp = claudeFingerprint(baseFiles);
+    const baseSize = {};
+    for (const f of baseFiles) baseSize[f.path] = f.bytes;
+    const hadBaseline = baseFiles.length > 0;
+
+    // What we are waiting FOR, per path, computed before the sandbox is consulted.
+    const named = claudeToolPaths(toolCalls);
+    const expected = {};
+    for (const p of Object.keys(named)) {
+        expected[p] = claudeExpectedBytes(p, baseSize[p], toolCalls);
+    }
+    // A path counts as already delivered only when the stream's copy is the size the tool
+    // calls say the file should now be. Same size, nothing to do; different size, the
+    // stream's copy is out of date and the sandbox has the real one.
+    const done = (p) => streamBytes[p] !== undefined &&
+        (typeof expected[p] !== 'number' || streamBytes[p] === expected[p]);
+    const targets = Object.keys(expected).filter((p) =>
+        typeof expected[p] === 'number' && !done(p));
+
     const deadline = Date.now() + CLAUDE_RECONCILE_MS;
     let changed = [];
-    let settled = false;
+    let met = false;
     try {
-        // Wait for the listing to SETTLE, not merely to differ. The listing and the
-        // download endpoint lag independently and by different amounts: right after an
-        // edit the listing reported a NEW created_at while still reporting the OLD size,
-        // and a download taken at that moment returned the OLD content — 12 bytes of
-        // "VERSION ONE" for a file that was already 24 bytes on the server.
-        //
-        // Byte-matching the download against the listing does NOT catch that, because
-        // both were stale at 12 and agreed with each other. Two stale sources corroborate
-        // each other perfectly. So the condition is two consecutive identical polls, by
-        // which point size and content have converged.
         let prev = null;
         for (;;) {
             const now = await claudeListOutputs(cid, 1);
             const fp = claudeFingerprint(now);
-            changed = now.filter((f) => baseline[f.path] !== fp[f.path]);
-            const stable = prev && changed.length &&
-                changed.every((f) => prev[f.path] === fp[f.path]);
-            // A new conversation has no baseline, so everything present is from this turn
-            // and there is nothing to wait for.
-            if (stable || !hadBaseline) { settled = true; break; }
-            if (Date.now() >= deadline) break;
+            const size = {};
+            for (const f of now) size[f.path] = f.bytes;
+
+            if (targets.length) {
+                // The strong path: wait for the exact predicted size on every target.
+                met = targets.every((p) => size[p] === expected[p]);
+                changed = now.filter((f) => targets.indexOf(f.path) !== -1);
+            } else {
+                // No prediction available. Fall back to the weaker signal, but require a
+                // real elapsed floor first — the measured lag ran to ~13s, and stability
+                // alone was reached in under 3s while the file was still stale.
+                changed = now.filter((f) => baseFp[f.path] !== fp[f.path]);
+                const waitedEnough = Date.now() >= deadline - CLAUDE_RECONCILE_FLOOR_MS;
+                met = (!!changed.length && waitedEnough &&
+                       !!prev && changed.every((f) => prev[f.path] === fp[f.path])) || !hadBaseline;
+            }
+            if (met || Date.now() >= deadline) break;
             prev = fp;
             await sleep(CLAUDE_RECONCILE_EVERY);
         }
-        if (!settled && changed.length) {
-            console.error('[Artifacts] sandbox listing for ' + cid + ' never settled within ' +
-                (CLAUDE_RECONCILE_MS / 1000) + 's — the recovered copy may lag the real file');
+        if (!met && (changed.length || targets.length)) {
+            console.error('[Artifacts] sandbox never reached the expected state for ' + cid +
+                ' within ' + (CLAUDE_RECONCILE_MS / 1000) + 's' +
+                (targets.length ? ' (wanted ' + targets.map((p) =>
+                    p.split('/').pop() + '=' + expected[p] + 'B').join(', ') + ')' : '') +
+                ' — a recovered copy may lag the real file');
         }
     } catch (e) {
         console.error('[Artifacts] reconciliation could not list ' + cid + ': ' + e.message +
@@ -3512,10 +3587,7 @@ async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls)
         return [];
     }
 
-    // Prefer the paths the tool calls actually named; fall back to the whole diff when
-    // none were named.
-    const named = claudeToolPaths(toolCalls);
-    let missing = changed.filter((f) => !known[f.path]);
+    let missing = changed.filter((f) => !done(f.path));
     if (Object.keys(named).length) {
         const narrowed = missing.filter((f) => named[f.path]);
         // Narrow only if it leaves something. A tool naming a path we cannot match must
@@ -3529,27 +3601,25 @@ async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls)
 
     const out = [];
     for (const f of missing) {
+        // Prefer the predicted size; fall back to whatever the listing now claims.
+        const want = typeof expected[f.path] === 'number' ? expected[f.path] : f.bytes;
         let text = null;
-        // The listing's byte count is one last independent cross-check. It only means
-        // anything once the listing has settled, which is what the loop above waits for —
-        // but a mismatch still says the download is behind, so retry rather than save it.
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 4; attempt++) {
             text = await downloadClaudeFile(cid, f.path);
             if (typeof text !== 'string') break;
-            if (typeof f.bytes !== 'number') break;
-            if (Buffer.byteLength(text, 'utf8') === f.bytes) break;
+            if (typeof want !== 'number') break;
+            if (Buffer.byteLength(text, 'utf8') === want) break;
             console.error('[Artifacts] ' + f.path + ' downloaded ' +
-                Buffer.byteLength(text, 'utf8') + 'B against a listed ' + f.bytes +
-                'B — download is stale, retrying');
+                Buffer.byteLength(text, 'utf8') + 'B, expected ' + want +
+                'B — download is behind, retrying');
             await sleep(CLAUDE_RECONCILE_EVERY);
         }
         if (typeof text === 'string') {
-            const stale = typeof f.bytes === 'number' &&
-                Buffer.byteLength(text, 'utf8') !== f.bytes;
+            const stale = typeof want === 'number' && Buffer.byteLength(text, 'utf8') !== want;
             if (stale) {
                 console.error('[Artifacts] ' + f.path + ' is still ' +
-                    Buffer.byteLength(text, 'utf8') + 'B against a listed ' + f.bytes +
-                    'B after retries — saved anyway, and flagged');
+                    Buffer.byteLength(text, 'utf8') + 'B against an expected ' + want +
+                    'B after retries — saved anyway, and flagged stale');
             }
             out.push({
                 path: f.path, fileText: text, description: f.contentType,
