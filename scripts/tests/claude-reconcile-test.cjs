@@ -102,6 +102,20 @@ const ok = (cond, label) => {
     ok(api.claudeExpectedBytes(P, OLD_B, [{ name: 'mystery_tool', input: { path: P } }]) === null,
         'an unrecognised tool refuses to predict rather than predicting wrongly');
 
+    // A read carries the SAME path as the edit, and the model views before editing as a
+    // matter of course — so a read must not veto the prediction. Measured live: tools were
+    // ["view","str_replace","create_file"] and prediction silently bailed.
+    const viewThenEdit = [
+        { name: 'view', input: { path: P, description: 'check contents' },
+          inputBytes: { path: Buffer.byteLength(P, 'utf8'), description: 14 } }
+    ].concat(TOOLS);
+    ok(api.claudeExpectedBytes(P, OLD_B, viewThenEdit) === NEW_B,
+        'a preceding view does not disable the prediction (still ' + NEW_B + 'B)');
+    ok(api.claudeExpectedBytes(P, 49, [
+        { name: 'view', input: { path: P }, inputBytes: { path: 1 } },
+        { name: 'str_replace', input: { path: P }, inputBytes: { path: 1, old_str: 25, new_str: 52 } }
+    ]) === 76, 'the live numbers reproduce: 49 + (52 - 25) = 76');
+
     // ── THE REGRESSION. The listing sits stably on the stale size, then catches up.
     // Stability, difference and listing/download agreement are all satisfied while stale.
     reset(

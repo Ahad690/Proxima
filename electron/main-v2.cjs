@@ -3497,6 +3497,15 @@ function claudeExpectedBytes(filePath, baselineBytes, toolCalls) {
             if (typeof b.old_str !== 'number' || typeof b.new_str !== 'number') return null;
             size = size + (b.new_str - b.old_str);
             sawAny = true;
+        } else if (CLAUDE_READ_ONLY_TOOLS.indexOf(t.name) !== -1) {
+            // A read cannot change the size, so it must not veto the prediction. This is
+            // not a corner case: `view` carries the SAME `path` as the edit, and the model
+            // views a file before editing it as a matter of course. Treating a read as
+            // unpredictable therefore disabled prediction on virtually every real edit —
+            // measured on a live run whose tools were ["view","str_replace","create_file"],
+            // where the prediction bailed and the weak fallback happened to be slow enough
+            // to get the right answer anyway. Right answer, wrong mechanism.
+            continue;
         } else {
             // An unrecognised tool may have written anything. Refuse to predict rather
             // than predict wrongly — the caller falls back to waiting it out.
