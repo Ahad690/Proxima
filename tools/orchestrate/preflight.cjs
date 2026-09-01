@@ -202,7 +202,18 @@ function newestMtime(files) {
         } else {
             record('Qwen signing + WAF', 'PASS', 'signed, no challenge pending');
         }
-    } catch (e) { record('Qwen engine', 'FAIL', e.message); }
+    } catch (e) {
+        // One probe feeds three checks, so a throw here used to record only 'Qwen
+        // engine' and leave WAF and signing absent from the report entirely — not
+        // FAIL, not WARN, simply missing. In a tool whose entire job is to answer
+        // "is everything reachable before I go AFK", a check that silently does not
+        // run is worse than one that fails: the summary line still says READY.
+        // Every check the probe covers is now recorded explicitly. Found in code
+        // review of 9d0b3ade.
+        record('Qwen engine', 'FAIL', e.message);
+        record('Qwen signing + WAF', 'FAIL',
+            'not checked — the Qwen probe failed before it could report (' + e.message + ')');
+    }
 
     // ── 4. MCP surface ───────────────────────────────
     try {

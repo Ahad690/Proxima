@@ -969,13 +969,24 @@
         });
     }
 
+    // Reset ONE session. The persisted store holds a map of every session, so the
+    // obvious `removeItem(STORE_KEY)` here was destroying all of them: any caller
+    // starting a fresh chat silently wiped the persisted conversation of every other
+    // caller — the orchestrator's pinned thread, the review loop's, the QA reviewer's.
+    // Exactly the collision that keying state by session was meant to end, reintroduced
+    // one layer down. Found in code review of fbf501c9.
+    //
+    // saveState() is the right primitive: it rewrites the map from _sessions, which
+    // loadState() has already populated from storage at injection, so it is a superset.
+    // A session whose chatId is now null is simply omitted, and every other entry is
+    // written back untouched.
     function newConversation(S) {
         S.chatId = null;
         S.parentId = null;
         S.chatMode = null;
         S.pinned = false;
         S.lastMeta = null;
-        try { window.localStorage.removeItem(STORE_KEY); } catch (e) { }
+        saveState();
         return true;
     }
 

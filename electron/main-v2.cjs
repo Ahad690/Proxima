@@ -724,8 +724,16 @@ async function handleMCPRequest(request) {
                         };
                         if (attached.length) qOptions.files = attached;
                         const qResult = await sendMessageToProvider(provider, data.message, false, qOptions);
+                        const qMeta = await readQwenMeta(qOptions.session);
                         return {
                             success: true, provider,
+                            // Same evidence sendMessage returns. Omitted here at first, which
+                            // meant a caller on this route could not tell a reasoned answer
+                            // from an unreasoned one — the exact gap the phase tally exists to
+                            // close. Found in code review of e7743ae4.
+                            meta: qMeta,
+                            thinkingRequested: !!qOptions.thinking,
+                            thinkingUsed: qwenDidThink(qMeta),
                             fileUploaded: attached.map((d) => ({ name: d.name, id: d.id, type: d.showType, size: d.size })),
                             response: (qResult && qResult.response) || ''
                         };
@@ -3363,7 +3371,20 @@ const claudeArtifactDir = path.join(userDataPath, 'claude-artifacts');
 function saveClaudeArtifacts(artifacts, conversationId) {
     if (!Array.isArray(artifacts) || !artifacts.length) return [];
     const dir = path.join(claudeArtifactDir, conversationId || 'unknown');
-    try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return []; }
+    // A failed mkdir used to return [] — indistinguishable from "the model produced
+    // no artifacts". So a disk-full or permission problem would report the turn as
+    // having generated nothing, and the caller would believe it. This function exists
+    // because files nobody is told about are the same as files that were lost; failing
+    // silently here is that same bug with a different cause. Found in code review of
+    // 5702d3a9.
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+        console.error('[Artifacts] cannot create ' + dir + ': ' + e.message +
+            ' — ' + artifacts.length + ' artifact(s) from this turn were NOT saved');
+        return [{ error: 'artifact directory not writable: ' + e.message,
+                  dir: dir, unsaved: artifacts.length }];
+    }
     const saved = [];
     for (const a of artifacts) {
         try {

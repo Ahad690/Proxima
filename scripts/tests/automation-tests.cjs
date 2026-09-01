@@ -325,6 +325,67 @@ function testQwenThinkingWiring() {
 
     console.log('✅ Qwen Thinking Wiring tests passed.');
 }
+// Lifts the real state functions out of the engine and exercises them against a stub
+// localStorage. Worth a unit test rather than an assertion on source text, because the
+// bug it guards was a *behavioural* one that read perfectly: newConversation() cleared
+// its own session and then called removeItem(STORE_KEY), destroying the persisted
+// conversation of every OTHER session. Any caller starting a fresh chat silently
+// unpinned the orchestrator's thread. Found in code review of fbf501c9.
+function testQwenSessionState() {
+    console.log('Testing Qwen Session State...');
+    const src = fs.readFileSync(path.join(__dirname, '../../electron/providers/qwen-engine.js'), 'utf8');
+    const store = {};
+    global.window = {
+        localStorage: {
+            getItem: (k) => (k in store ? store[k] : null),
+            setItem: (k, v) => { store[k] = String(v); },
+            removeItem: (k) => { delete store[k]; }
+        }
+    };
+    const grab = (re, what) => {
+        const m = src.match(re);
+        if (!m) throw new Error('engine shape changed, cannot lift: ' + what);
+        return m[0];
+    };
+    const code = [
+        grab(/var STORE_KEY = [\s\S]*?var _sessions = \{\};/, 'state vars'),
+        grab(/function newSession\(\)[\s\S]*?\n    \}/, 'newSession'),
+        grab(/function sess\(key\)[\s\S]*?\n    \}/, 'sess'),
+        grab(/function loadState\(\)[\s\S]*?\n    \}/, 'loadState'),
+        grab(/function saveState\(\)[\s\S]*?\n    \}/, 'saveState'),
+        grab(/function newConversation\(S\)[\s\S]*?\n    \}/, 'newConversation')
+    ].join('\n');
+    const mk = () => new Function(code +
+        '\n return { sess, loadState, saveState, newConversation };')();
+
+    const api = mk();
+    api.sess('orchestrator').chatId = 'aaaa-orch';
+    api.sess('automation').chatId = 'bbbb-auto';
+    api.sess('qa-review').chatId = 'cccc-qa';
+    api.saveState();
+
+    api.newConversation(api.sess('automation'));
+    const after = JSON.parse(store.__proxima_qwen_state).sessions;
+    if (!after.orchestrator || after.orchestrator.chatId !== 'aaaa-orch') {
+        throw new Error('newConversation on one session destroyed another session (orchestrator)');
+    }
+    if (!after['qa-review'] || after['qa-review'].chatId !== 'cccc-qa') {
+        throw new Error('newConversation on one session destroyed another session (qa-review)');
+    }
+    if (after.automation) throw new Error('reset session was not dropped from storage');
+    if (api.sess('automation').chatId !== null) throw new Error('reset session not cleared in memory');
+
+    // Re-injection after a CAPTCHA or navigation must restore exactly the survivors.
+    const fresh = mk();
+    fresh.loadState();
+    if (fresh.sess('orchestrator').chatId !== 'aaaa-orch') throw new Error('orchestrator lost on re-injection');
+    if (fresh.sess('qa-review').chatId !== 'cccc-qa') throw new Error('qa-review lost on re-injection');
+    if (fresh.sess('automation').chatId !== null) throw new Error('reset session came back on re-injection');
+
+    delete global.window;
+    console.log('✅ Qwen Session State tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
@@ -333,6 +394,7 @@ try {
     testRepairRetryGuards();
     testThinkingEffortWiring();
     testQwenThinkingWiring();
+    testQwenSessionState();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');

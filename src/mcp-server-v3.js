@@ -368,12 +368,25 @@ class AIProvider {
         // caller can then open, diff or edit them with ordinary file tools. Without
         // this the files exist and nobody is told, which is the same as losing them.
         if (sendRes && Array.isArray(sendRes.artifacts) && sendRes.artifacts.length) {
-            const lines = sendRes.artifacts.map((a) => {
-                const desc = a.description ? ', ' + a.description : '';
-                return '- ' + a.localPath + ' (' + a.bytes + ' bytes' + desc + ')';
-            });
-            text += '\n\n---\n**' + sendRes.artifacts.length +
-                ' artifact(s) saved to disk:**\n' + lines.join('\n');
+            // An entry carrying `error` is a file that could NOT be written. It must never
+            // be counted among the saves: rendering it as one prints a localPath of
+            // `undefined` under a heading claiming success, which is worse than the silent
+            // [] this replaced.
+            const failed = sendRes.artifacts.filter((x) => x && x.error);
+            const ok = sendRes.artifacts.filter((x) => x && !x.error);
+            if (ok.length) {
+                const lines = ok.map((x) => {
+                    const desc = x.description ? ', ' + x.description : '';
+                    return '- ' + x.localPath + ' (' + x.bytes + ' bytes' + desc + ')';
+                });
+                text += '\n\n---\n**' + ok.length +
+                    ' artifact(s) saved to disk:**\n' + lines.join('\n');
+            }
+            if (failed.length) {
+                text += '\n\n---\n**ARTIFACTS NOT SAVED**\n' + failed.map((f) =>
+                    '- ' + f.error + (f.unsaved ? ' (' + f.unsaved + ' file(s) lost)' : '')
+                ).join('\n') + '\nThe model did generate them; writing them to disk failed.';
+            }
         }
         // The conversation id is what makes a thread resumable later; a caller that is
         // never told it cannot come back to this conversation.
@@ -1319,7 +1332,10 @@ server.tool(
             const res = await claude.ipc.send('claudeArtifacts', 'claude', payload);
             if (!res.success) return toolError(new Error(res.error || 'claudeArtifacts failed'));
 
-            const saved = res.artifacts || [];
+            const all = res.artifacts || [];
+            // See _doChat: an entry with `error` is a write failure, not a file.
+            const failedSaves = all.filter((x) => x && x.error);
+            const saved = all.filter((x) => x && !x.error);
             const c = res.counts || {};
             // Report the split, always. The listing mixes model-generated files with
             // everything the user ever uploaded, and one real conversation here holds
@@ -1327,6 +1343,11 @@ server.tool(
             const tally = '(conversation holds ' + (c.outputs || 0) + ' generated, ' +
                 (c.uploads || 0) + ' uploaded)';
 
+            if (failedSaves.length) {
+                return toolError(new Error(failedSaves.map((f) => f.error).join('; ') +
+                    ' — ' + tally + '. The files exist in the conversation; they could not' +
+                    ' be written locally.'));
+            }
             if (!saved.length) {
                 return toolResponse('No generated files found for conversation ' +
                     res.conversationId + ' ' + tally +

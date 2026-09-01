@@ -31,9 +31,21 @@ const steps = opt('--steps', null)
   ? JSON.parse(fs.readFileSync(opt('--steps'), 'utf8'))
   : JSON.parse(opt('--steps-json', '[]'));
 
+// JSON.parse HAS to be inside the try. A throw in an 'end' handler is not caught by
+// the Promise executor — that frame is long gone — so it surfaces as an
+// uncaughtException and takes the whole recorder down. The trigger is mundane: the
+// debug port answering with an HTML error page instead of JSON. Found in code review
+// of e7743ae4.
 const get = (path) => new Promise((res, rej) => {
   http.get({ host: '127.0.0.1', port, path }, (r) => {
-    let b = ''; r.on('data', (d) => b += d); r.on('end', () => res(JSON.parse(b)));
+    let b = ''; r.on('data', (d) => b += d);
+    r.on('end', () => {
+      try { res(JSON.parse(b)); }
+      catch (e) {
+        rej(new Error('CDP ' + path + ' returned non-JSON (HTTP ' + r.statusCode + '): ' +
+          b.slice(0, 120)));
+      }
+    });
   }).on('error', rej);
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -231,6 +231,31 @@ something looks fine, that is not evidence.
 
 ---
 
+### Do not act on a review finding without checking it
+
+The automation loop posts a Qwen code review to `perplexity-reviews/<sha>.md` on every
+push. Those findings are **useful but not reliable**. An audit of all 14 reviews from
+2026-08-31/09-01, verifying every finding against the file at the reviewed commit:
+
+- **9 of 13 findings were real** — including two excellent catches no human noticed (a
+  `[^w.-]` regex missing its backslash, mangling every artifact filename; and a
+  `newConversation` that wiped every *other* session's persisted conversation).
+- **2 were flatly false**, each quoting code that does not exist in the file, and one of
+  them drove a FAIL / 4-of-10 verdict.
+- **1 had a correct conclusion with fabricated supporting evidence** — plausible code
+  reconstructed from memory rather than read.
+- **1 was speculative**, blaming a function from a different layer than the call path.
+
+Thinking being enabled did *not* fix this: both flatly-false findings came after the
+reasoning fix landed. What thinking changed was structure, not accuracy.
+
+So: treat every finding as a lead, and confirm it with
+`git show <sha>:<path>` before changing anything. A review's own quoted "evidence" is not
+evidence. This matters most unattended — a repair loop acting on a hallucinated finding
+edits working code to satisfy a bug that was never there.
+
+---
+
 ## 7. Known gaps — do not assume these are handled
 
 - **Rate limits are unmapped.** `within_limit` is the only status ever observed; the

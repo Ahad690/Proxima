@@ -56,7 +56,16 @@ function parseArgs(argv) {
         // exercise ask_claude, which is a thin slice of the surface it fronts.
         else if (k === '--tool') { a.tool = v; i++; }
         else if (k === '--arg') {
+            // Must reject eq < 1 explicitly. indexOf returns -1 with no '=', and
+            // slice(0, -1) then silently drops the key's last character while slice(0)
+            // puts the whole token in the value — the tool gets a mangled argument and
+            // nothing reports it. eq === 0 is an empty key, equally wrong. Found in code
+            // review of e6045142.
             const eq = String(v).indexOf('=');
+            if (eq < 1) {
+                console.error('--arg needs key=value (got "' + v + '")');
+                process.exit(1);
+            }
             const key = v.slice(0, eq), raw = v.slice(eq + 1);
             let val = raw;
             if (raw === 'true') val = true;
@@ -141,6 +150,34 @@ function mcpCall(toolName, args, timeoutMs) {
     });
 }
 
+/**
+ * Print the reply and exit, WITHOUT losing the tail of it.
+ *
+ * process.exit() abandons queued async writes, and stdout to a pipe is async — which is
+ * exactly how this script's output is consumed, since the whole point is for a calling
+ * agent to capture the reply. So `console.log(text); process.exit(0)` can truncate or
+ * drop the payload, the more readily the longer it is. A supervisor turn returning a long
+ * plan is the worst case. Found in code review of e6045142.
+ *
+ * fs.writeSync on fd 1 blocks until the bytes are handed over. EAGAIN is possible on a
+ * full non-blocking pipe, so it retries rather than dropping the remainder.
+ */
+function emitAndExit(text, code) {
+    const buf = Buffer.from(String(text) + '\n', 'utf8');
+    let off = 0;
+    while (off < buf.length) {
+        try { off += fs.writeSync(1, buf, off, buf.length - off); }
+        catch (e) {
+            if (e.code === 'EAGAIN') continue;
+            // Nothing better left to try than the async path: a possibly-truncated
+            // write still beats no output.
+            try { process.stdout.write(buf.slice(off)); } catch (e2) { /* give up */ }
+            break;
+        }
+    }
+    process.exit(code);
+}
+
 const loadState = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return {}; } };
 
 (async () => {
@@ -153,8 +190,7 @@ const loadState = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); 
         const r = await mcpCall(args.tool, args.toolArgs, args.timeoutMs);
         console.error('[supervisor] ' + ((Date.now() - t) / 1000).toFixed(1) + 's' +
             (r.isError ? ' | TOOL REPORTED ERROR' : ''));
-        console.log(r.text);
-        process.exit(r.isError ? 2 : 0);
+        emitAndExit(r.text, r.isError ? 2 : 0);
     }
 
     const message = args.message !== null
@@ -168,6 +204,10 @@ const loadState = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); 
 
     const toolArgs = { message: message };
     if (convId) toolArgs.conversation_id = convId;
+    // --no-tag set args.tag and stopped there, so the flag did nothing and every turn was
+    // tagged regardless. Forwarded only when false: omitting it leaves the MCP tool's own
+    // default in charge. Found in code review of 3b6e3047.
+    if (args.tag === false) toolArgs.tag = false;
     if (args.isNew) toolArgs.new_chat = true;
     if (args.attach.length) toolArgs.attachments = args.attach;
     if (args.effort) toolArgs.effort = args.effort;
@@ -201,6 +241,5 @@ const loadState = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); 
 
     console.error('[supervisor] ' + secs + 's | thread ' + (learned || 'unknown') +
         ' | turn ' + (st.turns || '?') + (res.isError ? ' | TOOL REPORTED ERROR' : ''));
-    console.log(res.text);
-    process.exit(res.isError ? 2 : 0);
+    emitAndExit(res.text, res.isError ? 2 : 0);
 })().catch((e) => { console.error('[supervisor] FAILED: ' + e.message); process.exit(1); });
