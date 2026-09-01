@@ -144,6 +144,7 @@
         var buffer = '';
         var blocks = {};          // index -> { type, name, pj }
         var artifacts = [];       // { path, description, fileText }
+        var toolCalls = [];       // EVERY tool_use block, not just create_file
         var meta = { model: null, stopReason: null, limit: null, format: 'legacy' };
 
         while (true) {
@@ -195,6 +196,35 @@
                 }
                 if (parsed.type === 'content_block_stop') {
                     var bs = blocks[parsed.index];
+                    // Record the NAME of every sandbox tool the turn used. Only create_file
+                    // is mined for content below, and that is the whole problem: a file the
+                    // model EDITS rather than creates is written by some other tool, produces
+                    // no create_file block, and so the send path reports no artifact at all
+                    // while the file sits in the sandbox perfectly intact. Measured: create a
+                    // file then edit it, and turn 2 reports 0 artifacts.
+                    //
+                    // The names are what makes that diagnosable instead of invisible, and they
+                    // are also the cheap trigger for the reconciliation in main-v2: a turn with
+                    // no tool_use blocks touched no files, so it can skip the listing entirely.
+                    // Inputs are summarised, never kept whole — a create_file input holds the
+                    // entire file body, and lastMeta is returned on every single reply.
+                    if (bs && bs.type === 'tool_use') {
+                        var rec = { name: bs.name || null };
+                        if (bs.pj) {
+                            try {
+                                var inp = JSON.parse(bs.pj);
+                                rec.input = {};
+                                for (var ik in inp) {
+                                    if (!Object.prototype.hasOwnProperty.call(inp, ik)) continue;
+                                    var iv = inp[ik];
+                                    rec.input[ik] = (typeof iv === 'string' && iv.length > 200)
+                                        ? iv.slice(0, 200) + '…(' + iv.length + ' chars)'
+                                        : iv;
+                                }
+                            } catch (e) { rec.unparsedBytes = bs.pj.length; }
+                        }
+                        toolCalls.push(rec);
+                    }
                     if (bs && bs.type === 'tool_use' && bs.name === 'create_file' && bs.pj) {
                         try {
                             var f = JSON.parse(bs.pj);
@@ -226,6 +256,7 @@
         }
 
         reader.releaseLock();
+        meta.toolCalls = toolCalls;
         return { text: fullText, artifacts: artifacts, meta: meta };
     }
 
@@ -484,7 +515,8 @@
                     clearTimeout(retryTimeoutId);
                     _lastMeta = { artifacts: r.artifacts, model: r.meta.model,
                         stopReason: r.meta.stopReason, limit: r.meta.limit,
-                        format: r.meta.format, conversationId: _convId };
+                        format: r.meta.format, conversationId: _convId,
+                        toolCalls: r.meta.toolCalls || [] };
                     return r.text;
                 }
 
@@ -496,7 +528,8 @@
             clearTimeout(timeoutId);
             _lastMeta = { artifacts: r.artifacts, model: r.meta.model,
                 stopReason: r.meta.stopReason, limit: r.meta.limit,
-                format: r.meta.format, conversationId: _convId };
+                format: r.meta.format, conversationId: _convId,
+                toolCalls: r.meta.toolCalls || [] };
             if (r.artifacts.length) {
             console.log('[Proxima Claude] ' + r.artifacts.length + ' artifact(s): ' +
                 r.artifacts.map(function (a) { return a.path + ' (' + a.fileText.length + 'B)'; }).join(', '));

@@ -377,7 +377,10 @@ class AIProvider {
             if (ok.length) {
                 const lines = ok.map((x) => {
                     const desc = x.description ? ', ' + x.description : '';
-                    return '- ' + x.localPath + ' (' + x.bytes + ' bytes' + desc + ')';
+                    // Mark the ones the stream never announced. They are only here
+                    // because the sandbox listing was diffed after the turn.
+                    const how = x.via === 'listing' ? ' [edited file, recovered from sandbox]' : '';
+                    return '- ' + x.localPath + ' (' + x.bytes + ' bytes' + desc + ')' + how;
                 });
                 text += '\n\n---\n**' + ok.length +
                     ' artifact(s) saved to disk:**\n' + lines.join('\n');

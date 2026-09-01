@@ -647,6 +647,19 @@ async function handleMCPRequest(request) {
                         return { success: true, provider, result, fileError: fileErr.message };
                     }
                 } else {
+                    // Fingerprint the sandbox BEFORE sending, so afterwards we can tell which
+                    // files this turn touched rather than which files exist. Skipped for a new
+                    // chat (nothing to compare against) and for non-claude providers.
+                    let claudePre = null;
+                    if (provider === 'claude' && !data.newChat) {
+                        const preCid = data.conversationId ||
+                            await browserManager.executeScript('claude',
+                                'window.__proximaClaude && window.__proximaClaude.getConversation ? window.__proximaClaude.getConversation() : null')
+                                .catch(() => null);
+                        if (preCid) {
+                            claudePre = claudeFingerprint(await claudeListOutputs(preCid, 1));
+                        }
+                    }
                     const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
                     // Claude threads are addressable by uuid, and the caller cannot resume
                     // one it was never told about — so hand it back every time.
@@ -660,12 +673,21 @@ async function handleMCPRequest(request) {
                             await browserManager.executeScript('claude',
                                 'window.__proximaClaude && window.__proximaClaude.getConversation ? window.__proximaClaude.getConversation() : null')
                                 .catch(() => null);
+                        // The stream only ever reports create_file. Ask the sandbox what
+                        // actually changed, and pull just those files. See
+                        // reconcileClaudeArtifacts for why this is a diff and not a bulk pull.
+                        const streamArtifacts = (parsedMeta && parsedMeta.artifacts) || [];
+                        const toolCalls = (parsedMeta && parsedMeta.toolCalls) || [];
+                        const recovered = await reconcileClaudeArtifacts(
+                            conversationId, claudePre, streamArtifacts, toolCalls);
                         const artifacts = saveClaudeArtifacts(
-                            parsedMeta && parsedMeta.artifacts, conversationId);
+                            streamArtifacts.concat(recovered), conversationId);
                         const attachedNow = _claudeUploadSummary;
                         _claudeUploadSummary = null;
                         return {
                             success: true, provider, result, conversationId, artifacts,
+                            toolCalls: toolCalls.map((t) => t.name),
+                            artifactsRecovered: recovered.length,
                             attachments: attachedNow,
                             model: parsedMeta && parsedMeta.model,
                             stopReason: parsedMeta && parsedMeta.stopReason
@@ -3359,6 +3381,109 @@ async function uploadAttachmentsToClaude(filePaths, promptPreview) {
     return { conversationId: convId, files: slots.files, attachments: slots.attachments, summary: slots.summary };
 }
 
+// ─── Claude sandbox reconciliation ───────────────
+// THE GAP THIS CLOSES. The stream announces a file only when the model calls
+// `create_file`. A file the model EDITS instead is written by a different sandbox tool,
+// emits no create_file block, and so the send path reports zero artifacts while the file
+// sits in the sandbox fully intact. Measured: create a file, then edit it in the next
+// turn — turn 2 reported 0 artifacts and the edit was simply never transported.
+//
+// wiggle/list-files does see it. An edit bumps BOTH size and created_at (12 -> 24 bytes,
+// created_at moved 09:39:35 -> 09:39:48 on the probe), so a before/after diff identifies
+// exactly which files a turn touched without trusting any clock: we compare the
+// conversation's own listing against itself.
+//
+// Deliberately a DIFF and not a bulk pull. The obvious workaround — download every
+// output — does work, and it is what a caller is reduced to today, but a real
+// conversation here holds 60+ outputs, so it means dozens of downloads and dozens of
+// local rewrites to catch one edited file. This pulls only what changed.
+//
+// The listing is EVENTUALLY CONSISTENT: immediately after the turn it still showed the
+// pre-edit size, and caught up a few seconds later. So it polls, and stops the moment it
+// sees a change rather than always waiting out the deadline.
+const CLAUDE_RECONCILE_MS = 15000;      // ceiling; the observed lag was ~6s
+const CLAUDE_RECONCILE_EVERY = 2500;
+// Tools that only READ. A turn using nothing else wrote nothing, so it can skip the
+// listing entirely and pay no latency at all. Anything not on this list is treated as a
+// possible write, because guessing wrong in that direction only costs one HTTP call,
+// while guessing wrong the other way loses a file silently.
+const CLAUDE_READ_ONLY_TOOLS = ['view'];
+
+async function claudeListOutputs(cid, attempts) {
+    const raw = await browserManager.executeScript('claude',
+        `window.__proximaClaude.listArtifacts(${JSON.stringify(cid)}, ${attempts || 1})` +
+        `.then(function(x){return JSON.stringify(x);}).catch(function(){return "[]";})`)
+        .catch(() => '[]');
+    let files = [];
+    try { files = JSON.parse(raw) || []; } catch (e) { files = []; }
+    return files.filter((f) => f && f.kind === 'output');
+}
+
+/** path -> fingerprint, so "changed" needs no clock and no server cooperation. */
+function claudeFingerprint(files) {
+    const m = {};
+    for (const f of files) m[f.path] = String(f.bytes) + '|' + String(f.createdAt);
+    return m;
+}
+
+/** True when the turn used a tool that might have written to the sandbox. */
+function claudeTouchedFiles(toolCalls) {
+    if (!Array.isArray(toolCalls) || !toolCalls.length) return false;
+    return toolCalls.some((t) => t && CLAUDE_READ_ONLY_TOOLS.indexOf(t.name) === -1);
+}
+
+/**
+ * Files this turn created or modified that the stream never announced. Returns entries
+ * shaped like stream artifacts so they merge straight into saveClaudeArtifacts.
+ * Never throws: a reconciliation failure must not fail a send whose answer is already in
+ * hand — it degrades to the old behaviour, and says so in the log.
+ */
+async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls) {
+    if (!cid) return [];
+    if (!claudeTouchedFiles(toolCalls)) return [];
+    const known = {};
+    for (const a of (streamArtifacts || [])) if (a && a.path) known[a.path] = true;
+
+    const baseline = before || {};
+    const hadBaseline = Object.keys(baseline).length > 0;
+    const deadline = Date.now() + CLAUDE_RECONCILE_MS;
+    let changed = [];
+    try {
+        for (;;) {
+            const now = await claudeListOutputs(cid, 1);
+            changed = now.filter((f) => baseline[f.path] !==
+                (String(f.bytes) + '|' + String(f.createdAt)));
+            // A new conversation has no baseline, so everything present is from this turn
+            // and there is nothing to wait for.
+            if (changed.length || !hadBaseline || Date.now() >= deadline) break;
+            await sleep(CLAUDE_RECONCILE_EVERY);
+        }
+    } catch (e) {
+        console.error('[Artifacts] reconciliation could not list ' + cid + ': ' + e.message +
+            ' — falling back to stream-captured artifacts only');
+        return [];
+    }
+
+    const missing = changed.filter((f) => !known[f.path]);
+    if (!missing.length) return [];
+    console.log('[Artifacts] ' + missing.length + ' file(s) changed in the sandbox that the ' +
+        'stream never announced (' + missing.map((f) => f.name).join(', ') + ') — tools used: ' +
+        (toolCalls || []).map((t) => t.name).join(', '));
+
+    const out = [];
+    for (const f of missing) {
+        const text = await browserManager.executeScript('claude',
+            `window.__proximaClaude.downloadArtifact(${JSON.stringify(f.path)}, ${JSON.stringify(cid)})`)
+            .catch(() => null);
+        if (typeof text === 'string') {
+            out.push({ path: f.path, fileText: text, description: f.contentType, viaListing: true });
+        } else {
+            console.error('[Artifacts] ' + f.path + ' changed but could not be downloaded');
+        }
+    }
+    return out;
+}
+
 // ─── Claude artifacts ────────────────────────────
 // An artifact is a file the model wrote in its sandbox; the content arrives inside
 // the completion stream (see providers/claude-engine.js). Returning it as a string
@@ -3396,7 +3521,11 @@ function saveClaudeArtifacts(artifacts, conversationId) {
             fs.writeFileSync(local, a.fileText || '', 'utf8');
             saved.push({
                 path: a.path, localPath: local, bytes: (a.fileText || '').length,
-                description: a.description || null
+                description: a.description || null,
+                // How it was found. A file recovered from the sandbox listing is one the
+                // stream never mentioned — worth surfacing, because that is the class of
+                // file that used to go missing entirely.
+                via: a.viaListing ? 'listing' : 'stream'
             });
         } catch (e) {
             console.error('[Claude] failed to save artifact ' + a.path + ': ' + e.message);
