@@ -164,13 +164,26 @@ function mcpCall(toolName, args, timeoutMs) {
  */
 function emitAndExit(text, code) {
     const buf = Buffer.from(String(text) + '\n', 'utf8');
+    // The EAGAIN retry MUST yield and MUST be bounded. `continue` on its own is an
+    // unbounded busy-spin: with a stalled reader it pegs a core and never exits, which
+    // in an unattended supervisor loop is worse than the truncation it was guarding
+    // against. Measured with a stubbed writeSync: 5,000,000 syscalls in 53s of CPU,
+    // zero bytes of progress, no exit.
+    //
+    // Atomics.wait on a SharedArrayBuffer is a genuine synchronous sleep — the only kind
+    // available here, since the whole point is to finish before process.exit.
+    const parked = new Int32Array(new SharedArrayBuffer(4));
+    const nap = (ms) => { try { Atomics.wait(parked, 0, 0, ms); } catch (e) { /* no SAB */ } };
+    const deadline = Date.now() + 5000;
     let off = 0;
     while (off < buf.length) {
         try { off += fs.writeSync(1, buf, off, buf.length - off); }
         catch (e) {
-            if (e.code === 'EAGAIN') continue;
-            // Nothing better left to try than the async path: a possibly-truncated
-            // write still beats no output.
+            if (e.code === 'EAGAIN' && Date.now() < deadline) { nap(1); continue; }
+            // Last resort. This is the path that CAN truncate, so it says so on stderr
+            // rather than losing the tail quietly.
+            console.error('[supervisor] stdout stalled after ' + off + '/' + buf.length +
+                ' bytes (' + (e.code || e.message) + '); the reply may be truncated');
             try { process.stdout.write(buf.slice(off)); } catch (e2) { /* give up */ }
             break;
         }
