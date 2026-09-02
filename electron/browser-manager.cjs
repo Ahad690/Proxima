@@ -636,9 +636,13 @@ class BrowserManager {
             () => wc.debugger.sendCommand('HeapProfiler.collectGarbage'));
         await step('forciblyPurge', 8000,
             () => wc.debugger.sendCommand('Memory.forciblyPurgeJavaScriptMemory'));
-        if (wasAttached === false) {
-            await step('detach', 2000, () => { wc.debugger.detach(); return true; });
-        }
+        // Detach UNCONDITIONALLY. The first version detached inside a `finally` after
+        // bare awaits; when the CDP call hung, the finally never ran and the debugger was
+        // left attached to all four renderers, which wedged them — every provider went
+        // unresponsive to executeJavaScript and the app had to be restarted. A detach on a
+        // webContents that is not attached simply throws, and the step swallows it, so
+        // attempting it always is strictly safer than deciding whether to.
+        await step('detach', 2000, () => { wc.debugger.detach(); return true; });
 
         const after = (await step('read-heap-after', 5000, heap)) || 0;
         return { provider, before, after, freed: Math.max(0, before - after), steps };
