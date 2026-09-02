@@ -10,6 +10,9 @@ class BrowserManager {
         this.activeProvider = null;
         this.isDestroyed = false;
         this.authPopups = new Map();
+        // Views whose renderer has been killed to reclaim memory. Kept only so
+        // teardown can close them; nothing reads from here.
+        this.orphans = [];
 
         // Provider configurations
         this.providers = {
@@ -480,28 +483,69 @@ class BrowserManager {
     // dance is a one-time cost and the cookies outlive the renderer. Unload a provider you
     // are not using, and the next call to it transparently loads it again.
 
-    /** Destroy a provider's renderer, keeping its cookies. Returns true if one was live. */
-    unloadProvider(provider) {
+    /**
+     * Destroy a provider's renderer, keeping its cookies. Returns a small report.
+     *
+     * The first version of this called `webContents.close()` and freed exactly nothing:
+     * measured 362MB before and 362MB after, with the process count unchanged at 6. The
+     * reason is in the API — Electron 33's WebContents has no public `destroy()`, and
+     * `close()` is documented as behaving "as if the web content had called
+     * window.close()", which for a BrowserView with no window semantics is a no-op. Worse,
+     * the map entry was deleted anyway, so the renderer was orphaned and still resident:
+     * a leak dressed as a saving.
+     *
+     * What actually reclaims the memory, in this order:
+     *   1. navigate to about:blank — deterministically drops the site's JS heap and DOM,
+     *      and is the part that works even if step 3 is ever restricted.
+     *   2. detach from the window, so nothing holds it for layout.
+     *   3. forcefullyCrashRenderer() — the only call in this version that ends the
+     *      renderer PROCESS.
+     * The webContents object survives step 3 as a husk, so it is kept in `orphans` and
+     * closed at teardown rather than left for the GC to worry about.
+     */
+    async unloadProvider(provider) {
         const view = this.views.get(provider);
-        if (!view) return false;
+        if (!view) return { provider, unloaded: false, reason: 'not resident' };
+        const wc = view.webContents;
+        const steps = [];
+
+        // 1. Drop the page. This is the reliable half of the saving.
+        try {
+            if (wc && !wc.isDestroyed()) {
+                await Promise.race([
+                    wc.loadURL('about:blank'),
+                    new Promise((r) => setTimeout(r, 5000))
+                ]);
+                steps.push('blanked');
+            }
+        } catch (e) { steps.push('blank-failed:' + e.message); }
+
+        // 2. Detach from the window.
         try {
             if (this.mainWindow && !this.mainWindow.isDestroyed()) {
                 this.mainWindow.removeBrowserView(view);
+                steps.push('detached');
             }
-        } catch (e) { /* already detached */ }
+        } catch (e) { steps.push('detach-failed:' + e.message); }
+
+        // 3. End the renderer process. Providers sit in separate `persist:` partitions,
+        // so they are separate site instances and this does not take another provider
+        // down with it — but that is an assumption worth re-checking if process counts
+        // ever move by more than one per unload.
         try {
-            if (view.webContents && !view.webContents.isDestroyed()) {
-                // close() releases the renderer process; destroy() on the view itself is
-                // not part of the public API in this Electron line.
-                view.webContents.close();
+            if (wc && !wc.isDestroyed()) {
+                wc.forcefullyCrashRenderer();
+                steps.push('renderer-killed');
             }
-        } catch (e) { /* already gone */ }
+        } catch (e) { steps.push('kill-failed:' + e.message); }
+
         this.views.delete(provider);
+        this.orphans.push(view);
         if (this.activeProvider === provider) this.activeProvider = null;
         const cfg = this.providers[provider];
-        console.log(`[${provider}] renderer unloaded — cookies kept in ` +
+        console.log(`[${provider}] unloaded (${steps.join(', ')}) — cookies kept in ` +
             (cfg ? cfg.partition : 'its partition'));
-        return true;
+        return { provider, unloaded: true, steps };
     }
 
     /**
@@ -547,30 +591,59 @@ class BrowserManager {
     }
 
     /**
-     * Ask an idle renderer to hand back what it can without being destroyed. Uses the
-     * CDP Memory domain, which is the only route to a real heap purge from here — a
-     * plain GC hint is not exposed to the main process. Non-destructive: no reload, no
-     * navigation, no lost auth. Worth doing to a provider you want to keep hot.
+     * Ask an idle renderer to hand back what it can without being destroyed. Uses the CDP
+     * Memory domain, the only route to a real heap purge from the main process — a plain GC
+     * hint is not exposed here. Non-destructive: no reload, no navigation, no lost auth.
+     *
+     * EVERY step is timed out individually, and the outcome of each is returned to the
+     * caller rather than only logged. The first version of this wrapped the CDP calls in
+     * try/catch and awaited them bare; it hung for every provider, and because the failure
+     * was invisible from outside the process there was nothing to diagnose but a stopwatch.
+     * An IPC action that can block forever is a liability in an unattended system, and one
+     * that fails without saying where is worse than one that fails loudly.
      */
     async purgeProvider(provider) {
         const wc = this.getWebContents(provider);
-        if (!wc) return null;
-        const before = await wc.executeJavaScript(
-            '(performance.memory && performance.memory.usedJSHeapSize) || 0').catch(() => 0);
-        let attached = false;
-        try {
-            if (!wc.debugger.isAttached()) { wc.debugger.attach('1.3'); attached = true; }
-            await wc.debugger.sendCommand('HeapProfiler.collectGarbage').catch(() => { });
-            await wc.debugger.sendCommand('Memory.forciblyPurgeJavaScriptMemory').catch(() => { });
-        } catch (e) {
-            console.error(`[${provider}] purge failed: ${e.message}`);
-        } finally {
-            try { if (attached) wc.debugger.detach(); } catch (e) { /* ignore */ }
+        if (!wc) return { provider, skipped: 'not resident' };
+
+        const steps = [];
+        const step = async (label, ms, fn) => {
+            const t = Date.now();
+            try {
+                const v = await Promise.race([
+                    Promise.resolve().then(fn),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), ms))
+                ]);
+                steps.push(label + ' ok ' + (Date.now() - t) + 'ms');
+                return v;
+            } catch (e) {
+                steps.push(label + ' FAILED (' + e.message + ') ' + (Date.now() - t) + 'ms');
+                return null;
+            }
+        };
+
+        const heap = () => wc.isDestroyed() ? 0 : wc.executeJavaScript(
+            '(performance.memory && performance.memory.usedJSHeapSize) || 0', true);
+
+        const before = (await step('read-heap-before', 5000, heap)) || 0;
+
+        const wasAttached = await step('is-attached', 2000,
+            () => wc.debugger.isAttached());
+        if (wasAttached === false) {
+            await step('attach', 5000, () => { wc.debugger.attach('1.3'); return true; });
         }
-        const after = await wc.executeJavaScript(
-            '(performance.memory && performance.memory.usedJSHeapSize) || 0').catch(() => 0);
-        return { provider, before, after, freed: Math.max(0, before - after) };
+        await step('collectGarbage', 8000,
+            () => wc.debugger.sendCommand('HeapProfiler.collectGarbage'));
+        await step('forciblyPurge', 8000,
+            () => wc.debugger.sendCommand('Memory.forciblyPurgeJavaScriptMemory'));
+        if (wasAttached === false) {
+            await step('detach', 2000, () => { wc.debugger.detach(); return true; });
+        }
+
+        const after = (await step('read-heap-after', 5000, heap)) || 0;
+        return { provider, before, after, freed: Math.max(0, before - after), steps };
     }
+
     /** Show provider BrowserView */
     showProvider(provider, bounds) {
         if (this.isDestroyed || !this.mainWindow || this.mainWindow.isDestroyed()) return null;
@@ -757,6 +830,11 @@ class BrowserManager {
         }
         this.authPopups.clear();
 
+
+        for (const view of this.orphans) {
+            try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch (e) { }
+        }
+        this.orphans = [];
 
         for (const [provider, view] of this.views) {
             try {

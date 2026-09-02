@@ -572,12 +572,20 @@ async function handleMCPRequest(request) {
                 if (!targets.length) {
                     return { success: false, error: 'name a provider, or pass data.providers' };
                 }
-                const unloaded = [];
+                // unloadProvider is async (it blanks the page before killing the
+                // renderer). Without the await this pushed a pending Promise, which is
+                // truthy, so every provider was reported unloaded whether it was or not.
+                const reports = [];
                 for (const p of targets) {
-                    if (browserManager.unloadProvider(p)) unloaded.push(p);
+                    reports.push(await browserManager.unloadProvider(p));
                 }
+                // Chromium reaps the process a moment after the crash, so a memory report
+                // taken immediately would understate the saving and read as a failure.
+                await sleep(1500);
                 return {
-                    success: true, unloaded,
+                    success: true,
+                    unloaded: reports.filter((r) => r.unloaded).map((r) => r.provider),
+                    reports,
                     stillLoaded: browserManager.getInitializedProviders(),
                     memory: processMemoryReport()
                 };
