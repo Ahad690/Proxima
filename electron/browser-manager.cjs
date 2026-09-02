@@ -737,7 +737,17 @@ class BrowserManager {
     }
 
     async isLoggedIn(provider) {
-        const webContents = this.getWebContents(provider);
+        // MUST load the provider rather than answer from whether it happens to be
+        // resident. Returning false for an unloaded provider conflates "no renderer" with
+        // "not authenticated", and those have opposite remedies: one needs a page load,
+        // the other needs the user to sign in. Measured before this fix: unload chatgpt,
+        // ask isLoggedIn, get `false` back in 0.0s on an account that was perfectly
+        // logged in — an orchestrator acting on that would start a pointless OAuth flow.
+        //
+        // Cheap enough to be correct: this is called by the MCP layer and the settings UI,
+        // never inside a send loop, and the cookies it checks against survive in the
+        // persist: partition regardless.
+        const webContents = await this.ensureProvider(provider);
         if (!webContents) return false;
 
         try {
