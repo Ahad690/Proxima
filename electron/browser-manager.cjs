@@ -465,6 +465,112 @@ class BrowserManager {
         });
     }
 
+    // ─── Memory: unload and reload providers on demand ───
+    // Each provider is a full Chromium renderer running that vendor's React app, and they
+    // are not cheap: measured JS heaps of qwen 84MB, chatgpt 75MB, claude 71MB,
+    // perplexity 38MB, with process RSS running to roughly twice the heap once DOM,
+    // layout, compositor and the V8 baseline are counted. Four providers plus the app's
+    // own window came to ~583MB of renderer RSS.
+    //
+    // Hiding the window does NOT reclaim any of that — a hidden BrowserView keeps its
+    // renderer. The only way to get the memory back is to destroy the renderer.
+    //
+    // What makes that safe is the session partition. Auth lives in `persist:<provider>`
+    // on disk, not in the view, so destroying a view does not log anyone out: the OAuth
+    // dance is a one-time cost and the cookies outlive the renderer. Unload a provider you
+    // are not using, and the next call to it transparently loads it again.
+
+    /** Destroy a provider's renderer, keeping its cookies. Returns true if one was live. */
+    unloadProvider(provider) {
+        const view = this.views.get(provider);
+        if (!view) return false;
+        try {
+            if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                this.mainWindow.removeBrowserView(view);
+            }
+        } catch (e) { /* already detached */ }
+        try {
+            if (view.webContents && !view.webContents.isDestroyed()) {
+                // close() releases the renderer process; destroy() on the view itself is
+                // not part of the public API in this Electron line.
+                view.webContents.close();
+            }
+        } catch (e) { /* already gone */ }
+        this.views.delete(provider);
+        if (this.activeProvider === provider) this.activeProvider = null;
+        const cfg = this.providers[provider];
+        console.log(`[${provider}] renderer unloaded — cookies kept in ` +
+            (cfg ? cfg.partition : 'its partition'));
+        return true;
+    }
+
+    /**
+     * Guarantee a provider is live and its app is loaded, creating it if it was never
+     * started or has been unloaded. Safe to call on every request: it is a no-op when the
+     * view is already up, so the cost falls only on the first call after an unload.
+     */
+    async ensureProvider(provider) {
+        if (this.isDestroyed) return null;
+        const config = this.providers[provider];
+        if (!config) throw new Error(`Unknown provider: ${provider}`);
+
+        let wc = this.getWebContents(provider);
+        if (wc) return wc;
+
+        console.log(`[${provider}] not resident — loading ${config.url}`);
+        const view = this.createView(provider);
+        if (!view) return null;
+        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+            // Attached but parked off-screen: a BrowserView must belong to a window to
+            // run at all, and the app positions views itself when one is shown.
+            try {
+                this.mainWindow.addBrowserView(view);
+                view.setBounds({ x: -20000, y: 0, width: 1200, height: 800 });
+            } catch (e) { /* bounds are cosmetic here */ }
+        }
+        wc = this.getWebContents(provider);
+        if (!wc) return null;
+
+        await wc.loadURL(config.url);
+        // Wait for the app to actually boot, not merely for the document. Qwen in
+        // particular needs its anti-bot SDK initialised before any signed request, and
+        // returning too early would hand back a renderer that fails its first call.
+        await new Promise((resolve) => {
+            if (wc.isDestroyed()) return resolve();
+            if (!wc.isLoading()) return resolve();
+            const done = () => resolve();
+            wc.once('did-finish-load', done);
+            wc.once('did-fail-load', done);
+            setTimeout(done, 30000);
+        });
+        return wc.isDestroyed() ? null : wc;
+    }
+
+    /**
+     * Ask an idle renderer to hand back what it can without being destroyed. Uses the
+     * CDP Memory domain, which is the only route to a real heap purge from here — a
+     * plain GC hint is not exposed to the main process. Non-destructive: no reload, no
+     * navigation, no lost auth. Worth doing to a provider you want to keep hot.
+     */
+    async purgeProvider(provider) {
+        const wc = this.getWebContents(provider);
+        if (!wc) return null;
+        const before = await wc.executeJavaScript(
+            '(performance.memory && performance.memory.usedJSHeapSize) || 0').catch(() => 0);
+        let attached = false;
+        try {
+            if (!wc.debugger.isAttached()) { wc.debugger.attach('1.3'); attached = true; }
+            await wc.debugger.sendCommand('HeapProfiler.collectGarbage').catch(() => { });
+            await wc.debugger.sendCommand('Memory.forciblyPurgeJavaScriptMemory').catch(() => { });
+        } catch (e) {
+            console.error(`[${provider}] purge failed: ${e.message}`);
+        } finally {
+            try { if (attached) wc.debugger.detach(); } catch (e) { /* ignore */ }
+        }
+        const after = await wc.executeJavaScript(
+            '(performance.memory && performance.memory.usedJSHeapSize) || 0').catch(() => 0);
+        return { provider, before, after, freed: Math.max(0, before - after) };
+    }
     /** Show provider BrowserView */
     showProvider(provider, bounds) {
         if (this.isDestroyed || !this.mainWindow || this.mainWindow.isDestroyed()) return null;
@@ -530,8 +636,10 @@ class BrowserManager {
     }
 
     async executeScript(provider, script) {
-        const webContents = this.getWebContents(provider);
-        if (!webContents) throw new Error(`Provider ${provider} not initialized`);
+        // Loads the provider if it has been unloaded to save memory. Without this,
+        // unloading anything would turn every later call into "not initialized".
+        const webContents = await this.ensureProvider(provider);
+        if (!webContents) throw new Error(`Provider ${provider} could not be loaded`);
         return await webContents.executeJavaScript(script);
     }
 

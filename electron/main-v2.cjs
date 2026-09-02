@@ -45,6 +45,17 @@ app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 // 3. Disable unnecessary Electron features
 app.commandLine.appendSwitch('disable-features', 'ElectronSerialChooser,OutOfBlinkCors');
 
+// The GPU process cost 93MB on this machine and renders nothing anyone looks at when
+// the window is hidden. Dropped in headless mode only, so a visible window keeps
+// hardware compositing. Must be set before app ready, hence the argv check rather
+// than a settings read (settings load later).
+if (process.argv.includes('--headless') || process.argv.includes('--api-only')) {
+    app.commandLine.appendSwitch('disable-gpu');
+    app.commandLine.appendSwitch('disable-software-rasterizer');
+    app.commandLine.appendSwitch('disable-gpu-compositing');
+    console.log('[Agent Hub] headless: GPU disabled');
+}
+
 // 4. Set the app-wide fallback user agent
 app.userAgentFallback = CHROME_UA;
 
@@ -507,6 +518,30 @@ function startIPCServer() {
     });
 }
 
+/**
+ * Per-process memory, so "Proxima is using too much RAM" can be answered with
+ * numbers. Renderers are listed separately because they are where the weight is:
+ * each provider is a vendor SPA, and hiding the window does not reclaim any of it.
+ */
+function processMemoryReport() {
+    let metrics = [];
+    try { metrics = app.getAppMetrics(); } catch (e) { return null; }
+    const byType = {};
+    let total = 0;
+    for (const m of metrics) {
+        const mb = Math.round(((m.memory && m.memory.workingSetSize) || 0) / 1024);
+        const t = m.type || 'unknown';
+        byType[t] = (byType[t] || 0) + mb;
+        total += mb;
+    }
+    return {
+        totalMB: total,
+        byType,
+        processes: metrics.length,
+        loadedProviders: browserManager ? browserManager.getInitializedProviders() : []
+    };
+}
+
 async function handleMCPRequest(request) {
     const { action, provider, data } = request;
 
@@ -524,6 +559,44 @@ async function handleMCPRequest(request) {
                     pid: process.pid,
                     fileReferenceEnabled
                 };
+
+            // ─── Memory control ──────────────────────────
+            // A provider is a full Chromium renderer running that vendor app.
+            // Auth lives in the persist: session partition, not in the renderer, so
+            // unloading one frees its memory WITHOUT logging out, and the next call
+            // to that provider loads it again by itself.
+            case 'unloadProvider': {
+                const targets = Array.isArray(data && data.providers)
+                    ? data.providers
+                    : (provider ? [provider] : []);
+                if (!targets.length) {
+                    return { success: false, error: 'name a provider, or pass data.providers' };
+                }
+                const unloaded = [];
+                for (const p of targets) {
+                    if (browserManager.unloadProvider(p)) unloaded.push(p);
+                }
+                return {
+                    success: true, unloaded,
+                    stillLoaded: browserManager.getInitializedProviders(),
+                    memory: processMemoryReport()
+                };
+            }
+
+            case 'purgeProvider': {
+                const targets = Array.isArray(data && data.providers)
+                    ? data.providers
+                    : (provider ? [provider] : browserManager.getInitializedProviders());
+                const results = [];
+                for (const p of targets) {
+                    const r = await browserManager.purgeProvider(p).catch(() => null);
+                    if (r) results.push(r);
+                }
+                return { success: true, purged: results, memory: processMemoryReport() };
+            }
+
+            case 'memory':
+                return { success: true, memory: processMemoryReport() };
 
             case 'initProvider':
                 browserManager.createView(provider);
@@ -1001,9 +1074,11 @@ async function handleMCPRequest(request) {
 // Provider-Specific Interaction Functions
 
 async function sendMessageToProvider(provider, message, forceDOM = false, options = {}) {
-    const webContents = browserManager.getWebContents(provider);
+    // Loads the provider if it was unloaded to reclaim memory. Auth survives in the
+    // persist: partition, so this costs a page load and nothing else.
+    const webContents = await browserManager.ensureProvider(provider);
     if (!webContents) {
-        throw new Error(`Provider ${provider} not initialized`);
+        throw new Error(`Provider ${provider} could not be loaded`);
     }
 
     // API-first approach — direct fetch + SSE, skip when forceDOM=true
@@ -1705,9 +1780,11 @@ async function getResponseWithTypingStatus(provider) {
         };
     }
 
-    const webContents = browserManager.getWebContents(provider);
+    // Loads the provider if it was unloaded to reclaim memory. Auth survives in the
+    // persist: partition, so this costs a page load and nothing else.
+    const webContents = await browserManager.ensureProvider(provider);
     if (!webContents) {
-        throw new Error(`Provider ${provider} not initialized`);
+        throw new Error(`Provider ${provider} could not be loaded`);
     }
 
     // Capture OLD fingerprint BEFORE getting response (for detecting new vs old responses)
@@ -1806,9 +1883,11 @@ async function getResponseWithTypingStatus(provider) {
 }
 
 async function getProviderResponse(provider, customSelector = null) {
-    const webContents = browserManager.getWebContents(provider);
+    // Loads the provider if it was unloaded to reclaim memory. Auth survives in the
+    // persist: partition, so this costs a page load and nothing else.
+    const webContents = await browserManager.ensureProvider(provider);
     if (!webContents) {
-        throw new Error(`Provider ${provider} not initialized`);
+        throw new Error(`Provider ${provider} could not be loaded`);
     }
 
     // Qwen is API-only and this path is actively DESTRUCTIVE for it: the DOM
@@ -3730,9 +3809,11 @@ async function checkFileAttachment(provider) {
 
 // Upload file to AI provider chat using file input manipulation
 async function uploadFileToProvider(provider, filePath) {
-    const webContents = browserManager.getWebContents(provider);
+    // Loads the provider if it was unloaded to reclaim memory. Auth survives in the
+    // persist: partition, so this costs a page load and nothing else.
+    const webContents = await browserManager.ensureProvider(provider);
     if (!webContents) {
-        throw new Error(`Provider ${provider} not initialized`);
+        throw new Error(`Provider ${provider} could not be loaded`);
     }
 
 
