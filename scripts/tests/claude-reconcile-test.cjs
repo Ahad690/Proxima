@@ -72,8 +72,10 @@ const browserManager = {
 const sleep = (ms) => new Promise((r) => setTimeout(r, 1));
 
 const code = [
-    grab(/const CLAUDE_RECONCILE_MS[\s\S]*?const CLAUDE_RECONCILE_FLOOR_MS = \d+;/, 'consts'),
-    grab(/const CLAUDE_READ_ONLY_TOOLS = \['view'\];/, 'read-only list'),
+    // Lifted through the cap constant, which sits after the read-only tool list, so both
+    // arrive in one grab. Anchoring on the list's literal contents broke the moment tools
+    // were added to it — a test that fails because the code improved is a bad test.
+    grab(/const CLAUDE_RECONCILE_MS[\s\S]*?const CLAUDE_RECONCILE_MAX_FILES = \d+;/, 'consts'),
     grab(/async function claudeListOutputs\([\s\S]*?\n\}/, 'claudeListOutputs'),
     grab(/function claudeFingerprint\([\s\S]*?\n\}/, 'claudeFingerprint'),
     grab(/function claudeToolPaths\([\s\S]*?\n\}/, 'claudeToolPaths'),
@@ -172,6 +174,29 @@ const ok = (cond, label) => {
         [{ path: P, fileText: CREATED }], createThenEdit);
     ok(cte.length === 1 && cte[0].fileText === FINAL,
         'a file created AND edited in one turn is re-fetched, not left at the streamed body');
+    // == memory_read and present_files must not trigger a reconciliation. Both were seen
+    // on the wire, neither can change a file, and an unlisted non-writing tool makes an
+    // ordinary turn pay the whole reconciliation window.
+    reset([entry(OLD_B, T1)], [OLD]);
+    const readish = await api.reconcileClaudeArtifacts('c1', baseline, [],
+        [{ name: 'memory_read', input: {} }, { name: 'present_files', input: {} }]);
+    ok(readish.length === 0 && listPolls === 0,
+        'memory_read + present_files do not touch the listing');
+
+    // == The cap. A writing tool that names no path falls back to a full diff, and with
+    // no baseline that means every output looks changed — the 60-file bulk download this
+    // feature exists to avoid.
+    const many = [];
+    for (let i = 0; i < 12; i++) {
+        many.push({ path: '/mnt/user-data/outputs/f' + i + '.md', kind: 'output',
+            name: 'f' + i + '.md', bytes: 10, createdAt: '2026-09-01T09:39:' +
+            String(10 + i) + '.000000Z', contentType: 'text/plain' });
+    }
+    listPolls = 0; downloads = 0; LISTING = [many]; CONTENT = ['xxxxxxxxxx'];
+    const capped = await api.reconcileClaudeArtifacts('c1', [], [],
+        [{ name: 'bash_tool', input: {} }]);
+    ok(capped.length <= 5, 'a no-path writing tool cannot pull more than the cap (' + capped.length + ')');
+    ok(downloads <= 5, 'and does not download more than the cap either (' + downloads + ')');
     console.log(fails ? '\n' + fails + ' FAILURE(S)' : '\nall reconciliation assertions passed');
     process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error('ERR ' + e.message); process.exit(1); });

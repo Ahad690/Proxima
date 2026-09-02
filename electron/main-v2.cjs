@@ -3521,7 +3521,25 @@ const CLAUDE_RECONCILE_FLOOR_MS = 10000;
 // listing entirely and pay no latency at all. Anything not on this list is treated as a
 // possible write, because guessing wrong in that direction only costs one HTTP call,
 // while guessing wrong the other way loses a file silently.
-const CLAUDE_READ_ONLY_TOOLS = ['view'];
+// Every one of these was observed on the wire in this session, not guessed:
+//   [create_file]  [str_replace]  [view,str_replace,create_file]  [memory_read,create_file]
+// `view` reads a file, `memory_read` reads memory, `present_files` surfaces something
+// already written. None of them can change a file's bytes, so none should trigger a
+// reconciliation or veto a size prediction. Anything NOT listed here is still treated as
+// a possible write, because being wrong that way costs one listing call while being wrong
+// the other way loses a file silently.
+//
+// A short list here has a real cost: an unlisted non-writing tool makes an ordinary turn
+// pay the full reconciliation window. So if you see an unfamiliar name in the `toolCalls`
+// field of a send response, it belongs in this list or in the writing set below.
+const CLAUDE_READ_ONLY_TOOLS = ['view', 'memory_read', 'present_files'];
+// Hard ceiling on files pulled per turn. The reconciliation normally narrows to the paths
+// the tool calls named, but a writing tool that names NO path falls back to a full
+// before/after diff — and with no baseline to diff against, "everything changed". One
+// real conversation here holds 60+ outputs, and quietly downloading all of them is the
+// exact behaviour this whole feature exists to avoid. Truncation is reported, never
+// silent.
+const CLAUDE_RECONCILE_MAX_FILES = 5;
 
 async function claudeListOutputs(cid, attempts) {
     const raw = await browserManager.executeScript('claude',
@@ -3712,6 +3730,18 @@ async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls)
         if (narrowed.length) missing = narrowed;
     }
     if (!missing.length) return [];
+    // Cap, and SAY SO when it bites. Newest first, so if a turn somehow implicates more
+    // files than a turn plausibly touches, the ones it most likely just wrote are kept.
+    if (missing.length > CLAUDE_RECONCILE_MAX_FILES) {
+        missing.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+        const dropped = missing.slice(CLAUDE_RECONCILE_MAX_FILES);
+        missing = missing.slice(0, CLAUDE_RECONCILE_MAX_FILES);
+        console.error('[Artifacts] ' + (dropped.length + missing.length) + ' files looked changed, ' +
+            'which is more than a single turn plausibly writes — capped at ' +
+            CLAUDE_RECONCILE_MAX_FILES + '. NOT fetched: ' +
+            dropped.map((f) => f.name).join(', ') +
+            '. Use the claude_artifacts tool if one of those is the file you wanted.');
+    }
     console.log('[Artifacts] ' + missing.length + ' file(s) changed in the sandbox that the ' +
         'stream never announced (' + missing.map((f) => f.name).join(', ') + ') — tools used: ' +
         (toolCalls || []).map((t) => t.name).join(', '));
