@@ -45,16 +45,8 @@ app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 // 3. Disable unnecessary Electron features
 app.commandLine.appendSwitch('disable-features', 'ElectronSerialChooser,OutOfBlinkCors');
 
-// The GPU process cost 93MB on this machine and renders nothing anyone looks at when
-// the window is hidden. Dropped in headless mode only, so a visible window keeps
-// hardware compositing. Must be set before app ready, hence the argv check rather
-// than a settings read (settings load later).
-if (process.argv.includes('--headless') || process.argv.includes('--api-only')) {
-    app.commandLine.appendSwitch('disable-gpu');
-    app.commandLine.appendSwitch('disable-software-rasterizer');
-    app.commandLine.appendSwitch('disable-gpu-compositing');
-    console.log('[Agent Hub] headless: GPU disabled');
-}
+// GPU switches are set further down, once loadSettings() is reachable — see the
+// "GPU process" block. They cannot go here because settingsPath is not defined yet.
 
 // 4. Set the app-wide fallback user agent
 app.userAgentFallback = CHROME_UA;
@@ -96,7 +88,13 @@ const defaultSettings = {
     },
     ipcPort: 19222, // Port for MCP server IPC communication
     theme: 'dark',
-    headlessMode: false, // When true, runs in background without visible window
+    headlessMode: false, // When true, runs in background without visible window.
+                         // Window visibility ONLY — it reclaims no memory, because a
+                         // hidden BrowserView keeps its renderer process. For memory,
+                         // see disableGpu below and the unloadProvider IPC action.
+    disableGpu: false,   // Drops the GPU process (~105MB) in exchange for software
+                         // rendering. Independent of headlessMode. Also settable per
+                         // launch with --no-gpu.
     startMinimized: false // Start minimized to system tray
 };
 
@@ -117,6 +115,29 @@ function loadSettings() {
         console.error('Error loading settings:', e);
     }
     return defaultSettings;
+}
+
+// ─── GPU process ─────────────────────────────────
+// Worth ~105MB, and INDEPENDENT of whether the window is visible.
+//
+// An earlier version gated this on --headless, which was wrong twice over. Hiding the
+// window and disabling hardware compositing are unrelated decisions, so coupling them
+// meant you could not keep a visible window without paying for the GPU process, nor run
+// headless without losing compositing. It also made "headless saves no memory" and "run
+// headless to save memory" both true at once, which is a confusing thing to tell anyone.
+// Electron's own headless mode only sets show:false; the GPU saving is this switch and
+// nothing else.
+//
+// Rendering falls back to software while this is on — fine for an automation host, and
+// the thing to turn off first if the UI ever feels sluggish.
+//
+// Must be set before app ready, so it runs at module level; it sits here rather than with
+// the other appendSwitch calls because settingsPath is not defined until further up.
+if (process.argv.includes('--no-gpu') || loadSettings().disableGpu === true) {
+    app.commandLine.appendSwitch('disable-gpu');
+    app.commandLine.appendSwitch('disable-software-rasterizer');
+    app.commandLine.appendSwitch('disable-gpu-compositing');
+    console.log('[Agent Hub] GPU process disabled — software rendering');
 }
 
 function saveSettings(settings) {
