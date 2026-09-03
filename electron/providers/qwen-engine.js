@@ -621,7 +621,20 @@
             });
         }
 
-        if (typeof d.content === 'string') take(d.content, String(d.phase) + '.content', true);
+        // NEVER take a content-URL from a prose phase. The model will happily invent a
+        // CDN video URL in its `answer` text — captured live: after a real i2v clip
+        // earlier in the same conversation, it emitted a perfectly shaped
+        // cdn.qwenlm.ai/.../t2v/....mp4 link in plain prose, and fetching it returned 404
+        // text/html. It had imitated the shape from its own context. A URL in answer text
+        // is not evidence of an asset; only the generation phases carry real ones.
+        //
+        // The stream loop already routes prose elsewhere, so this is belt and braces —
+        // but it is the kind of trap that survives a refactor of the caller, and the cost
+        // of being wrong is handing an agent a dead link as a deliverable.
+        var PROSE_PHASES = ['answer', 'thinking_summary'];
+        if (typeof d.content === 'string' && PROSE_PHASES.indexOf(String(d.phase)) === -1) {
+            take(d.content, String(d.phase) + '.content', true);
+        }
         var ex = d.extra || {};
         // image_list first so it wins `primary` before tool_result is reached.
         var keys = ['image_list', 'video_list', 'tool_result', 'files', 'file_list'];

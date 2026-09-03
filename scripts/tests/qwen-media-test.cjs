@@ -92,6 +92,24 @@ const fresh = () => ({ media: [] });
     ok(st.media.length === 0, 'a non-CDN URL is ignored');
 }
 
+// ── 4b. THE HALLUCINATION TRAP, captured live by the extension pass. After a real i2v
+// clip earlier in the same conversation, the model emitted a perfectly-shaped CDN video
+// URL in plain `answer` prose. Fetching it returned 404 text/html — it had imitated the
+// shape from its own context. A URL in answer text is not evidence of an asset.
+{
+    const fake = CDN + '/i2v/deadbeef-0000-1111-2222-333344445555/faked.mp4' + SIG;
+    const st = fresh();
+    // Whole content is the URL, so the "starts with the CDN origin" rule alone would
+    // happily take it. The phase is what disqualifies it.
+    collectMedia(st, { role: 'assistant', phase: 'answer', content: fake });
+    ok(st.media.length === 0, 'a hallucinated CDN URL in ANSWER prose is never collected');
+    collectMedia(st, { role: 'assistant', phase: 'thinking_summary', content: fake });
+    ok(st.media.length === 0, 'nor one in a thinking block');
+    // ...and the same URL from a real generation phase still is.
+    collectMedia(st, { role: 'assistant', phase: 'image_gen', content: fake });
+    ok(st.media.length === 1, 'the same URL from a generation phase IS collected');
+}
+
 // ── 5. Repeated frames must not multiply the asset. The explicit route sends the URL
 // once, but the tally showed two frames on the phase and re-broadcast is common here.
 {
