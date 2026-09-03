@@ -396,6 +396,22 @@ class AIProvider {
         if (sendRes && sendRes.conversationId) {
             text += '\n\n_conversation_id: ' + sendRes.conversationId + '_';
         }
+        // Generated images and video live on disk now, not in the text. Announce the
+        // paths — a caller told nothing is in the same position as one whose file was
+        // never saved.
+        if (sendRes && Array.isArray(sendRes.media) && sendRes.media.length) {
+            const okFiles = sendRes.media.filter((m) => m && m.localPath);
+            const bad = sendRes.media.filter((m) => m && m.error);
+            if (okFiles.length) {
+                text += '\n\n---\n**' + okFiles.length + ' generated file(s) saved:**\n' +
+                    okFiles.map((m) => '- ' + m.localPath + ' (' + m.bytes + ' bytes)').join('\n');
+            }
+            if (bad.length) {
+                text += '\n\n---\n**' + bad.length + ' generated file(s) COULD NOT be saved**\n' +
+                    bad.map((m) => '- ' + m.error).join('\n') +
+                    '\nThe asset exists in the conversation; the signed URL could not be fetched.';
+            }
+        }
         // Qwen reports whether it actually reasoned. Surfaced only on the MISMATCH: a
         // reasoned reply needs no annotation, but one that was supposed to reason and did
         // not is indistinguishable from one that did — that is the exact failure this
@@ -1626,9 +1642,9 @@ server.tool(
         conversation_id: z.string().optional().describe('Resume a specific Qwen conversation. Bare uuid or a full chat.qwen.ai URL. Use this to keep ONE long-lived Qwen thread across calls — e.g. an orchestrator that sends several videos to the same reviewer chat. The last assistant response is recovered from the server and chained to, so a resumed thread keeps its history instead of branching from the root. Note Qwen fixes chat_type when a conversation is created, so a pinned thread keeps the mode it was made with and `mode` cannot change it.'),
         new_chat: z.boolean().optional().describe('Start a fresh Qwen conversation before sending. Qwen otherwise KEEPS CONTEXT across calls (its chat id is persisted in the page for 2 hours and survives a Proxima restart), which is usually what you want for follow-up questions. Set true when the answer must not be influenced by earlier turns — e.g. an independent QA verdict, or a new unrelated topic. Switching `mode` already forces a new conversation on its own.'),
         thinking: z.boolean().optional().describe('Reasoning pass. DEFAULT TRUE. Qwen only reasons when feature_config.thinking_enabled is set, and the engine treats a missing flag as off — so leaving this out used to mean qwen3.8-max answered with no reasoning at all, silently and indistinguishably from a reasoned reply. Set false only when you want a fast, shallow answer; the reply reports which actually happened.'),
-        mode: z.enum(['t2t', 'search', 'deep_research', 'artifacts', 'web_dev', 'learn', 'slides', 'travel'])
+        mode: z.enum(['t2t', 'search', 'deep_research', 'artifacts', 'web_dev', 'learn', 'slides', 'travel', 't2i', 'image_edit', 't2v'])
             .optional()
-            .describe('Qwen chat_type. Default t2t. "deep_research" is a long-running multi-step research mode — budget MINUTES per call, not seconds. Switching mode starts a fresh Qwen conversation because chat_type is fixed when the conversation is created.')
+            .describe('Qwen chat_type. Default t2t. "deep_research" is a long-running multi-step research mode — budget MINUTES per call, not seconds. "t2i" generates an image, "image_edit" edits one you pass in `attachments`, "t2v" generates video (slowest by far). Generated assets are DOWNLOADED to disk and their local paths returned, because the CDN URLs are signed and expire — do not hand a caller the URL. Switching mode starts a fresh Qwen conversation because chat_type is fixed when the conversation is created.')
     },
     async ({ message, files, attachments, mode, new_chat, conversation_id, session, thinking }) => {
         const disabled = checkDisabled('qwen');

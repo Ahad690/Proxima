@@ -401,6 +401,19 @@ function testClaudeReconcile() {
     console.log('✅ Claude Sandbox Reconciliation tests passed.');
 }
 
+// Generated-media extraction has two wire shapes that look nothing alike, and the
+// collector keys on the CDN host rather than the phase name so an undocumented phase
+// (t2v's, still unknown) delivers without discovery. Own file, run as a child.
+function testQwenMedia() {
+    console.log('Testing Qwen Generated Media...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'qwen-media-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('qwen-media-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
+    }
+    console.log('✅ Qwen Generated Media tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
@@ -411,6 +424,7 @@ try {
     testQwenThinkingWiring();
     testQwenSessionState();
     testClaudeReconcile();
+    testQwenMedia();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');

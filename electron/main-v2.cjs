@@ -725,8 +725,20 @@ async function handleMCPRequest(request) {
                     // callers that require thinking can verify rather than hope. Reading
                     // meta must never fail the send — the answer is already in hand.
                     const qMeta = await readQwenMeta(sendOptions.session);
+                    // Pull generated assets to disk while their signature is still
+                    // valid. No-op on an ordinary text turn.
+                    const qMedia = await saveQwenMedia(
+                        qMeta && qMeta.media,
+                        await browserManager.executeScript('qwen',
+                            'window.__proximaQwen.getConversation(' +
+                            JSON.stringify(sendOptions.session || null) + ')').catch(() => null)
+                    ).catch((e) => {
+                        console.error('[QwenMedia] save failed: ' + e.message);
+                        return [];
+                    });
                     return {
                         success: true, provider, result,
+                        media: qMedia,
                         meta: qMeta,
                         thinkingRequested: !!sendOptions.thinking,
                         thinkingUsed: qwenDidThink(qMeta),
@@ -3414,6 +3426,91 @@ function qwenAttachmentPaths(data) {
     return out.filter(Boolean);
 }
 
+// ─── Qwen generated media ────────────────────────
+// Generated images and video come back as SIGNED cdn.qwenlm.ai URLs carrying 400+ chars
+// of signature, and qwenprotocol.md §14.2 records that the signature EXPIRES. A URL is
+// therefore not a deliverable: an agent that comes back to it later gets nothing, and the
+// path cannot be reconstructed without the query. So the asset is pulled to disk while
+// the link is still good, exactly as Claude artifacts are, and the caller is handed a
+// local path.
+//
+// Fetched with net.request from the main process rather than through the page: the URL is
+// self-authenticating, so no cookies are needed, and this streams to disk instead of
+// pushing a multi-megabyte body through executeJavaScript as base64 — the same reason
+// uploads avoid that route.
+const qwenMediaDir = path.join(userDataPath, 'qwen-media');
+
+function downloadQwenMedia(url, destPath) {
+    return new Promise((resolve, reject) => {
+        let req;
+        // electronNet, NOT net. This file imports Node's socket module as `net` and
+        // Electron's HTTP client as `electronNet` (see the destructure at the top), so
+        // `net.request` here would be a TypeError at the first generated image.
+        try { req = electronNet.request({ method: 'GET', url: url }); }
+        catch (e) { return reject(e); }
+        const chunks = [];
+        let bytes = 0;
+        req.on('response', (res) => {
+            if (res.statusCode !== 200) {
+                // Drain, or the socket is left half-open.
+                res.on('data', () => { });
+                res.on('end', () => reject(new Error('HTTP ' + res.statusCode)));
+                return;
+            }
+            res.on('data', (c) => { chunks.push(c); bytes += c.length; });
+            res.on('end', () => {
+                try {
+                    fs.writeFileSync(destPath, Buffer.concat(chunks));
+                    resolve(bytes);
+                } catch (e) { reject(e); }
+            });
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
+
+/**
+ * Save whatever a generation turn produced. Returns [] when the turn generated nothing,
+ * which is the common case — this runs on every Qwen send.
+ *
+ * Never throws: a download failure must not fail a send whose image already exists
+ * server-side. The failure is reported per-file instead, because "no media" and "media we
+ * could not fetch" are different facts and collapsing them is how a generated asset
+ * would go missing silently.
+ */
+async function saveQwenMedia(media, chatId) {
+    if (!Array.isArray(media) || !media.length) return [];
+    const wanted = media.filter((m) => m && m.primary && m.url);
+    if (!wanted.length) return [];
+    const dir = path.join(qwenMediaDir, chatId || 'unknown');
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+        console.error('[QwenMedia] cannot create ' + dir + ': ' + e.message +
+            ' — ' + wanted.length + ' generated file(s) NOT saved');
+        return wanted.map((m) => ({ url: m.url, error: 'directory not writable: ' + e.message }));
+    }
+    const out = [];
+    for (let i = 0; i < wanted.length; i++) {
+        const m = wanted[i];
+        // The signed URL's basename is a server-side id, so a readable local name is
+        // composed instead. Extension comes from the path, never the query string.
+        const ext = (m.ext || 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'bin';
+        const base = 'gen-' + String(Date.now()) + '-' + (i + 1) + '.' + ext;
+        const dest = path.join(dir, base);
+        try {
+            const bytes = await downloadQwenMedia(m.url, dest);
+            out.push({ url: m.url, localPath: dest, bytes: bytes, kind: ext, from: m.from });
+            console.log('[QwenMedia] saved ' + base + ' (' + bytes + ' bytes) from ' + m.from);
+        } catch (e) {
+            console.error('[QwenMedia] FAILED to fetch ' + m.url.slice(0, 80) + '…: ' + e.message);
+            out.push({ url: m.url, error: e.message, from: m.from });
+        }
+    }
+    return out;
+}
+
 // ─── Qwen response evidence ──────────────────────
 // Qwen reasons ONLY when feature_config.thinking_enabled is set, and the engine does
 // `!!o.thinking` — so a payload that simply omits the flag runs qwen3.8-max unreasoned
@@ -3455,6 +3552,9 @@ async function readQwenMeta(session) {
             title: (t && t.title) || '',
             thought: String((t && t.thought) || '').slice(0, 2000)
         })) : [],
+        // Generated images/video. Kept whole rather than summarised — these are
+        // signed URLs with an expiry, and truncating one makes it unusable.
+        media: Array.isArray(m.media) ? m.media : [],
         dropped: m.dropped || 0,
         dupChunks: m.dupChunks || 0,
         restartFromStart: m.restartFromStart || 0,

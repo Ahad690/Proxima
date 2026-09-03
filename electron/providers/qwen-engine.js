@@ -578,6 +578,63 @@
         return body;
     }
 
+    // ─── Generated media (t2i / image_edit / t2v) ─────
+    // Qwen returns generated assets as SIGNED cdn.qwenlm.ai URLs, never as base64, and
+    // there are two different routes to them:
+    //
+    //   implicit  send plain t2t and let the model decide. It emits a function-call phase
+    //             `image_gen_tool` whose delta.content stays empty throughout; the assets
+    //             live in extra.image_list[] (what the UI renders) and extra.tool_result[]
+    //             (the same picture under a different path). Prose arrives separately in
+    //             the `answer` phase. Documented in qwenprotocol.md §14.
+    //   explicit  set chat_type t2i. Measured here, and it resolves the "presumably for
+    //             forcing it, but…" left open at §14 line 1240: it takes a DIFFERENT and
+    //             simpler path — phase `image_gen`, with the URL straight in
+    //             delta.content and no prose at all.
+    //
+    // So this collector keys on the CDN HOST rather than on phase names. That is the
+    // whole point: t2v's phase name is not documented anywhere, and a host-keyed sniff
+    // picks up a generated video without anybody having to discover the name first.
+    // Matching only URLs that START with the CDN origin keeps prose links out.
+    var MEDIA_ORIGIN = 'https://cdn.qwenlm.ai/';
+
+    function collectMedia(state, d) {
+        var seen = {};
+        for (var i = 0; i < state.media.length; i++) seen[state.media[i].url] = true;
+
+        function take(url, where, primary) {
+            if (typeof url !== 'string' || url.indexOf(MEDIA_ORIGIN) !== 0) return;
+            if (seen[url]) return;
+            seen[url] = true;
+            // Extension off the PATH, not the query: these URLs carry 400+ chars of
+            // signature after a '?', and a naive split would call every one of them a key.
+            var clean = url.split('?')[0];
+            var dot = clean.lastIndexOf('.');
+            state.media.push({
+                url: url,
+                ext: dot > 0 ? clean.slice(dot + 1).toLowerCase() : '',
+                from: where,
+                // image_list is what the UI renders, and .content is the explicit route's
+                // only carrier. tool_result duplicates the same asset under another path,
+                // so it is recorded but not marked — otherwise one image saves twice.
+                primary: !!primary
+            });
+        }
+
+        if (typeof d.content === 'string') take(d.content, String(d.phase) + '.content', true);
+        var ex = d.extra || {};
+        // image_list first so it wins `primary` before tool_result is reached.
+        var keys = ['image_list', 'video_list', 'tool_result', 'files', 'file_list'];
+        for (var k = 0; k < keys.length; k++) {
+            var arr = ex[keys[k]];
+            if (!arr || !arr.length) continue;
+            for (var j = 0; j < arr.length; j++) {
+                var it = arr[j] || {};
+                take(it.image || it.video || it.url || it.file, String(d.phase) + '.extra.' + keys[k],
+                     keys[k] !== 'tool_result');
+            }
+        }
+    }
     // ─── SSE stream parser ───────────────────────────
     function parseStream(response, onDelta) {
         var reader = response.body.getReader();
@@ -586,6 +643,7 @@
         var text = '';
         var state = {
             responseId: null, usage: null, thinking: [], finished: false,
+            media: [],              // generated images/video: signed cdn.qwenlm.ai URLs
             dropped: 0,
             answerFrames: 0,        // how many phase:"answer" deltas carried content
             ids: {},                // every distinct top-level response_id seen
@@ -665,6 +723,15 @@
                         state.researchQueries.push(th.query);
                     }
                 }
+            }
+
+            // Generation phases carry assets, never prose. `image_gen` puts the URL in
+            // content and `image_gen_tool` leaves content empty, so in both cases
+            // returning here is what stops a CDN URL being appended to the answer text.
+            if (d.phase === 'image_gen' || d.phase === 'image_gen_tool' ||
+                (d.extra && (d.extra.image_list || d.extra.video_list))) {
+                collectMedia(state, d);
+                return;
             }
 
             if (d.phase === 'thinking_summary') {
@@ -928,9 +995,19 @@
                         dropped: r.state.dropped,
                         dupChunks: r.state.dupChunks,
                         restartFromStart: r.state.restartFromStart,
+                        media: r.state.media,
                         reportFiles: r.state.reportFiles,
                         researchQueries: r.state.researchQueries
                     };
+                    // A generation turn produces assets and no prose, leaving r.text
+                    // empty — which downstream reads as "the API call failed", and
+                    // since Qwen has no DOM fallback it surfaced a successful 2048x2048
+                    // image as a logged-out/CAPTCHA error. Synthesise a body so a
+                    // non-empty string keeps meaning success.
+                    if (!r.text && r.state.media.length) {
+                        return r.state.media.filter(function (m) { return m.primary; })
+                            .map(function (m) { return m.url; }).join('\n') || r.state.media[0].url;
+                    }
                     return r.text;
                 });
             }).catch(function (e) {
@@ -957,6 +1034,13 @@
                         if (got.responseId) { S.parentId = got.responseId; saveState(); }
                         S.lastMeta = {
                             recovered: true, chatType: chatType, responseId: got.responseId,
+                            // media stays empty on this path by construction: it is the
+                            // stream-death recovery, which re-reads the conversation for
+                            // TEXT only. A generation whose stream died is still
+                            // retrievable — qwenprotocol.md §14.5, GET /chats/{id} carries
+                            // the same signed image_list — but that is not wired here, so
+                            // an empty array must not be mistaken for "nothing generated".
+                            media: [],
                             usage: null, thinking: [], phases: {}, responseIds: [], dropped: 0, dupChunks: 0, restartFromStart: 0
                         };
                         return got.text;
