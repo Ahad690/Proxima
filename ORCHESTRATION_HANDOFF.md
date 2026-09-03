@@ -118,7 +118,8 @@ Two models agreeing is not evidence. Every real defect in this project's history
 by *checking*, not by reasoning. Anchor each cycle to something machine-checkable:
 
 ```bash
-npm run test:automation                   # 7 tests, must stay green
+npm run test:automation                   # offline suite, must stay green
+node scripts/tests/claude-transport-live.cjs      # LIVE: edited files still transport
 git diff --stat                           # did the change actually land
 node tools/qa-video-review/qwen-review.cjs ...   # exit 0 PASS / 2 FAIL / 3 INCONCLUSIVE
 ```
@@ -189,6 +190,34 @@ Three things that decide whether the review is trustworthy, all learned the hard
   returns a *clarifying question*, turn 2 does the 7-minute work. Handled automatically.
 - Attachments: image ≤20MB ×5, video ≤500MB ×1, audio ≤100MB ×1, doc ≤20MB ×5. A
   text-only model (`qwen3.7-max`) accepts the upload and silently ignores it — guarded.
+- **Image generation works; video does not.** `ask_qwen` takes `mode: "t2i"` to generate an
+  image and `mode: "image_edit"` to edit one passed in `attachments`. There is **no CLI** for
+  either — the MCP tool is the only entry point. Assets are downloaded to
+  `%APPDATA%\proxima\qwen-media\<chatId>\` and the reply announces the local paths, because
+  the CDN URLs are signed (268–384 chars of query) and **expire** — a URL handed to an agent
+  that comes back later is worthless, and the path cannot be reconstructed without the query.
+- Two routes reach image generation and they look nothing alike. Ask in plain language on a
+  normal `t2t` turn and the model calls a function: phase `image_gen_tool`, `delta.content`
+  empty throughout, assets in `extra.image_list[]`, prose in `answer`. Set `chat_type: t2i`
+  and you get a simpler path: phase `image_gen`, URL **directly in `delta.content`**, no prose
+  at all. Both are handled; the collector keys on the CDN *host* rather than phase names, so
+  an undocumented phase still yields its asset.
+- **A CDN URL in `answer` prose is not evidence of an asset.** Captured: after a real video
+  earlier in the same conversation, the model emitted a perfectly-shaped
+  `cdn.qwenlm.ai/.../t2v/....mp4` link in plain text — imitated from its own context, and a
+  fetch returned 404 `text/html`. Only generation phases carry real assets, and the download
+  step is the check that matters: a non-200 is recorded as an error, never as a saved file.
+- **No promptable video mode.** `qwen3.8-max` *declares* `t2v` in `GET /api/v2/models`, and
+  that is not the same as serving it — asked for a video in plain language it refuses flatly
+  and names Runway/Pika/Sora, with zero function calls in the stream. `t2v` was briefly on the
+  `mode` enum on the strength of that declaration and has been removed. Real video is
+  image-anchored **`i2v`** and **not implemented**: `stream: false`, the response is a job ack
+  carrying `extra.wanx.task_id`, then poll `GET /api/v2/chats/{chat_id}` until a NEW assistant
+  message appears whose `content` *is* the mp4 URL. 4–6+ minutes for a five-second clip, and
+  the UI's own progress bar runs ahead of the backend — it sat at 99% while the endpoint still
+  showed no new message, so poll the endpoint, never trust a percentage. `size` (1:1, 3:4, 4:3,
+  16:9 default, 9:16) is honoured for video and ignored for images. Full wire shape:
+  `C:\Users\subha\Downloads\qwenimagevideogeneration.md`.
 - **Thinking is off unless you ask, and asking is not proof.** The engine reads a missing
   `thinking` flag as *off*, so `qwen3.8-max` answers with no reasoning pass and the reply
   is indistinguishable from a reasoned one. Three separate callers shipped that way (the
@@ -288,7 +317,8 @@ edits working code to satisfy a bug that was never there.
 | `C:\Users\subha\Documents\PROJECTS\Proxima\src\mcp-server-v3.js` | MCP tool definitions |
 | `C:\Users\subha\Documents\PROJECTS\Proxima\electron\providers\qwen-engine.js` | Qwen protocol |
 | `C:\Users\subha\Documents\PROJECTS\Proxima\electron\providers\claude-engine.js` | Claude protocol |
-| `C:\Users\subha\Downloads\qwenprotocol.md` | Full Qwen wire-protocol notes |
+| `C:\Users\subha\Downloads\qwenprotocol.md` | Full Qwen wire-protocol notes (§14 = image generation) |
+| `C:\Users\subha\Downloads\qwenimagevideogeneration.md` | Qwen image + video generation wire shapes, incl. unimplemented `i2v` |
 | `C:\Users\subha\Downloads\claudeartifactsprotocol.md` | Claude artifacts protocol |
 | `C:\Users\subha\Downloads\claudeuploadsandlimits.md` | Claude uploads, models, limits |
 
