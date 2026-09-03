@@ -407,8 +407,13 @@ class AIProvider {
                     okFiles.map((m) => '- ' + m.localPath + ' (' + m.bytes + ' bytes)').join('\n');
             }
             if (bad.length) {
+                // The URL IS included here, and only here. Normally it is withheld because
+                // it expires — but when the download failed it is the only handle left, and
+                // a caller that might still fetch it in the next few seconds should get the
+                // chance. Withholding it on the one reply where it is the last resort would
+                // be following the rule past the point of its purpose.
                 text += '\n\n---\n**' + bad.length + ' generated file(s) COULD NOT be saved**\n' +
-                    bad.map((m) => '- ' + m.error).join('\n') +
+                    bad.map((m) => '- ' + m.error + (m.url ? '\n  url (expires): ' + m.url : '')).join('\n') +
                     '\nThe asset exists in the conversation; the signed URL could not be fetched.';
             }
         }
@@ -416,7 +421,16 @@ class AIProvider {
         // reasoned reply needs no annotation, but one that was supposed to reason and did
         // not is indistinguishable from one that did — that is the exact failure this
         // field exists to expose, so staying quiet here would recreate it.
-        if (sendRes && sendRes.thinkingRequested && sendRes.meta && sendRes.thinkingUsed === false) {
+        // A generation turn has no reasoning phase and cannot have one — there is no prose
+        // to reason about. The first live t2i run appended "thinking was requested but the
+        // response carried no reasoning phase (phases: image_gen). Treat this answer as
+        // unreasoned." to a perfectly good 2048x2048 image, which is a warning about
+        // nothing, on the one reply where it reads as though something went wrong. A
+        // warning that cries wolf is worse than no warning: it trains a reader to skip the
+        // real ones.
+        const generated = sendRes && Array.isArray(sendRes.media) && sendRes.media.length > 0;
+        if (sendRes && sendRes.thinkingRequested && sendRes.meta && !generated &&
+            sendRes.thinkingUsed === false) {
             text += '\n\n_warning: thinking was requested but the response carried no reasoning phase (phases: ' +
                 Object.keys(sendRes.meta.phases || {}).join(', ') + '). Treat this answer as unreasoned._';
         }

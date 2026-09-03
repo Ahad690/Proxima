@@ -1018,8 +1018,16 @@
                     // image as a logged-out/CAPTCHA error. Synthesise a body so a
                     // non-empty string keeps meaning success.
                     if (!r.text && r.state.media.length) {
-                        return r.state.media.filter(function (m) { return m.primary; })
-                            .map(function (m) { return m.url; }).join('\n') || r.state.media[0].url;
+                        // Deliberately NOT the URL, even though it is right here. It is
+                        // signed and expires, main-v2 reports the local paths separately,
+                        // and the whole documented rule is never to hand a caller the
+                        // link. The first live run put a 700-char expiring URL at the top
+                        // of the answer with the real file path underneath it, which
+                        // invites exactly the mistake the rule exists to prevent.
+                        var nPrimary = r.state.media.filter(function (m) {
+                            return m.primary;
+                        }).length || r.state.media.length;
+                        return 'Generated ' + nPrimary + ' file(s); see the saved paths on this reply.';
                     }
                     return r.text;
                 });
