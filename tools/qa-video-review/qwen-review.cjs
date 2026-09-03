@@ -64,25 +64,23 @@ function parseArgs(argv) {
     return a;
 }
 
-/** Proxima writes its live IPC port into settings.json; fall back to the default. */
-function resolvePort(explicit) {
-    if (explicit) return explicit;
-    if (process.env.PROXIMA_IPC_PORT) return Number(process.env.PROXIMA_IPC_PORT);
-    const candidates = [
-        path.join(process.env.APPDATA || '', 'Proxima', 'settings.json'),
-        path.join(process.env.HOME || '', '.config', 'Proxima', 'settings.json')
-    ];
-    for (const c of candidates) {
-        try {
-            if (c && fs.existsSync(c)) {
-                const p = JSON.parse(fs.readFileSync(c, 'utf8')).ipcPort;
-                if (p) return Number(p);
-            }
-        } catch (e) { /* fall through to default */ }
-    }
-    return 19222;
-}
+// Port resolution is shared with preflight and the MCP server. This file used to
+// carry its own copy (env + settings.json + 19222), which is how three tools ended
+// up disagreeing about where Proxima was — and settings.json is stale after the app
+// falls back to 19223.
+const proximaPort = require('../../scripts/lib/proxima-port.cjs');
 
+/** Prove the port with a ping rather than assume it. Explicit --port still wins. */
+async function resolvePort(explicit) {
+    try {
+        const found = await proximaPort.discover(explicit, 2500);
+        return found.port;
+    } catch (e) {
+        // Fall through to the best guess so the caller gets the real connection
+        // error, which is more informative than a discovery failure.
+        return proximaPort.resolvePortSync(explicit);
+    }
+}
 function ipc(port, req, timeoutMs) {
     return new Promise((resolve, reject) => {
         const sock = net.createConnection(port, '127.0.0.1');
@@ -199,7 +197,7 @@ function extractVerdict(text) {
         process.exit(1);
     }
 
-    const port = resolvePort(args.port);
+    const port = await resolvePort(args.port);
     const prompt = buildPrompt(args);
     const missingImg = args.images.filter((i) => !fs.existsSync(i));
     if (missingImg.length) { console.error('image not found: ' + missingImg.join(', ')); process.exit(1); }

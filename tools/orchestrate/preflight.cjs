@@ -13,11 +13,15 @@
  * the only way to tell those apart from the outside.
  *
  * usage:
- *   node preflight.cjs [--browser-port 9333] [--json]
+ *   node preflight.cjs [--browser-port 9333] [--port 19222] [--json]
  *
  * exit 0 = everything reachable, 1 = at least one FAIL. WARNs never fail the run.
  */
 const fs = require('fs');
+// Shared with the MCP server and the QA reviewer, because this check used to
+// hardcode 19222 while main-v2 falls back to 19223 when 19222 is taken — and then
+// reported "not reachable, start Proxima" about an app that was running fine.
+const proximaPort = require('../../scripts/lib/proxima-port.cjs');
 const net = require('net');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
@@ -31,6 +35,13 @@ const browserPort = (() => {
     const i = args.indexOf('--browser-port');
     return i === -1 ? 9333 : Number(args[i + 1]);
 })();
+// Must be read the same way. `args` is an ARRAY, so an earlier version of this read
+// `args.port` — always undefined, which would have silently ignored the flag documented
+// in the usage line above.
+const explicitPort = (() => {
+    const i = args.indexOf('--port');
+    return i === -1 ? null : Number(args[i + 1]);
+})();
 
 const results = [];
 const record = (name, status, detail) => {
@@ -41,9 +52,13 @@ const record = (name, status, detail) => {
     }
 };
 
+// Set by discovery in main(); every ipc() call below uses it.
+let IPC_PORT = proximaPort.DEFAULT_PORT;
+let IPC_VIA = 'default';
+
 function ipc(req, timeoutMs) {
     return new Promise((resolve, reject) => {
-        const sock = net.createConnection(19222, '127.0.0.1');
+        const sock = net.createConnection(IPC_PORT, '127.0.0.1');
         let buf = '';
         const t = setTimeout(() => { sock.destroy(); reject(new Error('timeout')); }, timeoutMs || 20000);
         sock.on('connect', () => sock.write(JSON.stringify(
@@ -112,15 +127,35 @@ function newestMtime(files) {
     if (!asJson) console.log('\nProxima orchestration preflight\n');
 
     // ── 1. Proxima itself ────────────────────────────
+    // Find the port before judging reachability. Probing proves it with a real ping,
+    // so something else on 19223 is not mistaken for Proxima.
+    let found = null;
+    try {
+        found = await proximaPort.discover(explicitPort, 2500);
+        IPC_PORT = found.port;
+        IPC_VIA = found.via;
+    } catch (e) {
+        // Name every port tried. "Not reachable on 19222" was actively misleading
+        // when the app was alive on 19223.
+        record('Proxima IPC', 'FAIL', e.message + '. Start Proxima, or pass --port.');
+        return finish();
+    }
     let status = null;
     try {
         status = await ipc({ action: 'getStatus' }, 15000);
-        record('Proxima IPC (127.0.0.1:19222)', 'PASS',
-            'providers: ' + (status.providers || []).join(', '));
+        record('Proxima IPC (127.0.0.1:' + IPC_PORT + ')', 'PASS',
+            'via ' + IPC_VIA + ' · providers: ' + (status.providers || []).join(', '));
     } catch (e) {
-        record('Proxima IPC (127.0.0.1:19222)', 'FAIL',
-            'not reachable (' + e.message + '). Start Proxima before anything else.');
+        record('Proxima IPC (127.0.0.1:' + IPC_PORT + ')', 'FAIL',
+            'answered a ping then failed getStatus (' + e.message + ')');
         return finish();
+    }
+    // A port reached any way other than the app's own record means something is out of
+    // step, and the next tool along may resolve it differently. Worth saying.
+    if (IPC_VIA === 'fallback' || IPC_VIA === 'settings.json') {
+        record('IPC port discovery', 'WARN',
+            'found on ' + IPC_PORT + ' via ' + IPC_VIA + ', not the app\'s own ipc-port.json — ' +
+            'a Proxima older than that change, or a stale settings value. Other tools may disagree.');
     }
 
     // ── 2. Stale code — the check that exists because of experience ──

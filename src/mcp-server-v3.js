@@ -13,9 +13,19 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const IPC_PORT = process.env.AGENT_HUB_PORT || 19222;
-// Uncomment for debugging:
-// console.error('[MCP] Using IPC_PORT:', IPC_PORT);
+// Port resolution is SHARED with preflight and the QA reviewer. It used to be just
+// `process.env.AGENT_HUB_PORT || 19222`, which breaks completely when main-v2 falls
+// back to 19223 because 19222 was taken — and since the supervisor drives Proxima
+// through this server, that took the whole orchestrator down while the app itself was
+// running perfectly. ESM here, .cjs there, hence createRequire.
+import { createRequire } from 'module';
+const nodeRequire = createRequire(import.meta.url);
+const proximaPort = nodeRequire('../scripts/lib/proxima-port.cjs');
+
+// Best guess without touching the network. connect() walks the rest if this one is
+// dead, which is what makes a stale settings.ipcPort survivable rather than fatal.
+const IPC_PORT = proximaPort.resolvePortSync();
+const IPC_CANDIDATES = proximaPort.candidates().map((c) => c.port);
 
 // ─── IPC Client ───────────────────────────────────────
 
@@ -38,9 +48,32 @@ class IPCClient {
             this.socket = null;
         }
 
+        // Try the resolved port first, then every other candidate. A refused connection
+        // on 19222 is not evidence that Proxima is down — it is usually evidence that it
+        // is on 19223.
+        const ports = [this.port].concat(IPC_CANDIDATES.filter((p) => p !== this.port));
+        let lastErr = null;
+        for (const port of ports) {
+            try {
+                await this._connectTo(port);
+                if (port !== this.port) {
+                    console.error('[MCP] Agent Hub answered on ' + port + ', not ' + this.port);
+                    this.port = port;
+                }
+                return true;
+            } catch (e) {
+                lastErr = e;
+                if (this.socket) { try { this.socket.destroy(); } catch (e2) { } this.socket = null; }
+            }
+        }
+        throw new Error('Agent Hub not reachable on any of ' + ports.join(', ') +
+            ' (' + (lastErr && lastErr.message) + '). Is Proxima running?');
+    }
+
+    _connectTo(port) {
         return new Promise((resolve, reject) => {
-            this.socket = net.createConnection({ port: this.port, host: '127.0.0.1' }, () => {
-                console.error('[MCP] Connected to Agent Hub');
+            this.socket = net.createConnection({ port: port, host: '127.0.0.1' }, () => {
+                console.error('[MCP] Connected to Agent Hub on ' + port);
                 this.connected = true;
                 resolve(true);
             });

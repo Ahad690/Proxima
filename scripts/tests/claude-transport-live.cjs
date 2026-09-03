@@ -43,7 +43,14 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = Number(process.env.PROXIMA_IPC_PORT || 19222);
+// Shared resolver: Proxima falls back to 19223 when 19222 is taken, and a test that
+// reports a contract break because it knocked on the wrong door is worse than no test.
+const proximaPort = require('../lib/proxima-port.cjs');
+// Guessing is not enough here. Against a Proxima that fell back to 19223 while
+// settings.json still said 19222, a sync guess knocks on the wrong door and this test
+// reports a contract break that never happened — the single worst thing it could do.
+// Discovery proves the port with a real ping before any of the checks run.
+let PORT = proximaPort.resolvePortSync();
 
 function ipc(req, ms) {
     return new Promise((res, rej) => {
@@ -99,6 +106,15 @@ function dump(label, res, meta, secs) {
 (async () => {
     // Fail loudly and early rather than reporting a contract break that is really a
     // missing prerequisite.
+    try {
+        const found = await proximaPort.discover(null, 2500);
+        PORT = found.port;
+        console.log('Proxima on 127.0.0.1:' + PORT + ' (via ' + found.via + ')\n');
+    } catch (e) {
+        console.error('cannot run: ' + e.message);
+        console.error('start Proxima, then re-run. `node tools/orchestrate/preflight.cjs` checks the rest.');
+        process.exit(1);
+    }
     try {
         const st = await ipc({ action: 'getStatus' }, 10000);
         if (!st.providers || st.providers.indexOf('claude') === -1) {

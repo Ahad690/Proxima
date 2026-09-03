@@ -514,14 +514,28 @@ function startIPCServer() {
     });
 
 
+    // Write down the port we ACTUALLY bound, wherever we end up. Only the primary
+    // path used to do this, so after a fallback settings.json confidently named a
+    // port nothing was listening on — and every tool that trusted it reported
+    // "Proxima is not running" about an app that was running fine.
+    function recordIpcPort(port) {
+        try {
+            const s = loadSettings();
+            if (s.ipcPort !== port) { s.ipcPort = port; saveSettings(s); }
+        } catch (e) { console.error('[IPC] could not update settings: ' + e.message); }
+        // Separate from settings on purpose: settings.ipcPort is a PREFERENCE a user
+        // may have typed, this file is a FACT about the running process. Tools that
+        // need to reach us prefer the fact.
+        try {
+            fs.writeFileSync(path.join(userDataPath, 'ipc-port.json'), JSON.stringify({
+                port: port, pid: process.pid, startedAt: PROCESS_STARTED_AT
+            }, null, 2));
+        } catch (e) { console.error('[IPC] could not write ipc-port.json: ' + e.message); }
+    }
+
     ipcServer.listen(DEFAULT_IPC_PORT, '127.0.0.1', () => {
         console.log(`[IPC] Server listening on port ${DEFAULT_IPC_PORT}`);
-
-        const s = loadSettings();
-        if (s.ipcPort !== DEFAULT_IPC_PORT) {
-            s.ipcPort = DEFAULT_IPC_PORT;
-            saveSettings(s);
-        }
+        recordIpcPort(DEFAULT_IPC_PORT);
     });
 
     ipcServer.on('error', (err) => {
@@ -533,6 +547,9 @@ function startIPCServer() {
                 ipcServer.close();
                 ipcServer.listen(DEFAULT_IPC_PORT + 1, '127.0.0.1', () => {
                     console.log(`[IPC] Server listening on fallback port ${DEFAULT_IPC_PORT + 1}`);
+                    // THE line that was missing. Without it nothing outside this
+                    // process could discover the fallback.
+                    recordIpcPort(DEFAULT_IPC_PORT + 1);
                 });
             }, 1000);
         }
