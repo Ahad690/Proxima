@@ -284,6 +284,7 @@ edits working code to satisfy a bug that was never there.
 | `C:\Users\subha\Documents\PROJECTS\Proxima\tools\qa-video-review\start-browser.cjs` | Chrome on a shared debug port |
 | `C:\Users\subha\Documents\PROJECTS\Proxima\tools\qa-video-review\record-cdp.cjs` | Tab → mp4 |
 | `C:\Users\subha\Documents\PROJECTS\Proxima\tools\qa-video-review\qwen-review.cjs` | Video → verdict + exit code |
+| `C:\Users\subha\Documents\PROJECTS\Proxima\scripts\tests\claude-transport-live.cjs` | **Live** check that edited files still transport. Run when claude.ai changes |
 | `C:\Users\subha\Documents\PROJECTS\Proxima\src\mcp-server-v3.js` | MCP tool definitions |
 | `C:\Users\subha\Documents\PROJECTS\Proxima\electron\providers\qwen-engine.js` | Qwen protocol |
 | `C:\Users\subha\Documents\PROJECTS\Proxima\electron\providers\claude-engine.js` | Claude protocol |
