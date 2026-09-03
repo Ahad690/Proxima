@@ -761,7 +761,21 @@ async function handleMCPRequest(request) {
                         if (preCid) {
                             // Raw entries, not a fingerprint: the predicted-size logic needs the
                             // baseline BYTE COUNT of each file, not just whether it moved.
-                            claudePre = await claudeListOutputs(preCid, 1);
+                            //
+                            // Retries on EMPTY (which is all listArtifacts' attempts argument
+                            // does), because a baseline that is merely late is indistinguishable
+                            // from one that is genuinely empty — and getting that wrong costs the
+                            // size prediction its starting point, which drops the whole
+                            // reconciliation onto the weak path. A file created by the PREVIOUS
+                            // turn and served straight from the stream is exactly this case:
+                            // nothing ever made the listing catch up. Costs nothing on a
+                            // conversation that already has outputs.
+                            claudePre = await claudeListOutputs(preCid, 3);
+                            if (!claudePre.length) {
+                                console.log('[Artifacts] baseline for ' + preCid + ' is empty — ' +
+                                    'either a conversation with no outputs yet, or a listing still ' +
+                                    'catching up. Size prediction has no previous size to work from.');
+                            }
                         }
                     }
                     const result = await sendMessageToProvider(provider, data.message, data.forceDOM || false, sendOptions);
@@ -3700,10 +3714,23 @@ async function reconcileClaudeArtifacts(cid, before, streamArtifacts, toolCalls)
                 // No prediction available. Fall back to the weaker signal, but require a
                 // real elapsed floor first — the measured lag ran to ~13s, and stability
                 // alone was reached in under 3s while the file was still stale.
+                //
+                // `|| !hadBaseline` used to sit on the end of this, and it was wrong: an
+                // empty baseline is NOT a licence to trust the first read, because a
+                // listing that has not caught up looks exactly like one with nothing in
+                // it. Measured — turn 1 created an 18B file and was served from the
+                // stream, so nothing ever waited for the listing; turn 2's baseline
+                // snapshot therefore came back empty, the prediction had no previous size
+                // to work from, this branch accepted the first read, and the 18B PRE-EDIT
+                // body was handed over at 8.1s and NOT flagged, because the stale listing
+                // and the stale download agreed with each other again.
                 changed = now.filter((f) => baseFp[f.path] !== fp[f.path]);
                 const waitedEnough = Date.now() >= deadline - CLAUDE_RECONCILE_FLOOR_MS;
-                met = (!!changed.length && waitedEnough &&
-                       !!prev && changed.every((f) => prev[f.path] === fp[f.path])) || !hadBaseline;
+                const stable = !!prev && changed.every((f) => prev[f.path] === fp[f.path]);
+                // Settled means settled either way: files changed and stopped moving, or
+                // the floor passed and nothing changed at all. The second case is what
+                // keeps a tool that wrote nothing from burning the whole window.
+                met = waitedEnough && (changed.length ? stable : true);
             }
             if (met || Date.now() >= deadline) break;
             prev = fp;

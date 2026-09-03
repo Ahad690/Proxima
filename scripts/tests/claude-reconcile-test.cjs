@@ -197,6 +197,25 @@ const ok = (cond, label) => {
         [{ name: 'bash_tool', input: {} }]);
     ok(capped.length <= 5, 'a no-path writing tool cannot pull more than the cap (' + capped.length + ')');
     ok(downloads <= 5, 'and does not download more than the cap either (' + downloads + ')');
+    // == THE REGRESSION FOUND AFTER THE CLAUDE UI CHANGE. Turn 1 created an 18B file and
+    // was served from the stream, so nothing ever waited for the listing; turn 2's
+    // baseline snapshot therefore came back EMPTY. With no previous size the prediction
+    // cannot run, and the weak path used to accept the very first listing read on the
+    // grounds that there was no baseline to compare against — handing over the pre-edit
+    // body, unflagged, because the stale listing and the stale download agreed.
+    //
+    // An empty baseline must NOT shortcut the wait: a listing that has not caught up
+    // looks identical to one with nothing in it.
+    reset(
+        [entry(OLD_B, T2), entry(OLD_B, T2), entry(NEW_B, T2), entry(NEW_B, T2)],
+        [OLD, OLD, NEW, NEW]
+    );
+    const noBase = await api.reconcileClaudeArtifacts('c1', [], [], TOOLS);
+    ok(noBase.length === 1, 'a file is still recovered with no baseline');
+    ok(noBase[0] && noBase[0].fileText === NEW,
+        'with NO baseline it still waits for the listing to settle rather than taking the' +
+        ' first read' + (noBase[0] ? ' (got ' + JSON.stringify(noBase[0].fileText.slice(0,30)) + ')' : ''));
+    ok(listPolls > 1, 'it polled more than once instead of short-circuiting (' + listPolls + ')');
     console.log(fails ? '\n' + fails + ' FAILURE(S)' : '\nall reconciliation assertions passed');
     process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error('ERR ' + e.message); process.exit(1); });
