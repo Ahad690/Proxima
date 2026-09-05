@@ -23,6 +23,8 @@
  * usage:
  *   node record-cdp.cjs --out run.mp4 [--port 9222] [--url-filter localhost]
  *                       [--new-tab URL] [--target ws://...] [--allow-any-tab]
+ *                       [--network net.json] [--network-bodies] [--network-headers-raw]
+ *                       [--dom final.html] [--console log.json]
  *                       [--quality 70] [--max-width 1280] [--max-seconds 300]
  *                       [--stop-file .stop] [--keep-frames] [--navigate URL]
  *
@@ -38,12 +40,139 @@ const instances = require('./chrome-instances.cjs');
 const { spawnSync } = require('child_process');
 const WebSocket = require('ws');
 
+// ─── Network capture ─────────────────────────────
+// Passive by default: the events below cost nothing but bookkeeping, and the recorder's
+// job is the video. Bodies are opt-in because fetching one is a CDP round-trip per
+// request, and doing that mid-recording competes with screencast frame acks.
+//
+// HEADERS ARE REDACTED BY DEFAULT, and that is not paranoia — request headers carry
+// Cookie and Authorization, response headers carry Set-Cookie, and the whole point of
+// this file is to produce an artifact you hand to someone else (a reviewer, a bug
+// report, another agent). A capture that quietly contains a session token is a much
+// worse thing to have produced than no capture. --network-headers-raw opts out.
+const REDACT = ['cookie', 'set-cookie', 'authorization', 'proxy-authorization',
+                'x-api-key', 'x-auth-token', 'api-key', 'auth-token'];
+
+function redactHeaders(h, raw) {
+    const out = {};
+    for (const k of Object.keys(h || {})) {
+        out[k] = (!raw && REDACT.indexOf(k.toLowerCase()) !== -1)
+            ? '<redacted ' + String(h[k]).length + ' chars>'
+            : h[k];
+    }
+    return out;
+}
+
+// Only text-ish bodies are worth keeping. An image or a font is megabytes of base64 that
+// tells a reviewer nothing.
+const BODY_MIME = /^(application\/(json|javascript|xml|x-www-form-urlencoded)|text\/)/i;
+const BODY_MAX = 256 * 1024;
+
+function newNetState() {
+    return { byId: new Map(), order: [], pendingBodies: [] };
+}
+
+function netOnEvent(net, m, args, send) {
+    if (!net) return;
+    const p = m.params || {};
+    if (m.method === 'Network.requestWillBeSent') {
+        const rec = {
+            id: p.requestId,
+            method: p.request.method,
+            url: p.request.url,
+            resourceType: p.type || null,
+            requestHeaders: redactHeaders(p.request.headers, args.networkHeadersRaw),
+            // postData is where a form or a JSON payload lives. Same redaction logic does
+            // not apply — it is the caller's own app — but it is capped.
+            postData: typeof p.request.postData === 'string'
+                ? p.request.postData.slice(0, 8192) : null,
+            startedAt: p.wallTime || null,
+            status: null, mimeType: null, responseHeaders: null,
+            body: null, bodySize: null, failed: null
+        };
+        net.byId.set(p.requestId, rec);
+        net.order.push(p.requestId);
+        return;
+    }
+    if (m.method === 'Network.responseReceived') {
+        const rec = net.byId.get(p.requestId);
+        if (!rec) return;
+        rec.status = p.response.status;
+        rec.mimeType = p.response.mimeType;
+        rec.responseHeaders = redactHeaders(p.response.headers, args.networkHeadersRaw);
+        rec.fromCache = !!p.response.fromDiskCache;
+        return;
+    }
+    if (m.method === 'Network.loadingFailed') {
+        const rec = net.byId.get(p.requestId);
+        if (!rec) return;
+        // A failed request is often the whole story of a bad run, so it is recorded as a
+        // fact rather than dropped for having no response.
+        rec.failed = p.errorText || 'failed';
+        rec.canceled = !!p.canceled;
+        return;
+    }
+    if (m.method === 'Network.loadingFinished') {
+        const rec = net.byId.get(p.requestId);
+        if (!rec) return;
+        rec.bodySize = p.encodedDataLength || null;
+        if (args.networkBodies && rec.mimeType && BODY_MIME.test(rec.mimeType)) {
+            // Queued, not awaited: blocking here would stall the message loop that also
+            // acks screencast frames.
+            net.pendingBodies.push(p.requestId);
+            send('Network.getResponseBody', { requestId: p.requestId })
+                .then((r) => {
+                    if (r && typeof r.body === 'string') {
+                        rec.body = r.body.length > BODY_MAX
+                            ? r.body.slice(0, BODY_MAX) + '\n<truncated at ' + BODY_MAX + ' chars>'
+                            : r.body;
+                        rec.bodyBase64 = !!r.base64Encoded;
+                    }
+                })
+                .catch(() => { rec.body = null; rec.bodyNote = 'body no longer retained'; })
+                .then(() => {
+                    const i = net.pendingBodies.indexOf(p.requestId);
+                    if (i !== -1) net.pendingBodies.splice(i, 1);
+                });
+        }
+    }
+}
+
+function writeNetwork(net, args, targetUrl) {
+    if (!net || !args.network) return null;
+    const requests = net.order.map((id) => net.byId.get(id)).filter(Boolean);
+    const payload = {
+        // Deliberately NOT called a HAR. It does not carry HAR's timings or cookie
+        // structures, and labelling a partial thing with a standard's name invites a
+        // tool to consume it and fail confusingly.
+        format: 'proxima-network-capture/1',
+        capturedAt: new Date().toISOString(),
+        target: targetUrl || null,
+        headersRedacted: !args.networkHeadersRaw,
+        bodiesCaptured: !!args.networkBodies,
+        counts: {
+            total: requests.length,
+            failed: requests.filter((r) => r.failed).length,
+            byStatus: requests.reduce((acc, r) => {
+                const k = r.failed ? 'failed' : String(r.status || 'pending');
+                acc[k] = (acc[k] || 0) + 1;
+                return acc;
+            }, {})
+        },
+        requests: requests
+    };
+    fs.writeFileSync(args.network, JSON.stringify(payload, null, 2));
+    return payload.counts;
+}
+
 function parseArgs(argv) {
     const a = {
         port: 9222, out: 'run.mp4', quality: 70, maxWidth: 1280, maxHeight: 800,
         maxSeconds: 300, urlFilter: null, stopFile: null, keepFrames: false, target: null,
         host: '127.0.0.1', tailMax: 4, lastFrame: null, navigate: null,
-        newTab: null, allowAnyTab: false, instance: null
+        newTab: null, allowAnyTab: false, instance: null,
+        network: null, networkBodies: false, networkHeadersRaw: false,
+        dom: null, consoleOut: null
     };
     for (let i = 2; i < argv.length; i++) {
         const k = argv[i], v = argv[i + 1];
@@ -61,6 +190,11 @@ function parseArgs(argv) {
         else if (k === '--last-frame') { a.lastFrame = v; i++; }
         else if (k === '--navigate') { a.navigate = v; i++; }
         else if (k === '--instance') { a.instance = v; i++; }
+        else if (k === '--network') { a.network = v; i++; }
+        else if (k === '--network-bodies') { a.networkBodies = true; }
+        else if (k === '--network-headers-raw') { a.networkHeadersRaw = true; }
+        else if (k === '--dom') { a.dom = v; i++; }
+        else if (k === '--console') { a.consoleOut = v; i++; }
         else if (k === '--new-tab') { a.newTab = v; i++; }
         else if (k === '--allow-any-tab') { a.allowAnyTab = true; }
         else if (k === '--keep-frames') { a.keepFrames = true; }
@@ -123,6 +257,10 @@ async function pickTarget(args) {
 
     let stopped = false;
     let stopWall = null;
+    let netCounts = null;
+    let domInfo = null;
+    let consoleInfo = null;
+    const nlLiteral = String.fromCharCode(10);
     const stop = async (reason) => {
         if (stopped) return;
         stopped = true;
@@ -130,6 +268,66 @@ async function pickTarget(args) {
         // the final state was actually on screen, not how slow stopScreencast was.
         stopWall = Date.now() / 1000;
         try { await send('Page.stopScreencast'); } catch (e) { /* socket may already be gone */ }
+        // Outstanding getResponseBody calls have to land BEFORE the socket closes, or
+        // the last few requests in the run silently lose their bodies — which would
+        // look like the app never made them.
+        if (net && net.pendingBodies.length) {
+            const deadline = Date.now() + 5000;
+            while (net.pendingBodies.length && Date.now() < deadline) {
+                await new Promise((r) => setTimeout(r, 100));
+            }
+            if (net.pendingBodies.length) {
+                console.error('[rec] ' + net.pendingBodies.length +
+                    ' response body/bodies did not arrive before shutdown');
+            }
+        }
+        // DOM SNAPSHOT, taken here because the socket is still open and the page is in
+        // exactly the state the last video frame shows. The end state is what decides
+        // pass/fail, and a screenshot shows THAT it failed while the DOM shows WHY —
+        // the error text, the empty list, the element that never rendered.
+        if (args.dom) {
+            try {
+                const r = await send('Runtime.evaluate', {
+                    expression: 'JSON.stringify({url:location.href,title:document.title,' +
+                        'html:document.documentElement.outerHTML})',
+                    returnByValue: true
+                });
+                const raw = r && r.result && r.result.value;
+                const o = raw ? JSON.parse(raw) : null;
+                if (o) {
+                    const CAP = 2 * 1024 * 1024;
+                    const html = o.html.length > CAP
+                        ? o.html.slice(0, CAP) + nlLiteral + '<!-- truncated at ' + CAP + ' chars -->'
+                        : o.html;
+                    fs.writeFileSync(args.dom,
+                        '<!-- captured ' + new Date().toISOString() + nlLiteral +
+                        '     url:   ' + o.url + nlLiteral +
+                        '     title: ' + o.title + ' -->' + nlLiteral + html);
+                    domInfo = { file: path.resolve(args.dom), chars: o.html.length,
+                                url: o.url, title: o.title };
+                    console.error('[rec] dom: ' + o.html.length + ' chars -> ' + args.dom);
+                }
+            } catch (e) {
+                console.error('[rec] dom capture failed: ' + e.message);
+            }
+        }
+        if (consoleLog) {
+            const errors = consoleLog.filter((c) => c.level === 'error' || c.kind === 'exception');
+            fs.writeFileSync(args.consoleOut, JSON.stringify({
+                capturedAt: new Date().toISOString(),
+                counts: { total: consoleLog.length, errors: errors.length },
+                entries: consoleLog
+            }, null, 2));
+            consoleInfo = { file: path.resolve(args.consoleOut), total: consoleLog.length,
+                            errors: errors.length };
+            console.error('[rec] console: ' + consoleLog.length + ' entr(ies), ' +
+                errors.length + ' error(s) -> ' + args.consoleOut);
+        }
+        netCounts = writeNetwork(net, args, args.navigate);
+        if (netCounts) {
+            console.error('[rec] network: ' + netCounts.total + ' request(s), ' +
+                netCounts.failed + ' failed -> ' + args.network);
+        }
         try { ws.close(); } catch (e) { }
         finish(reason);
     };
@@ -210,15 +408,56 @@ async function pickTarget(args) {
             capturedSeconds: Number(wall.toFixed(2)),
             tailSeconds: Number(durations[durations.length - 1].toFixed(2)),
             lastFrame: lastFrameOut, bytes: size,
-            mb: Number((size / 1048576).toFixed(2)), reason: reason
+            mb: Number((size / 1048576).toFixed(2)), reason: reason,
+            // Surfaced on the summary line, not just in the file, so a caller can branch
+            // on "were there failed requests" without opening and parsing the capture.
+            // A run whose video looks fine but logged six failed XHRs is worth knowing
+            // about before a reviewer ever sees it.
+            network: netCounts ? {
+                file: path.resolve(args.network),
+                total: netCounts.total, failed: netCounts.failed, byStatus: netCounts.byStatus
+            } : undefined,
+            dom: domInfo || undefined,
+            console: consoleInfo || undefined
         }));
         process.exit(0);
     }
+
+    // Only allocated when asked for, so an ordinary recording carries no bookkeeping.
+    const net = args.network ? newNetState() : null;
+    // Console output is the other half of "what happened in this page". A run that
+    // looks fine on video and threw six uncaught TypeErrors is a failing run, and
+    // nothing in the frames says so.
+    const consoleLog = args.consoleOut ? [] : null;
 
     ws.on('message', (raw) => {
         let m;
         try { m = JSON.parse(raw.toString()); } catch (e) { return; }
         if (m.id && pending.has(m.id)) { pending.get(m.id)(m.result); pending.delete(m.id); return; }
+        // Before the frame branch, and cheap: these are bookkeeping only. Frame acks
+        // stay the priority — a stalled ack throttles the whole screencast.
+        if (net && m.method && m.method.indexOf('Network.') === 0) {
+            netOnEvent(net, m, args, send);
+            return;
+        }
+        if (consoleLog && m.method === 'Runtime.consoleAPICalled') {
+            consoleLog.push({
+                kind: 'console', level: m.params.type,
+                text: (m.params.args || []).map((a) =>
+                    a.value !== undefined ? String(a.value) : (a.description || a.type)).join(' ').slice(0, 4000),
+                ts: m.params.timestamp
+            });
+            return;
+        }
+        if (consoleLog && m.method === 'Runtime.exceptionThrown') {
+            const d = (m.params.exceptionDetails || {});
+            consoleLog.push({
+                kind: 'exception', level: 'error',
+                text: (d.exception && (d.exception.description || d.exception.value)) || d.text || 'exception',
+                url: d.url || null, line: d.lineNumber, ts: m.params.timestamp
+            });
+            return;
+        }
         if (m.method === 'Page.screencastFrame') {
             const n = String(frames.length + 1).padStart(6, '0');
             const file = path.join(frameDir, 'f' + n + '.jpg');
@@ -231,6 +470,22 @@ async function pickTarget(args) {
 
     ws.on('open', async () => {
         await send('Page.enable');
+        if (consoleLog) {
+            // Runtime.enable is what turns on consoleAPICalled and exceptionThrown.
+            await send('Runtime.enable');
+            console.error('[rec] console capture -> ' + args.consoleOut);
+        }
+        if (net) {
+            // Buffer caps keep a long run from holding every response body in the
+            // browser's memory; bodies we actually want are pulled on loadingFinished.
+            await send('Network.enable', {
+                maxTotalBufferSize: 32 * 1024 * 1024,
+                maxResourceBufferSize: 8 * 1024 * 1024
+            });
+            console.error('[rec] network capture -> ' + args.network +
+                (args.networkBodies ? ' (with bodies)' : ' (metadata only)') +
+                (args.networkHeadersRaw ? ' RAW HEADERS' : ''));
+        }
         await send('Page.startScreencast', {
             format: 'jpeg', quality: args.quality,
             maxWidth: args.maxWidth, maxHeight: args.maxHeight, everyNthFrame: 1

@@ -144,7 +144,13 @@ The recorder then prints one line of JSON and exits:
 |---|---|---|
 | `--port` | `9222` | Chrome debug port |
 | `--host` | `127.0.0.1` | falls back to `[::1]` automatically |
-| `--url-filter` | — | substring match to pick the tab; falls back to the first page |
+| `--url-filter` | — | substring match. Must hit EXACTLY one tab — zero or several is an error, never a guess |
+| `--new-tab` | — | open a fresh tab and use it. Safest on a shared browser |
+| `--target` | — | pin an exact webSocketDebuggerUrl |
+| `--instance` | — | resolve the port from a named browser instance |
+| `--allow-any-tab` | off | opt back into taking the first tab, for working alone |
+| `--network` / `--network-bodies` | — | capture requests, and optionally text bodies |
+| `--dom` / `--console` | — | final DOM snapshot, and console + uncaught exceptions |
 | `--out` | `run.mp4` | H.264 / yuv420p, even dimensions |
 | `--last-frame` | — | writes the final frame as a still. **Use it** |
 | `--tail-max` | `4` | seconds the final state is held on screen |
@@ -178,6 +184,79 @@ verbatim on-screen evidence, observed issues and a timeline. An unparseable repl
 works" must not collapse into the same outcome.
 
 ---
+
+## Capturing more than pixels
+
+The recorder can collect four other channels alongside the video, in the same run and from
+the same tab:
+
+```bash
+node record-cdp.cjs --instance myproj --new-tab http://localhost:4173 \
+  --out run.mp4 --last-frame run-last.jpg \
+  --network net.json --network-bodies \
+  --dom final.html \
+  --console log.json
+```
+
+Each answers a different question, and the last three are **machine-checkable** in a way a
+video reviewed by a language model is not. A verdict on a recording is a judgement; "one
+failed request, two console errors" is a fact. Branch on the facts, and use the review for
+what only judgement can settle.
+
+The one-line summary carries the headline numbers so a caller never has to open the files
+to decide:
+
+```json
+"network": { "total": 2, "failed": 1, "byStatus": { "200": 1, "failed": 1 } },
+"dom":     { "chars": 485, "title": "Bundle Probe", "url": "..." },
+"console": { "total": 3, "errors": 2 }
+```
+
+| flag | what it gets you |
+|---|---|
+| `--network <file>` | every request: method, url, resource type, status, mime, size, headers, and failures as `net::ERR_*` |
+| `--network-bodies` | response bodies too, for text/JSON only, capped at 256KB each |
+| `--network-headers-raw` | headers unredacted — see the warning below |
+| `--dom <file>` | `outerHTML` at stop time, with the url and title in a comment header |
+| `--console <file>` | `console.*` calls **and uncaught exceptions**, with levels and an error count |
+
+### Why the DOM is worth having next to a screenshot
+
+A still shows *that* a run failed; the DOM shows *why*. From the probe used to test this:
+
+```html
+<div class="error-banner" role="alert">Network Error — could not load cart</div>
+```
+
+That is greppable. The same information in a JPEG depends on a model reading it correctly,
+at whatever resolution survived encoding — and this pipeline has already produced one false
+PASS by mis-sampling exactly that kind of banner.
+
+Console catches the class of failure that leaves no pixels at all:
+
+```
+[console/log]      probe: booted
+[console/error]    probe: cart fetch failed
+[exception/error]  Error: probe: uncaught boom
+```
+
+A run can look perfect on video and have thrown three uncaught errors.
+
+### Headers are redacted by default
+
+`Cookie`, `Set-Cookie`, `Authorization` and the usual API-key headers are replaced with
+`<redacted N chars>`. These files are made to be handed to someone — a reviewer, a bug
+report, another agent — and a capture that quietly contains a session token is a worse
+thing to have produced than no capture at all. `--network-headers-raw` turns it off when
+you are debugging auth and know where the file is going.
+
+### Cost
+
+Metadata capture is passive bookkeeping. `--network-bodies` adds one CDP round-trip per
+text response, so it competes with screencast frame acks — worth it when you need bodies,
+not worth leaving on by default. Outstanding body fetches are drained before the socket
+closes, with a warning if any do not arrive, because a body that silently went missing
+looks exactly like a request the app never made.
 
 ## Sharing a laptop with another agent
 
