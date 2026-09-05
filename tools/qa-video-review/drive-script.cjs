@@ -20,10 +20,17 @@
 const http = require('http');
 const fs = require('fs');
 const WebSocket = require('ws');
+const cdpTarget = require('./cdp-target.cjs');
+const instances = require('./chrome-instances.cjs');
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i < 0 ? dflt : args[i + 1]; };
-const port = Number(opt('--port', 9333));
+// --instance resolves the port from the shared registry, so a caller never has
+// to remember which port their own browser landed on.
+const instanceName = opt('--instance', null);
+const port = instanceName
+    ? (instances.readEntry(instanceName) || (() => { throw new Error('no browser instance named "' + instanceName + '"'); })()).port
+    : Number(opt('--port', 9333));
 const stopFile = opt('--stop-file', null);
 const filter = opt('--url-filter', null);
 
@@ -74,8 +81,15 @@ const CENTRE_OF_SELECTOR = (sel) => `(() => {
 })()`;
 
 (async () => {
-  const targets = (await get('/json/list')).filter((t) => t.type === 'page');
-  const page = filter ? targets.find((t) => (t.url || '').includes(filter)) || targets[0] : targets[0];
+  // Was the worst of the three: with no --url-filter it took targets[0] outright,
+  // then pressed and released a real mouse on it. resolveTarget refuses to choose
+  // between tabs it cannot tell apart.
+  const picked = await cdpTarget.resolveTarget({
+    port: port, target: opt('--target', null), newTab: opt('--new-tab', null),
+    urlFilter: filter, allowAnyTab: args.indexOf('--allow-any-tab') !== -1
+  });
+  console.error('[drive] target: ' + picked.how + (picked.url ? ' — ' + picked.url : ''));
+  const page = { webSocketDebuggerUrl: picked.ws };
   if (!page) throw new Error('no page target on ' + port);
   const ws = new WebSocket(page.webSocketDebuggerUrl, { perMessageDeflate: false });
   await new Promise((r) => ws.on('open', r));

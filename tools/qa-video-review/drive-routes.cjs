@@ -8,10 +8,17 @@
 const http = require('http');
 const fs = require('fs');
 const WebSocket = require('ws');
+const cdpTarget = require('./cdp-target.cjs');
+const instances = require('./chrome-instances.cjs');
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i < 0 ? dflt : args[i + 1]; };
-const port = Number(opt('--port', 9333));
+// --instance resolves the port from the shared registry, so a caller never has
+// to remember which port their own browser landed on.
+const instanceName = opt('--instance', null);
+const port = instanceName
+    ? (instances.readEntry(instanceName) || (() => { throw new Error('no browser instance named "' + instanceName + '"'); })()).port
+    : Number(opt('--port', 9333));
 const stopFile = opt('--stop-file', null);
 const dwell = Number(opt('--dwell', 3000));
 const filter = opt('--url-filter', 'localhost');
@@ -37,9 +44,15 @@ const get = (path) => new Promise((res, rej) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-  const targets = (await get('/json/list')).filter((t) => t.type === 'page');
-  const page = targets.find((t) => (t.url || '').includes(filter)) || targets[0];
-  if (!page) throw new Error('no page target on ' + port);
+  // No `|| targets[0]`. This script NAVIGATES the tab it picks and clicks into it,
+  // so grabbing another agent's tab does not just mislead a reviewer — it drives
+  // their application. resolveTarget throws rather than guessing.
+  const picked = await cdpTarget.resolveTarget({
+    port: port, target: opt('--target', null), newTab: opt('--new-tab', null),
+    urlFilter: filter, allowAnyTab: args.indexOf('--allow-any-tab') !== -1
+  });
+  console.error('[drive] target: ' + picked.how + (picked.url ? ' — ' + picked.url : ''));
+  const page = { webSocketDebuggerUrl: picked.ws };
   const ws = new WebSocket(page.webSocketDebuggerUrl, { perMessageDeflate: false });
   await new Promise((r) => ws.on('open', r));
   let id = 0;

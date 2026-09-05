@@ -179,6 +179,81 @@ works" must not collapse into the same outcome.
 
 ---
 
+## Sharing a laptop with another agent
+
+Two agents, one machine, one debug port is a collision by default. This was measured, not
+imagined: port 9333 held **eight page targets belonging to a different project**, so
+`pages[0]` — the tab every tool here used to fall back to — was
+`https://tx-2fded057.pages.dev/`. A typo'd `--url-filter` meant recording someone else's
+application and getting a confident review of it, or worse, the drivers navigating their
+page away and clicking into it.
+
+Two ways out. Pick one; do not rely on being careful.
+
+### Your own browser (preferred)
+
+```bash
+node start-browser.cjs --instance myproj --url http://localhost:4173
+node record-cdp.cjs   --instance myproj --new-tab http://localhost:4173 --out run.mp4 ...
+node start-browser.cjs --instance myproj --kill      # stops only yours
+node start-browser.cjs --list                        # who is running what
+```
+
+A named instance gets its own port **and its own profile directory**. The profile is what
+actually separates browsers — Chrome treats `--user-data-dir` as a browser's identity, so
+launching with a profile that is already in use hands the command line to the running
+browser and exits rather than starting a second one. Same profile means same browser
+whatever port you asked for, which is why the port alone was never enough.
+
+`--instance` also resolves the port for the recorder and drivers, so nobody has to
+remember that this file defaults to 9333 while `record-cdp.cjs` defaults to 9222 — a
+mismatch that used to attach you to a port nobody had started.
+
+### Someone else's browser, safely
+
+If you must share the port, **name the tab**. In order of safety:
+
+| flag | meaning |
+|---|---|
+| `--new-tab <url>` | opens a fresh tab and pins it. Nothing else can be using a tab that did not exist a moment ago. |
+| `--target ws://…` | pins an exact target. Immune to anything else on the port. |
+| `--url-filter <s>` | matches open tabs. **One match required** — zero or several is an error. |
+
+There is no fallback any more. If nothing matches, the tools stop and print the tabs they
+found rather than guessing:
+
+```
+--url-filter "checkout" matched NOTHING. The port has 8 page(s), which may belong to
+another agent:
+  [0] https://tx-2fded057.pages.dev/
+  [1] http://localhost:5173/account
+```
+
+`--allow-any-tab` restores the old take-the-first-page behaviour for someone genuinely
+working alone. It is opt-in because a silent fallback is indistinguishable from success,
+which is the property that made it dangerous rather than merely wrong.
+
+### Never kill a port you do not own
+
+`--kill` without `--instance` now refuses, because killing by port takes down whatever
+holds it — on a shared machine, another agent's browser and everything they had open.
+`--instance <name> --kill` stops only the process this tool started under that name;
+`--force` overrides, and means it.
+
+### Chrome's `/json/new` wants PUT
+
+Worth knowing if you open tabs by hand: current Chrome answers a GET on `/json/new` with
+HTTP 405 and *"Using unsafe HTTP verb GET to invoke /json/new"*. The obvious PowerShell
+one-liner (`Invoke-RestMethod ".../json/new?url"`) defaults to GET and hits exactly that.
+`--new-tab` handles it, falling back to GET for older builds.
+
+### Proxima has the same shape of hazard
+
+One Qwen engine serves every caller on the page, so **pass `session: "<name>"`** or you
+share the `default` conversation pointer with whatever else is running. Claude's
+conversation state there is a single pointer, safe only because the orchestrator pins
+`conversation_id` on every turn — a second unpinned consumer collides.
+
 ## Three things that decide whether this works
 
 ### 1. Hold the final frame — this one produced a false PASS
@@ -344,6 +419,8 @@ happen — silence on that mismatch is precisely how it hid for weeks.
 | file | what it is |
 |---|---|
 | `start-browser.cjs` | launches/reuses the Chrome that the MCP **and** recorder share |
+| `cdp-target.cjs` | picks a tab, and refuses to guess when it cannot tell them apart |
+| `chrome-instances.cjs` | named browsers — own port, own profile, shared registry |
 | `record-cdp.cjs` | CDP screencast → mp4 (+ optional final still) |
 | `qwen-review.cjs` | mp4 (+ stills) → Qwen 3.8 → verdict + exit code |
 | `README.md` | this |

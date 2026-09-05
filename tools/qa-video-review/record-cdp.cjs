@@ -22,6 +22,7 @@
  *
  * usage:
  *   node record-cdp.cjs --out run.mp4 [--port 9222] [--url-filter localhost]
+ *                       [--new-tab URL] [--target ws://...] [--allow-any-tab]
  *                       [--quality 70] [--max-width 1280] [--max-seconds 300]
  *                       [--stop-file .stop] [--keep-frames] [--navigate URL]
  *
@@ -32,6 +33,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const cdpTarget = require('./cdp-target.cjs');
+const instances = require('./chrome-instances.cjs');
 const { spawnSync } = require('child_process');
 const WebSocket = require('ws');
 
@@ -39,7 +42,8 @@ function parseArgs(argv) {
     const a = {
         port: 9222, out: 'run.mp4', quality: 70, maxWidth: 1280, maxHeight: 800,
         maxSeconds: 300, urlFilter: null, stopFile: null, keepFrames: false, target: null,
-        host: '127.0.0.1', tailMax: 4, lastFrame: null, navigate: null
+        host: '127.0.0.1', tailMax: 4, lastFrame: null, navigate: null,
+        newTab: null, allowAnyTab: false, instance: null
     };
     for (let i = 2; i < argv.length; i++) {
         const k = argv[i], v = argv[i + 1];
@@ -56,6 +60,9 @@ function parseArgs(argv) {
         else if (k === '--tail-max') { a.tailMax = Number(v); i++; }
         else if (k === '--last-frame') { a.lastFrame = v; i++; }
         else if (k === '--navigate') { a.navigate = v; i++; }
+        else if (k === '--instance') { a.instance = v; i++; }
+        else if (k === '--new-tab') { a.newTab = v; i++; }
+        else if (k === '--allow-any-tab') { a.allowAnyTab = true; }
         else if (k === '--keep-frames') { a.keepFrames = true; }
     }
     return a;
@@ -71,32 +78,32 @@ function getJSON(url) {
     });
 }
 
+// Target selection lives in cdp-target.cjs and is shared with the drivers, because
+// all three used to fall back to the first tab and that is exactly the failure mode
+// that puts someone else's app in your recording. There is no fallback now.
+// --instance looks the port up in the shared registry instead of making the caller
+// remember it. Worth having beyond convenience: this file defaults to 9222 while
+// start-browser defaults to 9333, so a caller who passed neither used to attach to a
+// port nobody had started.
+function applyInstance(args) {
+    if (!args.instance) return args;
+    const e = instances.readEntry(args.instance);
+    if (!e) {
+        throw new Error('no browser instance named "' + args.instance + '". Start one: node start-browser.cjs --instance ' + args.instance + ' --url <app>');
+    }
+    args.port = e.port;
+    console.error('[rec] instance ' + e.name + ' -> port ' + e.port);
+    return args;
+}
+
 async function pickTarget(args) {
-    if (args.target) return args.target;
-    // Chrome binds the debug port to ONE loopback family, and which one is not
-    // predictable: if something already holds 127.0.0.1:PORT it will silently fall
-    // back to [::1]:PORT and log a bind error you never see. Probing 127.0.0.1 alone
-    // then finds a DIFFERENT browser, or nothing. Observed in practice, hence both.
-    const hosts = args.host === '127.0.0.1' ? ['127.0.0.1', '[::1]'] : [args.host];
-    let list = null, lastErr = null;
-    for (const h of hosts) {
-        try { list = await getJSON('http://' + h + ':' + args.port + '/json/list'); break; }
-        catch (e) { lastErr = e; }
-    }
-    if (!list) {
-        throw new Error('cannot reach Chrome debug port ' + args.port + ' on ' + hosts.join(' or ') +
-            ' (' + (lastErr && lastErr.message) + '). Start the browser with --remote-debugging-port=' +
-            args.port);
-    }
-    let pages = list.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
-    if (args.urlFilter) {
-        const f = pages.filter((t) => (t.url || '').indexOf(args.urlFilter) !== -1);
-        // Fall back rather than fail: a tab can be mid-navigation when we attach.
-        if (f.length) pages = f;
-        else console.error('[rec] no tab matching "' + args.urlFilter + '"; using the first page');
-    }
-    if (!pages.length) throw new Error('no page targets on the debug port');
-    return pages[0].webSocketDebuggerUrl;
+    applyInstance(args);
+    const picked = await cdpTarget.resolveTarget({
+        port: args.port, host: args.host, target: args.target,
+        newTab: args.newTab, urlFilter: args.urlFilter, allowAnyTab: args.allowAnyTab
+    });
+    console.error('[rec] target: ' + picked.how + (picked.url ? ' — ' + picked.url : ''));
+    return picked.ws;
 }
 
 (async () => {
