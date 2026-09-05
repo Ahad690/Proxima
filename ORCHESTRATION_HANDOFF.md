@@ -122,6 +122,8 @@ npm run test:automation                   # offline suite, must stay green
 node scripts/tests/claude-transport-live.cjs      # LIVE: edited files still transport
 git diff --stat                           # did the change actually land
 node tools/qa-video-review/qwen-review.cjs ...   # exit 0 PASS / 2 FAIL / 3 INCONCLUSIVE
+jq .counts net.json                       # failed requests are FACTS, not a verdict
+jq .counts.errors log.json                # uncaught exceptions leave no pixels
 ```
 
 **Full pipeline docs, including the recording setup:**
@@ -132,8 +134,11 @@ Short version:
 ```bash
 T=C:/Users/subha/Documents/PROJECTS/Proxima/tools/qa-video-review
 node $T/start-browser.cjs --port 9333 --url "$APP"          # browser FIRST
-node $T/record-cdp.cjs --port 9333 --navigate "$APP" \
-     --out run.mp4 --last-frame run-last.jpg --stop-file .stop --max-seconds 180 &
+# --new-tab, NOT a bare --port. On a shared laptop that port may hold another
+# agent's tabs, and naming no tab is now an ERROR rather than a silent wrong pick.
+node $T/record-cdp.cjs --port 9333 --new-tab "$APP" --navigate "$APP" \
+     --out run.mp4 --last-frame run-last.jpg --stop-file .stop --max-seconds 180 \
+     --network net.json --dom final.html --console log.json &
 # ...drive the app with a browser MCP...
 node -e "require('fs').writeFileSync('.stop','x')"          # touch does not exist in cmd
 node $T/qwen-review.cjs --video run.mp4 --image run-last.jpg \
