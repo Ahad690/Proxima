@@ -135,9 +135,16 @@ function newestMtime(files) {
         IPC_PORT = found.port;
         IPC_VIA = found.via;
     } catch (e) {
-        // Name every port tried. "Not reachable on 19222" was actively misleading
-        // when the app was alive on 19223.
-        record('Proxima IPC', 'FAIL', e.message + '. Start Proxima, or pass --port.');
+        // TWO different failures, and conflating them cost hours once already: a host
+        // whose loopback stack is dead looks identical to an app that is not running,
+        // unless the socket error code is carried this far. describeFailure() has already
+        // written the right message for whichever it is — do NOT append "Start Proxima"
+        // to it, because for a host fault that is the one action guaranteed not to help.
+        if (e.hostNetworkFault) {
+            record('HOST networking', 'FAIL', e.message);
+        } else {
+            record('Proxima IPC', 'FAIL', e.message);
+        }
         return finish();
     }
     let status = null;

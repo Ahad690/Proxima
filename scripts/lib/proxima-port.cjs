@@ -82,20 +82,96 @@ function resolvePortSync(explicit) {
     return candidates(explicit)[0].port;
 }
 
-/** Does Proxima answer on this port? Resolves true/false, never rejects. */
+/**
+ * What a failed probe actually MEANS. This exists because of a real incident.
+ *
+ * `route -f` flushed this machine's routing table, so NO process could open a loopback
+ * socket. Proxima was running and listening on 19222 the whole time. preflight said:
+ *
+ *     Proxima did not answer on any known port: 19222, 19223. Start Proxima.
+ *
+ * and the diagnosis went at the application for hours. ping() resolved a bare `false` for
+ * every failure, so "nothing is listening" and "this host cannot open a socket at all"
+ * produced identical output. The header above already warned that an error naming the
+ * wrong cause is worse than a vague one. It was, and it did.
+ *
+ * ECONNREFUSED is the ONLY code that means what the old message claimed: something
+ * answered the SYN and declined it, which is a working TCP stack reporting that nothing
+ * is bound to that port. Every other code here is the HOST, and restarting Proxima
+ * cannot change any of them.
+ */
+const FAULT = {
+    ECONNREFUSED: { host: false, meaning: 'nothing is listening on this port (the stack answered and declined)' },
+    ENETUNREACH: { host: true, meaning: 'no route to 127.0.0.0/8 — the loopback route is missing from the routing table' },
+    EHOSTUNREACH: { host: true, meaning: 'loopback is unreachable at the IP layer' },
+    EADDRNOTAVAIL: { host: true, meaning: '127.0.0.1 is not a usable local address' },
+    EAFNOSUPPORT: { host: true, meaning: 'address family unavailable — the IP stack is not initialised' },
+    EACCES: { host: true, meaning: 'blocked by policy — firewall, WFP filter or security software' },
+    EPERM: { host: true, meaning: 'blocked by policy — firewall, WFP filter or security software' },
+    // Observed in that same incident AFTER the loopback route was restored by hand: the
+    // route existed so the SYN left, and nothing ever came back. A packet that vanishes
+    // on loopback is being dropped below the routing layer.
+    ETIMEDOUT: { host: true, meaning: 'the attempt vanished — packets are being dropped below routing' },
+    ETIME: { host: true, meaning: 'the attempt vanished — packets are being dropped below routing' }
+};
+
+/** True when a failure is the machine's networking rather than the application. */
+function isHostNetworkFault(code) {
+    return !!(FAULT[code] && FAULT[code].host);
+}
+
+/**
+ * Build an error a reader can act on. One of these tells you to start an app, the other
+ * tells you to look at the OS — and they used to be the same sentence.
+ */
+function describeFailure(attempts) {
+    const tried = attempts
+        .map((a) => a.port + ' (' + a.via + (a.code ? ', ' + a.code : '') + ')')
+        .join(', ');
+    const hostFaults = attempts.filter((a) => isHostNetworkFault(a.code));
+
+    // Every candidate failing for a host reason means the fault cannot be per-port, and
+    // therefore cannot be about which application happens to be running.
+    if (attempts.length > 0 && hostFaults.length === attempts.length) {
+        const code = hostFaults[0].code;
+        const e = new Error(
+            'THIS MACHINE cannot open a loopback socket — ' +
+            ((FAULT[code] || {}).meaning || 'the host refused the socket') + ' (' + code + ').' +
+            '\nProxima is almost certainly fine. Do NOT restart it; check the host first:' +
+            '\n  ping 127.0.0.1                     expect a reply, not "General failure"' +
+            '\n  netsh interface ipv4 show route    expect 127.0.0.0/8 on the loopback interface' +
+            '\nA table flushed by `route -f` looks exactly like this, and a reboot restores it.' +
+            '\nPorts tried: ' + tried);
+        e.hostNetworkFault = true;
+        e.code = code;
+        e.attempts = attempts;
+        return e;
+    }
+
+    const e = new Error('Proxima did not answer on any known port: ' + tried +
+        '. Start Proxima, or pass --port.');
+    e.hostNetworkFault = false;
+    e.attempts = attempts;
+    return e;
+}
+
+/**
+ * Probe one port. Resolves { ok, code } — never rejects. The `code` is what lets a caller
+ * tell a dead application from a dead network.
+ */
 function ping(port, timeoutMs) {
     return new Promise((resolve) => {
         const sock = net.createConnection(port, '127.0.0.1');
         let buf = '';
         let done = false;
-        const finish = (ok) => {
+        const finish = (ok, code) => {
             if (done) return;
             done = true;
             clearTimeout(timer);
             try { sock.destroy(); } catch (e) { /* ignore */ }
-            resolve(ok);
+            resolve({ ok: ok, code: code || null });
         };
-        const timer = setTimeout(() => finish(false), timeoutMs || 2500);
+        const timer = setTimeout(() => finish(false, 'ETIMEDOUT'), timeoutMs || 2500);
         sock.on('connect', () => {
             sock.write(JSON.stringify({ requestId: 'port-probe', action: 'ping' }) + '\n');
         });
@@ -108,10 +184,13 @@ function ping(port, timeoutMs) {
             // more confusing failure later.
             try {
                 const j = JSON.parse(buf.slice(0, i));
-                finish(j && j.success === true && j.message === 'pong');
-            } catch (e) { finish(false); }
+                const pong = !!(j && j.success === true && j.message === 'pong');
+                // Something IS listening and talking, it just is not Proxima. That is a
+                // different fact from silence and should not read as a host fault.
+                finish(pong, pong ? null : 'NOTPROXIMA');
+            } catch (e) { finish(false, 'NOTPROXIMA'); }
         });
-        sock.on('error', () => finish(false));
+        sock.on('error', (e) => finish(false, (e && e.code) || 'EUNKNOWN'));
     });
 }
 
@@ -122,18 +201,21 @@ function ping(port, timeoutMs) {
  */
 async function discover(explicit, timeoutMs) {
     const list = candidates(explicit);
+    const attempts = [];
     for (const c of list) {
-        if (await ping(c.port, timeoutMs)) {
-            return { port: c.port, via: c.via, tried: list };
-        }
+        const r = await ping(c.port, timeoutMs);
+        if (r.ok) return { port: c.port, via: c.via, tried: list };
+        // Keep WHY each one failed. Discarding the code is precisely what turned a dead
+        // loopback stack into "Start Proxima".
+        attempts.push({ port: c.port, via: c.via, code: r.code });
     }
-    const err = new Error('Proxima did not answer on any known port: ' +
-        list.map((c) => c.port + ' (' + c.via + ')').join(', '));
+    const err = describeFailure(attempts);
     err.tried = list;
     throw err;
 }
 
 module.exports = {
     DEFAULT_PORT, discover, ping, candidates,
-    resolvePortSync, recordedPort, settingsPort, userDataDir
+    resolvePortSync, recordedPort, settingsPort, userDataDir,
+    isHostNetworkFault, describeFailure
 };
