@@ -112,7 +112,16 @@ const FAULT = {
     // route existed so the SYN left, and nothing ever came back. A packet that vanishes
     // on loopback is being dropped below the routing layer.
     ETIMEDOUT: { host: true, meaning: 'the attempt vanished — packets are being dropped below routing' },
-    ETIME: { host: true, meaning: 'the attempt vanished — packets are being dropped below routing' }
+    ETIME: { host: true, meaning: 'the attempt vanished — packets are being dropped below routing' },
+    // A machine that cannot GIVE OUT a socket. These were missing, and their
+    // absence is not academic: this is the shape of the incident where the box
+    // was out of memory, `getaddrinfo() thread failed to start`, and the advice
+    // that came back was "restart Proxima" — which was listening the whole time.
+    // Unlisted codes used to fall through to !host and produce exactly that.
+    ENOBUFS: { host: true, meaning: 'no buffer space — the machine cannot allocate a socket' },
+    ENOMEM: { host: true, meaning: 'out of memory — the machine cannot allocate a socket' },
+    EMFILE: { host: true, meaning: 'this process is out of file descriptors' },
+    ENFILE: { host: true, meaning: 'the system is out of file descriptors' }
 };
 
 /** True when a failure is the machine's networking rather than the application. */
@@ -148,9 +157,38 @@ function describeFailure(attempts) {
         return e;
     }
 
-    const e = new Error('Proxima did not answer on any known port: ' + tried +
-        '. Start Proxima, or pass --port.');
+    // Everything that is left. Two sub-cases, and only one of them is safe to
+    // give advice about.
+    const known = attempts.filter((a) => FAULT[a.code]);
+    const refusedOnly = known.length === attempts.length &&
+        attempts.every((a) => a.code === 'ECONNREFUSED');
+
+    if (refusedOnly) {
+        const e = new Error('Proxima did not answer on any known port: ' + tried +
+            '. The stack answered and declined on every one, so the machine is fine — ' +
+            'start Proxima, or pass --port.');
+        e.hostNetworkFault = false;
+        e.undetermined = false;
+        e.attempts = attempts;
+        return e;
+    }
+
+    // A MIXED result (some host faults, some refusals) or a code not in the
+    // table. Naming either cause here would be a guess, and the guess that used
+    // to be made was "start Proxima" — the one action guaranteed not to help if
+    // the truth is the other one. Say so instead.
+    const unknownCodes = attempts.filter((a) => !FAULT[a.code]).map((a) => a.code || '?');
+    const e = new Error('Proxima did not answer, and the reason is UNDETERMINED: ' + tried +
+        (unknownCodes.length
+            ? '.\nUnrecognised socket error(s): ' + [...new Set(unknownCodes)].join(', ') + '.'
+            : '.\nSome ports failed for host reasons and others were refused, which is not a ' +
+              'consistent story.') +
+        '\nDo NOT act on a guess. Check the host first — it is the cheaper of the two:' +
+        '\n  ping 127.0.0.1                     expect a reply' +
+        '\n  netsh interface ipv4 show route    expect 127.0.0.0/8' +
+        '\nthen whether Proxima is running.');
     e.hostNetworkFault = false;
+    e.undetermined = true;
     e.attempts = attempts;
     return e;
 }

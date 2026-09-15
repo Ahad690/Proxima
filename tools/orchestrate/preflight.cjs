@@ -43,11 +43,42 @@ const explicitPort = (() => {
     return i === -1 ? null : Number(args[i + 1]);
 })();
 
+const os = require('os');
+
+/**
+ * Free memory, checked BEFORE anything that needs a socket.
+ *
+ * On the recorded incident this machine had ~734 MB free with 16.5 of 19 GB of
+ * commit charge used, and the visible symptom was `getaddrinfo() thread failed
+ * to start` — which reads as a dead service. Below this floor, socket and thread
+ * creation start failing, so every check after it produces a misleading answer.
+ */
+const MIN_FREE_MB = 1024;
+
+function memoryCheck() {
+    const freeMb = Math.round(os.freemem() / (1024 * 1024));
+    const totalMb = Math.round(os.totalmem() / (1024 * 1024));
+    if (!Number.isFinite(freeMb) || totalMb === 0) {
+        return { status: 'UNKNOWN', detail: 'could not read memory' };
+    }
+    if (freeMb < MIN_FREE_MB) {
+        return {
+            status: 'FAIL',
+            detail: freeMb + ' MB free of ' + totalMb + ' MB — under the ' + MIN_FREE_MB +
+                ' MB floor. Sockets and threads start failing here and it looks exactly ' +
+                'like a dead service. Close something before trusting any check below.'
+        };
+    }
+    return { status: 'PASS', detail: freeMb + ' MB free of ' + totalMb + ' MB' };
+}
+
 const results = [];
 const record = (name, status, detail) => {
     results.push({ name, status, detail });
     if (!asJson) {
-        const mark = status === 'PASS' ? 'ok  ' : status === 'WARN' ? 'warn' : 'FAIL';
+        const mark = status === 'PASS' ? 'ok  '
+            : status === 'WARN' ? 'warn'
+                : status === 'UNKNOWN' ? '????' : 'FAIL';
         console.log('  [' + mark + '] ' + name + (detail ? ' — ' + detail : ''));
     }
 };
@@ -126,6 +157,15 @@ function newestMtime(files) {
 (async () => {
     if (!asJson) console.log('\nProxima orchestration preflight\n');
 
+    // ── 0. The machine, before anything that needs a socket ──────────
+    // First on purpose. A starved box fails every check below it for reasons that
+    // have nothing to do with what those checks are about, and the last time that
+    // happened the conclusion was "restart Proxima" about an app that was fine.
+    {
+        const m = memoryCheck();
+        record('free memory', m.status, m.detail);
+    }
+
     // ── 1. Proxima itself ────────────────────────────
     // Find the port before judging reachability. Probing proves it with a real ping,
     // so something else on 19223 is not mistaken for Proxima.
@@ -142,6 +182,11 @@ function newestMtime(files) {
         // to it, because for a host fault that is the one action guaranteed not to help.
         if (e.hostNetworkFault) {
             record('HOST networking', 'FAIL', e.message);
+        } else if (e.undetermined) {
+            // Neither "the app is down" nor "the machine is broken" is supported by
+            // the evidence. An unattended run that reads this as either one acts on
+            // a guess, so it gets its own status and its own exit code.
+            record('Proxima IPC', 'UNKNOWN', e.message);
         } else {
             record('Proxima IPC', 'FAIL', e.message);
         }
@@ -311,17 +356,26 @@ function newestMtime(files) {
     function finish() {
         const fails = results.filter((r) => r.status === 'FAIL');
         const warns = results.filter((r) => r.status === 'WARN');
+        const unknowns = results.filter((r) => r.status === 'UNKNOWN');
         if (asJson) {
-            console.log(JSON.stringify({ ok: fails.length === 0, fails: fails.length, warns: warns.length, results }, null, 2));
+            console.log(JSON.stringify({
+                ok: fails.length === 0 && unknowns.length === 0,
+                fails: fails.length, warns: warns.length, unknowns: unknowns.length, results
+            }, null, 2));
         } else {
-            console.log('\n' + (fails.length === 0
+            console.log('\n' + (fails.length === 0 && unknowns.length === 0
                 ? 'READY — ' + results.length + ' checks, ' + warns.length + ' warning(s).'
-                : 'NOT READY — ' + fails.length + ' failure(s). Fix these before leaving it unattended:')
+                : fails.length
+                    ? 'NOT READY — ' + fails.length + ' failure(s). Fix these before leaving it unattended:'
+                    : 'UNDETERMINED — ' + unknowns.length + ' check(s) could not be decided. ' +
+                      'Treating as not ready; do not act on a guess:')
             );
-            fails.forEach((f) => console.log('   • ' + f.name + ': ' + f.detail));
+            fails.concat(unknowns).forEach((f) => console.log('   • ' + f.name + ': ' + f.detail));
             console.log('');
         }
-        process.exit(fails.length ? 1 : 0);
+        // 2 is not 1 and neither is 0: an unattended loop that reads "I could not
+        // tell" as "fine" walks into work it cannot do.
+        process.exit(fails.length ? 1 : unknowns.length ? 2 : 0);
     }
 })().catch((e) => {
     console.error('preflight crashed: ' + e.message);
