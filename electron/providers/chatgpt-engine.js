@@ -213,6 +213,67 @@
         return { downloadUrl: j.download_url, fileName: j.file_name || null, bytes: j.file_size_bytes || null };
     }
 
+    /**
+     * Read image pointers back out of a STORED conversation.
+     *
+     * This is not a fallback, it is the primary path for generation, and the measurement
+     * says why: an image turn took 74.7s end to end (create_time to update_time) while the
+     * streaming read returned after 30.6s with nothing. Catching the asset live means
+     * racing a generator that is slower than the stream.
+     *
+     * Note the response SHAPE depends on the query string. With num_turns the payload is
+     * `messages` — a flat array — NOT the `mapping` object the endpoint returns bare. A
+     * parser written for `mapping` silently finds zero here, which is exactly what happened
+     * on the first attempt.
+     */
+    async function fetchConversationImages(convId) {
+        if (!convId) return { images: [], settled: false };
+        var token = await _getToken();
+        var headers = { 'Authorization': 'Bearer ' + token };
+        if (_accountId) headers['ChatGPT-Account-Id'] = _accountId;
+        var res = await fetch('/backend-api/conversations/' + encodeURIComponent(convId) +
+            '?num_turns=10&include_has_versions=true', { credentials: 'include', headers: headers });
+        if (!res.ok) throw new Error('conversation read failed (' + res.status + ')');
+        var j = await res.json();
+        var msgs = Array.isArray(j.messages) ? j.messages
+                 : Object.keys(j.mapping || {}).map(function (k) { return j.mapping[k].message; });
+        var found = [];
+        var lastAssistantDone = false;
+        for (var i = 0; i < msgs.length; i++) {
+            var m = msgs[i];
+            if (!m) continue;
+            collectImageParts(m, found);
+            var role = m.author && m.author.role;
+            var ct = m.content && m.content.content_type;
+            // A finished assistant TEXT message means the turn answered in prose and no
+            // image is coming. Without this the poll below would wait out its whole
+            // deadline on every ordinary question.
+            if (role === 'assistant' && ct === 'text' && m.status === 'finished_successfully') {
+                lastAssistantDone = true;
+            }
+        }
+        return { images: found, settled: lastAssistantDone };
+    }
+
+    /**
+     * Wait for a generated image to land, then stop. Gives up quietly rather than
+     * throwing: a turn with no image is the normal case, not an error.
+     */
+    async function awaitGeneratedImages(convId, deadlineMs) {
+        var deadline = Date.now() + (deadlineMs || 150000);
+        var everySeen = [];
+        while (Date.now() < deadline) {
+            var r;
+            try { r = await fetchConversationImages(convId); }
+            catch (e) { r = { images: [], settled: false }; }
+            if (r.images.length) return r.images;
+            // Answered in text with nothing generating — nothing to wait for.
+            if (r.settled) return everySeen;
+            await new Promise(function (ok) { setTimeout(ok, 5000); });
+        }
+        return everySeen;
+    }
+
     // ─── Auth Token (cached 5 min) ──────────────────
 
     async function _getToken() {
@@ -376,6 +437,20 @@
         // expire in UNDER THREE MINUTES (measured: fetched fine immediately, 403 "File
         // stream access denied" after 173s), so they are handed straight to the caller to
         // download rather than stored anywhere.
+        // The stream is slower than the generator: an image turn measured 74.7s while
+        // the stream read returned at 30.6s with nothing. So when the stream produced no
+        // pointer AND no prose, ask the stored conversation instead — it settles on its
+        // own and stops early if the turn merely answered in text.
+        if (!_pendingImages.length && !fullText && !streamText && _conversationId) {
+            try {
+                var late = await awaitGeneratedImages(_conversationId, 150000);
+                for (var li = 0; li < late.length; li++) _pendingImages.push(late[li]);
+                if (late.length) {
+                    console.log('[Proxima] ChatGPT: ' + late.length + ' image(s) recovered from the stored conversation');
+                }
+            } catch (e) { /* no image is the normal case, not an error */ }
+        }
+
         _lastImages = [];
         for (var ii = 0; ii < _pendingImages.length; ii++) {
             var img = _pendingImages[ii];
