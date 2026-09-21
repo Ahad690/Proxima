@@ -3509,7 +3509,10 @@ async function saveChatGPTImages(conversationId) {
             .replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'png';
         const dest = path.join(dir, 'gen-' + Date.now() + '-' + (i + 1) + '.' + ext);
         try {
-            const bytes = await downloadQwenMedia(img.downloadUrl, dest);
+            // persist:chatgpt — see downloadQwenMedia. Without the provider session
+            // this is a 403 from Cloudflare, not an expiry, however much the status
+            // code invites that reading.
+            const bytes = await downloadQwenMedia(img.downloadUrl, dest, 'persist:chatgpt');
             out.push({
                 id: img.id, localPath: dest, bytes: bytes,
                 width: img.width, height: img.height, kind: ext, genId: img.genId
@@ -3518,7 +3521,9 @@ async function saveChatGPTImages(conversationId) {
         } catch (e) {
             // A 403 here almost certainly means the signature aged out between resolve
             // and fetch. Say that, rather than leaving a bare HTTP code.
-            const hint = /403/.test(String(e.message)) ? ' (signed URL likely expired)' : '';
+            const hint = /403/.test(String(e.message))
+                ? ' (403 — either the signed URL aged out, or the request did not go through the provider session; check that first, it is the more common cause)'
+                : '';
             console.error('[ChatGPTMedia] FAILED to fetch ' + img.id + ': ' + e.message + hint);
             out.push({ id: img.id, error: e.message + hint });
         }
@@ -3540,13 +3545,31 @@ async function saveChatGPTImages(conversationId) {
 // uploads avoid that route.
 const qwenMediaDir = path.join(userDataPath, 'qwen-media');
 
-function downloadQwenMedia(url, destPath) {
+/**
+ * Download one asset to disk.
+ *
+ * `partition` matters for ChatGPT and is the difference between 200 and 403. Its
+ * signed asset URLs are served from chatgpt.com behind Cloudflare, which refuses
+ * requests that do not look like a browser. Measured on one URL seconds apart:
+ *   in-page fetch WITH cookies   200
+ *   in-page fetch WITHOUT cookies 200   <- so it is not the cookies
+ *   plain node https              403
+ *   plain node + UA + Referer     403   <- and not the headers either
+ * Electron's net IS Chromium's network stack, so issuing the request on the
+ * provider's own session passes where Node cannot. Qwen's CDN does not care and
+ * passes either way, which is why this only surfaced with ChatGPT.
+ */
+function downloadQwenMedia(url, destPath, partition) {
     return new Promise((resolve, reject) => {
         let req;
         // electronNet, NOT net. This file imports Node's socket module as `net` and
         // Electron's HTTP client as `electronNet` (see the destructure at the top), so
         // `net.request` here would be a TypeError at the first generated image.
-        try { req = electronNet.request({ method: 'GET', url: url }); }
+        try {
+            const opts = { method: 'GET', url: url };
+            if (partition) opts.session = session.fromPartition(partition);
+            req = electronNet.request(opts);
+        }
         catch (e) { return reject(e); }
         const chunks = [];
         let bytes = 0;
