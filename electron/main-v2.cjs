@@ -840,6 +840,19 @@ async function handleMCPRequest(request) {
                             stopReason: parsedMeta && parsedMeta.stopReason
                         };
                     }
+                    // ChatGPT returns a generated image as a pointer on a tool-role
+                    // message, and the signed URL it resolves to dies in under three
+                    // minutes — so it is fetched here, immediately, never stored.
+                    if (provider === 'chatgpt') {
+                        const cgConv = await browserManager.executeScript('chatgpt',
+                            'window.__proximaChatGPT && window.__proximaChatGPT.conversationId ? ' +
+                            'window.__proximaChatGPT.conversationId() : null').catch(() => null);
+                        const images = await saveChatGPTImages(cgConv).catch((e) => {
+                            console.error('[ChatGPTMedia] save failed: ' + e.message);
+                            return [];
+                        });
+                        if (images.length) return { success: true, provider, result, media: images };
+                    }
                     return { success: true, provider, result };
                 }
 
@@ -3441,6 +3454,76 @@ function qwenAttachmentPaths(data) {
     else if (data.attachments) out.push(data.attachments);
     if (data.filePath) out.push(data.filePath);
     return out.filter(Boolean);
+}
+
+// ─── ChatGPT generated images ────────────────────
+// ChatGPT returns a generated image as a POINTER, on a message whose author.role is
+// "tool" rather than "assistant" — which is why these were silently dropped: the
+// extractor's role filter excluded the whole message before any content parsing ran.
+//
+// Resolving a pointer is a two-hop affair, and the hops have different auth needs:
+//   hop 1  GET /backend-api/files/download/{id}?conversation_id=…  needs the session
+//          bearer (cookies alone return 404) — done in the page by the engine, so the
+//          token never leaves it.
+//   hop 2  GET the returned download_url — needs NO auth at all; it is self-signed.
+// Hop 2 is therefore done here, streaming to disk, exactly as the Qwen media path does.
+//
+// THE SIGNED URL EXPIRES IN UNDER THREE MINUTES. Measured: fetched fine twice
+// immediately, then 403 "File stream access denied" 173 seconds later. So this runs
+// immediately after the send returns and never stores a link for later.
+const chatgptMediaDir = path.join(userDataPath, 'chatgpt-media');
+
+async function saveChatGPTImages(conversationId) {
+    let raw = null;
+    try {
+        raw = await browserManager.executeScript('chatgpt',
+            'window.__proximaChatGPT && window.__proximaChatGPT.lastImages ? ' +
+            'JSON.stringify(window.__proximaChatGPT.lastImages()) : "[]"');
+    } catch (e) {
+        console.error('[ChatGPTMedia] could not read image list: ' + e.message);
+        return [];
+    }
+    let list = [];
+    try { list = JSON.parse(raw) || []; } catch (e) { list = []; }
+    if (!list.length) return [];
+
+    const dir = path.join(chatgptMediaDir, conversationId || 'unknown');
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+        console.error('[ChatGPTMedia] cannot create ' + dir + ': ' + e.message +
+            ' — ' + list.length + ' generated image(s) NOT saved');
+        return list.map((m) => ({ id: m.id, error: 'directory not writable: ' + e.message }));
+    }
+
+    const out = [];
+    for (let i = 0; i < list.length; i++) {
+        const img = list[i];
+        // The engine already failed to resolve this one; carry the reason rather than
+        // dropping the entry, so a missing image is never silently absent.
+        if (img.error || !img.downloadUrl) {
+            out.push({ id: img.id, error: img.error || 'no download url' });
+            continue;
+        }
+        const ext = (String(img.mimeType || 'image/png').split('/')[1] || 'png')
+            .replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'png';
+        const dest = path.join(dir, 'gen-' + Date.now() + '-' + (i + 1) + '.' + ext);
+        try {
+            const bytes = await downloadQwenMedia(img.downloadUrl, dest);
+            out.push({
+                id: img.id, localPath: dest, bytes: bytes,
+                width: img.width, height: img.height, kind: ext, genId: img.genId
+            });
+            console.log('[ChatGPTMedia] saved ' + path.basename(dest) + ' (' + bytes + ' bytes)');
+        } catch (e) {
+            // A 403 here almost certainly means the signature aged out between resolve
+            // and fetch. Say that, rather than leaving a bare HTTP code.
+            const hint = /403/.test(String(e.message)) ? ' (signed URL likely expired)' : '';
+            console.error('[ChatGPTMedia] FAILED to fetch ' + img.id + ': ' + e.message + hint);
+            out.push({ id: img.id, error: e.message + hint });
+        }
+    }
+    return out;
 }
 
 // ─── Qwen generated media ────────────────────────

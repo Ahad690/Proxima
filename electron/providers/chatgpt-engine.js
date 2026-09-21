@@ -15,6 +15,8 @@
     var _parentMessageId = null;
     var _cachedToken = null;
     var _tokenExpiry = 0;
+    var _accountId = null;      // ChatGPT-Account-Id, needed to resolve image assets
+    var _lastImages = [];       // generated images from the most recent turn
 
     // ─── SHA3-512 (pure JS, required for POW challenges) ───
 
@@ -146,6 +148,71 @@
         return null;
     }
 
+    // ─── Generated images ────────────────────────────
+    // Image turns do NOT arrive as the assistant speaking. They come back as a separate
+    // message whose author.role is "tool" (name is an opaque per-tool token), carrying
+    // content_type "multimodal_text" and a single object part:
+    //
+    //   { content_type: "image_asset_pointer",
+    //     asset_pointer: "sediment://file_0000...",   // NOT file-service://
+    //     mime_type: "image/png", size_bytes, width, height,
+    //     metadata: { dalle: {gen_id, ...}, generation: {...} } }
+    //
+    // So the reason images were silently lost was never the parts.join('') below — that
+    // line is correct for text and simply never ran, because the author.role === 'assistant'
+    // filter excluded the entire message first. Verified by capture, not inferred.
+    var IMAGE_PART = 'image_asset_pointer';
+
+    /** Pull asset pointers out of any message, whatever role it claims. */
+    function collectImageParts(msg, into) {
+        var c = msg && msg.content;
+        if (!c || !c.parts || !c.parts.length) return;
+        for (var i = 0; i < c.parts.length; i++) {
+            var p = c.parts[i];
+            if (!p || typeof p !== 'object' || p.content_type !== IMAGE_PART) continue;
+            if (!p.asset_pointer) continue;
+            // "sediment://file_abc" -> "file_abc". The scheme is decoration; the download
+            // endpoint takes the bare id.
+            var id = String(p.asset_pointer).replace(/^[a-z]+:\/\//i, '');
+            if (into.some(function (x) { return x.id === id; })) continue;
+            var meta = p.metadata || {};
+            into.push({
+                id: id,
+                assetPointer: p.asset_pointer,
+                mimeType: p.mime_type || null,
+                width: p.width || null,
+                height: p.height || null,
+                sizeBytes: p.size_bytes || null,
+                genId: (meta.dalle && meta.dalle.gen_id) || (meta.generation && meta.generation.gen_id) || null
+            });
+        }
+    }
+
+    /**
+     * Resolve one asset id to a fetchable URL.
+     *
+     * Needs the session's bearer — cookies alone return 404, which was measured, not
+     * assumed. The URL it returns is self-contained and needs no auth at all, which is
+     * what lets the main process download it without the token ever leaving this page.
+     *
+     * The returned URL EXPIRES in under three minutes (measured: worked immediately,
+     * 403 "File stream access denied" after 173s). So it is resolved at the end of the
+     * turn and handed straight over — never stored for later.
+     */
+    async function resolveImageUrl(fileId, conversationId) {
+        var token = await _getToken();
+        var url = '/backend-api/files/download/' + encodeURIComponent(fileId) +
+            (conversationId ? '?conversation_id=' + encodeURIComponent(conversationId) + '&inline=true'
+                            : '?inline=true');
+        var headers = { 'Authorization': 'Bearer ' + token };
+        if (_accountId) headers['ChatGPT-Account-Id'] = _accountId;
+        var res = await fetch(url, { credentials: 'include', headers: headers });
+        if (!res.ok) throw new Error('resolve ' + fileId + ' failed (' + res.status + ')');
+        var j = await res.json();
+        if (!j || !j.download_url) throw new Error('resolve ' + fileId + ' returned no download_url');
+        return { downloadUrl: j.download_url, fileName: j.file_name || null, bytes: j.file_size_bytes || null };
+    }
+
     // ─── Auth Token (cached 5 min) ──────────────────
 
     async function _getToken() {
@@ -157,6 +224,9 @@
         var data = await res.json();
         if (!data.accessToken) throw new Error('Not logged in to ChatGPT');
         _cachedToken = data.accessToken;
+        // The image-resolve endpoint wants this alongside the bearer. Same payload we
+        // already fetch, so it costs nothing extra.
+        if (data.account && data.account.id) _accountId = data.account.id;
         _tokenExpiry = Date.now() + 300000; // 5 min TTL
         return _cachedToken;
     }
@@ -217,6 +287,9 @@
         var fullText = '';
         var streamText = '';
         var buffer = '';
+        // Reset per turn. A module-level array would carry the previous turn's image
+        // into this one, which reads as a brand-new generation to the caller.
+        var _pendingImages = [];
 
         while (true) {
             var chunk = await reader.read();
@@ -241,6 +314,12 @@
                     if (parsed.conversation_id) {
                         _conversationId = parsed.conversation_id;
                     }
+
+                    // BEFORE the role filter, deliberately. An image arrives on a message
+                    // whose author.role is 'tool', so anything gated on 'assistant' never
+                    // sees it — which is exactly how images were dropped with no error
+                    // anywhere. The parts.join() below was never the problem; it never ran.
+                    if (parsed && parsed.message) collectImageParts(parsed.message, _pendingImages);
 
                     var parts = parsed && parsed.message && parsed.message.content && parsed.message.content.parts;
                     if (parts && parts.length > 0 && parsed.message.author && parsed.message.author.role === 'assistant') {
@@ -281,6 +360,7 @@
                     var trailingData = trailing.slice(5).trimStart();
                     if (trailingData && trailingData !== '[DONE]') {
                         var trailingParsed = JSON.parse(trailingData);
+                        if (trailingParsed && trailingParsed.message) collectImageParts(trailingParsed.message, _pendingImages);
                         var trailingParts = trailingParsed && trailingParsed.message && trailingParsed.message.content && trailingParsed.message.content.parts;
                         if (trailingParts && trailingParts.length > 0 && trailingParsed.message.author && trailingParsed.message.author.role === 'assistant') {
                             fullText = trailingParts.join('');
@@ -292,6 +372,29 @@
         }
 
         reader.releaseLock();
+        // Resolve every pointer to a signed URL now, while the turn is fresh. These URLs
+        // expire in UNDER THREE MINUTES (measured: fetched fine immediately, 403 "File
+        // stream access denied" after 173s), so they are handed straight to the caller to
+        // download rather than stored anywhere.
+        _lastImages = [];
+        for (var ii = 0; ii < _pendingImages.length; ii++) {
+            var img = _pendingImages[ii];
+            try {
+                var r = await resolveImageUrl(img.id, _conversationId);
+                _lastImages.push({
+                    id: img.id, downloadUrl: r.downloadUrl, fileName: r.fileName,
+                    mimeType: img.mimeType, width: img.width, height: img.height,
+                    sizeBytes: r.bytes || img.sizeBytes, genId: img.genId
+                });
+            } catch (e) {
+                // Record the failure rather than dropping it: "no image" and "an image
+                // we could not resolve" are different facts.
+                _lastImages.push({ id: img.id, error: String(e && e.message || e) });
+            }
+        }
+        if (_lastImages.length) {
+            console.log('[Proxima] ChatGPT: ' + _lastImages.length + ' generated image(s) resolved');
+        }
         return fullText || streamText;
     }
 
@@ -419,7 +522,13 @@
         console.log('[Proxima ChatGPT] Conversation reset');
     }
 
-    window.__proximaChatGPT = { send: send, newConversation: newConversation };
+    window.__proximaChatGPT = {
+        send: send, newConversation: newConversation,
+        // Read by the main process right after a send, because the signed URLs inside
+        // expire in under three minutes.
+        lastImages: function () { return _lastImages; },
+        conversationId: function () { return _conversationId; }
+    };
     console.log('[Proxima] ChatGPT engine loaded');
     // Pre-warm auth token and page scripts to speed up first request
     _getToken().catch(function(){});
