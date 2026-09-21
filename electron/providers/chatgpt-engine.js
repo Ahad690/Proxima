@@ -237,22 +237,33 @@
         var j = await res.json();
         var msgs = Array.isArray(j.messages) ? j.messages
                  : Object.keys(j.mapping || {}).map(function (k) { return j.mapping[k].message; });
+        // ONLY the latest rendered output, never the whole conversation.
+        //
+        // This scanned every message and settled if ANY assistant text reply had ever
+        // finished. Send a text question and then ask for an image in the same thread,
+        // and the poll returns instantly on the OLD reply and reports no image —
+        // measured, that is exactly what happened. Scanning everything would also
+        // re-save an image generated several turns earlier as though it were new.
+        //
+        // `channel: "final"` marks a turn's rendered output, so the last such message is
+        // this turn's: multimodal_text means an image landed, text means it answered in
+        // prose and nothing is coming.
         var found = [];
-        var lastAssistantDone = false;
+        var finals = [];
         for (var i = 0; i < msgs.length; i++) {
-            var m = msgs[i];
-            if (!m) continue;
-            collectImageParts(m, found);
-            var role = m.author && m.author.role;
-            var ct = m.content && m.content.content_type;
-            // A finished assistant TEXT message means the turn answered in prose and no
-            // image is coming. Without this the poll below would wait out its whole
-            // deadline on every ordinary question.
-            if (role === 'assistant' && ct === 'text' && m.status === 'finished_successfully') {
-                lastAssistantDone = true;
-            }
+            if (msgs[i] && msgs[i].channel === 'final') finals.push(msgs[i]);
         }
-        return { images: found, settled: lastAssistantDone };
+        // No channel anywhere means a response shape this was not written against.
+        // Fall back to the last few messages rather than the whole history, which keeps
+        // the blast radius to the current turn either way.
+        var scope = finals.length ? [finals[finals.length - 1]] : msgs.slice(-3);
+        for (var k = 0; k < scope.length; k++) {
+            if (scope[k]) collectImageParts(scope[k], found);
+        }
+        var last = scope.length ? scope[scope.length - 1] : null;
+        var lastCt = last && last.content && last.content.content_type;
+        var settled = !!(last && lastCt === 'text');
+        return { images: found, settled: settled };
     }
 
     /**
