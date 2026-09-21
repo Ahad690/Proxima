@@ -414,6 +414,19 @@ function testQwenMedia() {
     console.log('✅ Qwen Generated Media tests passed.');
 }
 
+// The ChatGPT image poll decides when a turn is finished, and it got that wrong twice
+// — both times settling on a message from an EARLIER turn, both times invisible until
+// a live run happened to reuse a conversation. Own file, run as a child.
+function testChatGPTImageTurn() {
+    console.log('Testing ChatGPT Image Turn...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'chatgpt-image-turn-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('chatgpt-image-turn-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
+    }
+    console.log('✅ ChatGPT Image Turn tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
@@ -425,6 +438,7 @@ try {
     testQwenSessionState();
     testClaudeReconcile();
     testQwenMedia();
+    testChatGPTImageTurn();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');

@@ -248,19 +248,34 @@
         // `channel: "final"` marks a turn's rendered output, so the last such message is
         // this turn's: multimodal_text means an image landed, text means it answered in
         // prose and nothing is coming.
+        // THE TURN BOUNDARY IS THE LAST USER MESSAGE. Everything after it belongs to
+        // the turn being waited on; everything before it is history.
+        //
+        // Two earlier attempts got this wrong in the same direction. Scanning the whole
+        // conversation settled on any past text reply. Taking the last channel:"final"
+        // message settled on the PREVIOUS turn's reply, because while an image is still
+        // generating this turn has produced no final message yet — so the newest one is
+        // still the last answer. Measured tail at the moment of failure:
+        //   [2] assistant text            final   <- the previous turn, wrongly used
+        //   [3] user      text            null    <- the request being waited on
+        //   [4] tool      multimodal_text final   <- did not exist yet
+        var lastUser = -1;
+        for (var i = 0; i < msgs.length; i++) {
+            if (msgs[i] && msgs[i].author && msgs[i].author.role === 'user') lastUser = i;
+        }
+        var turn = msgs.slice(lastUser + 1);
+
         var found = [];
         var finals = [];
-        for (var i = 0; i < msgs.length; i++) {
-            if (msgs[i] && msgs[i].channel === 'final') finals.push(msgs[i]);
+        for (var t = 0; t < turn.length; t++) {
+            if (!turn[t]) continue;
+            collectImageParts(turn[t], found);
+            if (turn[t].channel === 'final') finals.push(turn[t]);
         }
-        // No channel anywhere means a response shape this was not written against.
-        // Fall back to the last few messages rather than the whole history, which keeps
-        // the blast radius to the current turn either way.
-        var scope = finals.length ? [finals[finals.length - 1]] : msgs.slice(-3);
-        for (var k = 0; k < scope.length; k++) {
-            if (scope[k]) collectImageParts(scope[k], found);
-        }
-        var last = scope.length ? scope[scope.length - 1] : null;
+
+        // Nothing final yet means the turn has not produced its output — keep waiting.
+        // Settling here is what made both earlier versions give up early.
+        var last = finals.length ? finals[finals.length - 1] : null;
         var lastCt = last && last.content && last.content.content_type;
         var settled = !!(last && lastCt === 'text');
         return { images: found, settled: settled };
