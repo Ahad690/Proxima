@@ -274,6 +274,42 @@
         return everySeen;
     }
 
+    /**
+     * Fetch the asset bytes IN THE PAGE and hand them back base64.
+     *
+     * The download cannot be done from the main process. Measured on one signed URL, four
+     * ways, seconds apart:
+     *   in-page fetch WITH cookies        200
+     *   in-page fetch WITHOUT cookies     200   <- so it is not the cookies
+     *   plain node https                  403
+     *   plain node + User-Agent + Referer 403   <- nor the headers
+     *   electronNet on persist:chatgpt    403   <- nor Chromium's stack on the right session
+     * The asset sits behind Cloudflare on chatgpt.com and only a request originating in
+     * the page itself is accepted. So the bytes come back through executeJavaScript as
+     * base64 rather than being fetched again outside.
+     *
+     * That costs ~4/3 the file size as a string over IPC, which is fine for an image and
+     * would NOT be fine for video — hence the cap below rather than a blanket rule.
+     */
+    var IMAGE_BYTES_MAX = 12 * 1024 * 1024;
+
+    async function fetchImageBase64(url) {
+        var res = await fetch(url, { credentials: 'include' });
+        if (!res.ok) throw new Error('asset fetch failed (' + res.status + ')');
+        var buf = await res.arrayBuffer();
+        if (buf.byteLength > IMAGE_BYTES_MAX) {
+            throw new Error('asset is ' + buf.byteLength + ' bytes, over the ' +
+                IMAGE_BYTES_MAX + ' transfer cap');
+        }
+        var bytes = new Uint8Array(buf);
+        // Chunked: String.fromCharCode.apply over a megabyte of arguments blows the stack.
+        var chunks = [];
+        for (var i = 0; i < bytes.length; i += 8192) {
+            chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
+        }
+        return { base64: btoa(chunks.join('')), byteLength: buf.byteLength };
+    }
+
     // ─── Auth Token (cached 5 min) ──────────────────
 
     async function _getToken() {
@@ -456,10 +492,14 @@
             var img = _pendingImages[ii];
             try {
                 var r = await resolveImageUrl(img.id, _conversationId);
+                // Fetch here, immediately, and in this context — the main process
+                // cannot retrieve this URL at all (see fetchImageBase64).
+                var data = await fetchImageBase64(r.downloadUrl);
                 _lastImages.push({
-                    id: img.id, downloadUrl: r.downloadUrl, fileName: r.fileName,
+                    id: img.id, fileName: r.fileName,
                     mimeType: img.mimeType, width: img.width, height: img.height,
-                    sizeBytes: r.bytes || img.sizeBytes, genId: img.genId
+                    sizeBytes: data.byteLength, genId: img.genId,
+                    base64: data.base64
                 });
             } catch (e) {
                 // Record the failure rather than dropping it: "no image" and "an image

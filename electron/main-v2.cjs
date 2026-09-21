@@ -3501,31 +3501,28 @@ async function saveChatGPTImages(conversationId) {
         const img = list[i];
         // The engine already failed to resolve this one; carry the reason rather than
         // dropping the entry, so a missing image is never silently absent.
-        if (img.error || !img.downloadUrl) {
-            out.push({ id: img.id, error: img.error || 'no download url' });
+        if (img.error || !img.base64) {
+            out.push({ id: img.id, error: img.error || 'no image bytes returned' });
             continue;
         }
         const ext = (String(img.mimeType || 'image/png').split('/')[1] || 'png')
             .replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'png';
         const dest = path.join(dir, 'gen-' + Date.now() + '-' + (i + 1) + '.' + ext);
         try {
-            // persist:chatgpt — see downloadQwenMedia. Without the provider session
-            // this is a 403 from Cloudflare, not an expiry, however much the status
-            // code invites that reading.
-            const bytes = await downloadQwenMedia(img.downloadUrl, dest, 'persist:chatgpt');
+            // The bytes already came back from the page, base64, because the asset URL
+            // is only fetchable from there — no download happens here at all.
+            const buf = Buffer.from(img.base64, 'base64');
+            fs.writeFileSync(dest, buf);
             out.push({
-                id: img.id, localPath: dest, bytes: bytes,
+                id: img.id, localPath: dest, bytes: buf.length,
                 width: img.width, height: img.height, kind: ext, genId: img.genId
             });
-            console.log('[ChatGPTMedia] saved ' + path.basename(dest) + ' (' + bytes + ' bytes)');
+            console.log('[ChatGPTMedia] saved ' + path.basename(dest) + ' (' + buf.length + ' bytes)');
         } catch (e) {
             // A 403 here almost certainly means the signature aged out between resolve
             // and fetch. Say that, rather than leaving a bare HTTP code.
-            const hint = /403/.test(String(e.message))
-                ? ' (403 — either the signed URL aged out, or the request did not go through the provider session; check that first, it is the more common cause)'
-                : '';
-            console.error('[ChatGPTMedia] FAILED to fetch ' + img.id + ': ' + e.message + hint);
-            out.push({ id: img.id, error: e.message + hint });
+            console.error('[ChatGPTMedia] FAILED to save ' + img.id + ': ' + e.message);
+            out.push({ id: img.id, error: e.message });
         }
     }
     return out;
