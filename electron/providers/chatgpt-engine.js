@@ -418,8 +418,21 @@
                     // anywhere. The parts.join() below was never the problem; it never ran.
                     if (parsed && parsed.message) collectImageParts(parsed.message, _pendingImages);
 
-                    var parts = parsed && parsed.message && parsed.message.content && parsed.message.content.parts;
-                    if (parts && parts.length > 0 && parsed.message.author && parsed.message.author.role === 'assistant') {
+                    // `channel` is the real discriminator, not author.role. It marks the
+                    // turn's rendered output whatever produced it — assistant+text for a
+                    // text reply, tool+multimodal_text for an image. A reasoning_recap
+                    // message is authored by the assistant too but carries channel null
+                    // and parts null: an internal stub, never a reply.
+                    //
+                    // The role fallback stays for responses that carry no channel at all,
+                    // so a shape older or newer than the one measured still yields text
+                    // rather than silence.
+                    var _m = parsed && parsed.message;
+                    var _ctype = _m && _m.content && _m.content.content_type;
+                    var _isFinal = _m && (_m.channel === 'final' ||
+                        (_m.channel == null && _m.author && _m.author.role === 'assistant'));
+                    var parts = _m && _m.content && _m.content.parts;
+                    if (parts && parts.length > 0 && _isFinal && _ctype !== 'multimodal_text') {
                         fullText = parts.join('');
 
                         if (parsed.message.id) {
@@ -509,6 +522,17 @@
         }
         if (_lastImages.length) {
             console.log('[Proxima] ChatGPT: ' + _lastImages.length + ' generated image(s) resolved');
+        }
+        // An image turn has NO prose. Measured sequence for a pure generation:
+        //   user(text) -> tool(multimodal_text, channel:final) -> assistant(reasoning_recap,
+        //   channel:null, parts:null)
+        // That recap is a chain-of-thought stub, not a reply — the image IS the whole
+        // response. So an empty string here is correct and "No response captured", which
+        // is what the caller printed, was technically true and useless. Say what actually
+        // happened instead.
+        if (!fullText && !streamText && _lastImages.length) {
+            var okCount = _lastImages.filter(function (x) { return !x.error; }).length;
+            return 'Generated ' + okCount + ' image(s); see the saved paths on this reply.';
         }
         return fullText || streamText;
     }
