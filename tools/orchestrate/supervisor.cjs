@@ -19,7 +19,7 @@
  * usage:
  *   node supervisor.cjs --message-file turn.txt [--attach a.md --attach b.json]
  *                       [--conversation-id <uuid|url>] [--new] [--state s.json]
- *                       [--effort high] [--model claude-opus-5] [--no-tag]
+ *                       [--effort high] [--model claude-opus-5-5] [--no-tag]
  *
  * --conversation-id is OPTIONAL and wins over the state file when given, so a run can
  * be pointed at an existing thread (paste the uuid out of a claude.ai URL). With

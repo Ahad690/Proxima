@@ -276,7 +276,7 @@
     }
 
     // ─── Defaults, model and effort ─────────────────
-    // Opus 5 at high effort. Both are PER-REQUEST: verified by sending
+    // Opus 5.5 at high effort. Both are PER-REQUEST: verified by sending
     // model:'claude-sonnet-5' into a conversation whose own stored model was
     // claude-opus-5 — message_start echoed claude-sonnet-5 and the conversation's
     // stored model did not change. So this pins what Proxima sends without fighting
@@ -285,6 +285,7 @@
     // Pass model:null / effort:null to fall back to the account+conversation default.
     // Wire-confirmed ids (picker switched, message sent, model read back off
     // message_start — not derived from labels):
+    //   Opus 5.5   claude-opus-5-5
     //   Opus 5     claude-opus-5
     //   Sonnet 5   claude-sonnet-5
     //   Fable 5    claude-fable-5
@@ -292,14 +293,16 @@
     //   Haiku 4.5  claude-haiku-4-5-20251001   <- NOT the short form
     //
     // That last one is why ids must not be guessed from labels: the "strip the dot,
-    // join with hyphens" pattern holds for four of the five and breaks on Haiku, which
-    // carries a dated snapshot suffix. Opus 4.7 / 4.6 / 3 and Sonnet 4.6 are still
+    // join with hyphens" pattern holds for five of the six and breaks on Haiku, which
+    // carries a dated snapshot suffix. Opus 5.5 was confirmed the same way rather than
+    // assumed: 'claude-opus-5.5' and 'claude-opus-55' both 403, so only the
+    // hyphenated spelling works. Opus 4.7 / 4.6 / 3 and Sonnet 4.6 are still
     // unconfirmed — any of them could carry a date too. An unavailable id returns 403
     // permission_error/model_not_available, not a 400.
     //
     // There is no models-list endpoint; two capture passes watched for one and found
     // nothing, so this list can only grow by observation.
-    var DEFAULT_MODEL = 'claude-opus-5';
+    var DEFAULT_MODEL = 'claude-opus-5-5';
     var DEFAULT_EFFORT = 'high';
 
     // These enums are quoted from the server's OWN validation errors, not guessed:
