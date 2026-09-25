@@ -10,6 +10,32 @@
     var CHATGPT_BASE = 'https://chatgpt.com';
     var TIMEOUT = 360000;
 
+    // ─── Default model and effort ───────────────────
+    // GPT-5.6 Sol on the thinking lane, at the picker's "High" preset.
+    //
+    // Read off /backend-api/models -> versions[id=5.6].intelligence_presets, which is
+    // where the app encodes what each picker entry actually sends:
+    //   Instant  gpt-5-6-instant
+    //   Medium   gpt-5-6-thinking   thinking_effort 'standard'
+    //   High     gpt-5-6-thinking   thinking_effort 'extended'
+    // So 'extended' IS high — it is not a third level above it.
+    //
+    // NOT gpt-6-sol-wm. That slug is listed by /backend-api/models and looks like the
+    // obvious pick for "GPT-6 Sol", but it is in no versions[].slugs and this account
+    // cannot use it: asking for it returns a reply whose model_slug is gpt-5-6 — the
+    // INSTANT lane. Measured, all four downgrading identically:
+    //   gpt-6-sol-wm   -> gpt-5-6     gpt-6-luna-wm  -> gpt-5-6
+    //   gpt-6-astra-wm -> gpt-5-6     gpt-5.6-sol-wm -> gpt-5-6
+    // Defaulting to it would have silently removed thinking altogether. The 5.6 family
+    // is itself branded "Sol" (gpt-5-6* all carry the title "GPT-5.6 Sol"), which is
+    // where the name confusion comes from.
+    //
+    // Do not verify a slug by reading message.metadata.model_slug back and comparing:
+    // a deliberately bogus 'gpt-6-nonexistent-zz' came back echoed as itself, so that
+    // field confirms nothing on its own. Only the server REWRITING it is evidence.
+    var DEFAULT_MODEL = 'gpt-5-6-thinking';
+    var DEFAULT_EFFORT = 'extended';
+
     // ─── State ───────────────────────────────────────
     var _conversationId = null;
     var _parentMessageId = null;
@@ -591,6 +617,8 @@
         if (powData.requirementsToken) headers['Openai-Sentinel-Chat-Requirements-Token'] = powData.requirementsToken;
         if (powData.proofToken) headers['Openai-Sentinel-Proof-Token'] = powData.proofToken;
 
+        var _model = (options && options.model) ? options.model : DEFAULT_MODEL;
+
         var payload = {
             action: 'next',
             messages: [{
@@ -599,7 +627,7 @@
                 content: { content_type: 'text', parts: [message] },
                 metadata: {}
             }],
-            model: (options && options.model) ? options.model : 'gpt-5-5-thinking',
+            model: _model,
 
             parent_message_id: _parentMessageId || crypto.randomUUID(),
             timezone_offset_min: new Date().getTimezoneOffset(),
@@ -612,12 +640,18 @@
         };
 
         // Add model config for extended reasoning models
-        if (options && options.model && options.model.includes('thinking')) {
+        // Keyed on the RESOLVED model, not on whether the caller named one. It used to
+        // test options.model, so every default call — the common case — skipped this
+        // block entirely and ran the thinking model with no effort config at all. Same
+        // shape as the Qwen bug where thinking was simply never switched on: nothing
+        // errored, the answers just quietly came back unreasoned.
+        if (_model.indexOf('thinking') !== -1) {
+            var _effort = (options && options.thinkingEffort) ? options.thinkingEffort : DEFAULT_EFFORT;
             payload['oai-last-model-config'] = JSON.stringify({
-                model: options.model,
-                effort: (options && options.thinkingEffort) ? options.thinkingEffort : 'extended'
+                model: _model,
+                effort: _effort
             });
-            console.log('[Proxima ChatGPT] Using extended reasoning model:', options.model);
+            console.log('[Proxima ChatGPT] reasoning model ' + _model + ' at effort ' + _effort);
         }
 
 

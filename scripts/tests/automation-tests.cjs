@@ -267,6 +267,28 @@ function testThinkingEffortWiring() {
         throw new Error('ChatGPT engine payload is missing thinkingEffort serialization');
     }
 
+    // The gate used to read `options.model && options.model.includes('thinking')`, so
+    // it only fired when the CALLER named a model. Every default call skipped it and
+    // sent the reasoning model with no oai-last-model-config — nothing errors, the
+    // answers just come back unreasoned. Assert it keys off the RESOLVED model.
+    if (/options\.model\s*&&\s*options\.model\.includes\('thinking'\)/.test(chatgptEngine)) {
+        throw new Error('ChatGPT effort gate keys off options.model again — a default ' +
+            'call will send no oai-last-model-config and run unreasoned');
+    }
+    const cgModel = (chatgptEngine.match(/var DEFAULT_MODEL = '([^']+)'/) || [])[1];
+    if (!cgModel || cgModel.indexOf('thinking') === -1) {
+        throw new Error('ChatGPT DEFAULT_MODEL "' + cgModel + '" is not a thinking-lane ' +
+            'slug, so the effort gate will never fire');
+    }
+    // Same trap one layer out: the review pipeline picks its effort from the model
+    // name, so a non-thinking reviewModel silently drops reviews to standard effort.
+    const autoCfg = fs.readFileSync(path.join(__dirname, '../lib/config.cjs'), 'utf8');
+    const revModel = (autoCfg.match(/reviewModel:\s*"([^"]+)"/) || [])[1];
+    if (!revModel || revModel.indexOf('thinking') === -1) {
+        throw new Error('reviewModel "' + revModel + '" is not a thinking-lane slug — ' +
+            'reviews would run at standard effort');
+    }
+
     console.log('✅ Thinking Effort Wiring tests passed.');
 }
 

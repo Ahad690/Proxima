@@ -41,7 +41,7 @@ Set via environment variable `PROXIMA_REVIEW_MODEL`:
 - `claude *` → routes to Perplexity (via Claude)
 - anything else → routes to Perplexity
 
-Default: `gpt-5-5-thinking`
+Default: `gpt-5-6-thinking`
 
 ## The Adversarial Prompt
 

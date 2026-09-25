@@ -15,7 +15,10 @@ const DEFAULT_CONFIG = {
     baseUrl: "http://localhost:3210",
 
 
-    reviewModel: "gpt-5-5-thinking",
+    // 5.6 Sol thinking lane. gpt-5-5-thinking is soft-deprecated (hard cutoff
+    // 2026-10-14) and resolveThinkingEffort() maps any "thinking" slug to the
+    // extended/High effort, so reviews stay at high effort by keeping that word.
+    reviewModel: "gpt-5-6-thinking",
     repairModel: "claude",
     enableAutoFix: false,
     maxIterations: 3,

@@ -34,7 +34,7 @@ const SKIP_REVIEW = process.env.PROXIMA_SKIP_REVIEW === '1';
 const SKIP_BRANCH_PREFIX = automationConfig.repairBranchPrefix || 'proxima/fix-';
 const SKIP_COMMIT_MARKER = '[proxima-auto-fix]';
 
-const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || automationConfig.reviewModel || 'gpt-5-5-thinking';
+const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || automationConfig.reviewModel || 'gpt-5-6-thinking';
 // Qwen reasons only when asked. The engine does `!!o.thinking`, so a payload that
 // omits the flag silently runs qwen3.8-max with thinking_enabled:false — measured:
 // phases ["answer"] and zero thinking blocks, versus ["thinking_summary","answer"]
