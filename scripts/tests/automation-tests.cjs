@@ -524,6 +524,20 @@ function testClaudeModelDefault() {
 
     console.log('✅ Claude Model Default tests passed (' + model + ' @ ' + effort + ').');
 }
+
+// The attachment shapes came from one HAR capture and nothing at runtime validates
+// them — a wrong image dimension or a reversed part order still sends and still gets
+// an answer. Own file, run as a child.
+function testChatGPTUpload() {
+    console.log('Testing ChatGPT Upload Shapes...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'chatgpt-upload-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('chatgpt-upload-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
+    }
+    console.log('✅ ChatGPT Upload Shapes tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
@@ -537,6 +551,7 @@ try {
     testQwenMedia();
     testChatGPTImageTurn();
     testClaudeModelDefault();
+    testChatGPTUpload();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');

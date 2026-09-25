@@ -11,6 +11,7 @@ const { initRestAPI, startRestAPI, stopRestAPI, isRestAPIRunning } = require('./
 const providerAPI = require('./provider-api.cjs');
 const qwenUpload = require('./providers/qwen-upload.cjs');
 const claudeUpload = require('./providers/claude-upload.cjs');
+const chatgptUpload = require('./providers/chatgpt-upload.cjs');
 
 // Add timestamps to console logs
 const originalLog = console.log;
@@ -718,6 +719,20 @@ async function handleMCPRequest(request) {
                 // the engine last used. That is not hypothetical: a batch audit was found
                 // as the second user turn of a conversation titled "Reply PONG", which is
                 // why the reviews looked like they had never reached chatgpt.com at all.
+                // Upload before the send. A failed upload must fail the CALL rather than
+                // fall through to a text-only turn that silently pretends the file went.
+                // qwenAttachmentPaths is the shared reader for data.attachments/filePath
+                // despite its name — claude uses it too.
+                if (provider === 'chatgpt') {
+                    const wantedCg = qwenAttachmentPaths(data);
+                    if (wantedCg.length) {
+                        if (!fileReferenceEnabled) {
+                            return { success: false, error: 'File reference is disabled. Enable it in Agent Hub settings.' };
+                        }
+                        sendOptions.attachments = await uploadAttachmentsToChatGPT(wantedCg);
+                    }
+                }
+
                 if (provider === 'chatgpt' && data.newChat) {
                     await browserManager.executeScript('chatgpt',
                         'window.__proximaChatGPT ? (window.__proximaChatGPT.newConversation(), true) : false');
@@ -3408,6 +3423,74 @@ ipcMain.handle('uninstall-cli', async () => {
 const _qwenPendingAttachments = [];
 // What the last claude send attached, so the IPC reply can report it.
 let _claudeUploadSummary = null;
+
+
+/**
+ * Upload local files to ChatGPT and return descriptors for the send.
+ *
+ * Four steps per file, three of which must be issued from the page (cookie + bearer
+ * auth); only the byte PUT escapes, straight from disk to Azure. See
+ * providers/chatgpt-upload.cjs for the captured flow and why the app's
+ * upload_reservations call is deliberately skipped.
+ *
+ * Every file is validated before any byte goes out, for the same reason as the Qwen
+ * path: failing on file 2 after file 1 has uploaded leaves a half-attached turn with
+ * no way for the caller to tell which part landed.
+ */
+async function uploadAttachmentsToChatGPT(filePaths) {
+    const webContents = browserManager.getWebContents('chatgpt');
+    if (!webContents) throw new Error('Provider chatgpt not initialized');
+
+    const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean);
+    if (!paths.length) return [];
+
+    const kinds = paths.map((p) => chatgptUpload.classify(p));
+    const stats = paths.map((p) => chatgptUpload.validate(p));
+
+    const out = [];
+    for (let i = 0; i < paths.length; i++) {
+        const name = path.basename(paths[i]);
+        const size = stats[i].size;
+        const kind = kinds[i];
+
+        const created = await webContents.executeJavaScript(
+            `window.__proximaChatGPT.createUpload(${JSON.stringify({ name, size, mime: kind.mime })})`);
+        if (!created || !created.uploadUrl || !created.fileId) {
+            throw new Error(`ChatGPT: no upload URL returned for ${name}`);
+        }
+
+        const t0 = Date.now();
+        await chatgptUpload.putToBlob(created.uploadUrl, paths[i], size, kind.mime);
+        await webContents.executeJavaScript(
+            `window.__proximaChatGPT.finalizeUpload(${JSON.stringify({ fileId: created.fileId, name, mime: kind.mime })})`);
+
+        // Informational only — a turn can reference the file without it, so a failure
+        // here must not discard an upload that already succeeded.
+        const info = await webContents.executeJavaScript(
+            `window.__proximaChatGPT.uploadedFileInfo(${JSON.stringify(created.fileId)})`).catch(() => null);
+
+        // Dimensions are read locally because /simple does not return them and the
+        // captured client sends them in both the pointer and the descriptor.
+        const dims = kind.isImage ? chatgptUpload.imageSize(paths[i], kind.mime) : null;
+        if (kind.isImage && !dims) {
+            console.log(`[ChatGPT] ${name}: could not read image dimensions — omitting them`);
+        }
+
+        console.log(`[ChatGPT] attached ${name} — ${kind.mime}, ` +
+            `${(size / 1024 / 1024).toFixed(2)}MB, ${Date.now() - t0}ms`);
+
+        out.push({
+            fileId: created.fileId,
+            name, size,
+            mime: kind.mime,
+            isImage: kind.isImage,
+            width: dims ? dims.width : null,
+            height: dims ? dims.height : null,
+            libraryFileId: (info && info.library_file_id) || null
+        });
+    }
+    return out;
+}
 
 async function uploadAttachmentsToQwen(filePaths, model) {
     const webContents = browserManager.getWebContents('qwen');

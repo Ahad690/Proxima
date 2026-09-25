@@ -10,6 +10,92 @@
     var CHATGPT_BASE = 'https://chatgpt.com';
     var TIMEOUT = 360000;
 
+
+    // ─── Attachment upload (in-page steps) ──────────
+    // Captured 2026-09-25. Only these three touch chatgpt.com; the bytes go straight
+    // to Azure from Node — see providers/chatgpt-upload.cjs for why.
+
+    // Step 1: reserve the file and get a pre-signed blob URL back.
+    async function createUpload(meta) {
+        var token = await _getToken();
+        var headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+        if (_accountId) headers['ChatGPT-Account-Id'] = _accountId;
+        var body = {
+            file_name: meta.name,
+            file_size: meta.size,
+            use_case: 'multimodal',
+            timezone_offset_min: new Date().getTimezoneOffset(),
+            reset_rate_limits: false,
+            supports_direct_azure_multipart: true,
+            mime_type: meta.mime,
+            entry_surface: 'chat_composer',
+            selection_method: 'file_picker',
+            client_resolved_mime_type: meta.mime,
+            mime_resolution_source: 'filename_extension',
+            store_in_library: true,
+            library_persistence_mode: 'opportunistic'
+        };
+        var res = await fetch('/backend-api/files', {
+            method: 'POST', credentials: 'include', headers: headers,
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+            var errTxt = await res.text();
+            throw new Error('ChatGPT file create failed (' + res.status + '): ' + errTxt.slice(0, 300));
+        }
+        var j = await res.json();
+        if (!j || !j.upload_url || !j.file_id) {
+            throw new Error('ChatGPT file create returned no upload_url/file_id');
+        }
+        return { uploadUrl: j.upload_url, fileId: j.file_id };
+    }
+
+    // Step 3: tell the server the bytes have landed. The response is a stream of
+    // file.processing.* events; the turn only needs it to have been accepted, so the
+    // body is drained rather than parsed.
+    async function finalizeUpload(meta) {
+        var token = await _getToken();
+        var headers = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+        if (_accountId) headers['ChatGPT-Account-Id'] = _accountId;
+        var res = await fetch('/backend-api/files/process_upload_stream', {
+            method: 'POST', credentials: 'include', headers: headers,
+            body: JSON.stringify({
+                file_id: meta.fileId,
+                use_case: 'multimodal',
+                index_for_retrieval: false,
+                file_name: meta.name,
+                library_persistence_mode: 'opportunistic',
+                entry_surface: 'chat_composer',
+                metadata: {
+                    store_in_library: true,
+                    is_temporary_chat: false,
+                    library_eligibility_reason: 'eligible',
+                    is_project_thread: false
+                },
+                mime_type: meta.mime
+            })
+        });
+        if (!res.ok) {
+            var e1 = await res.text();
+            throw new Error('ChatGPT finalize failed (' + res.status + '): ' + e1.slice(0, 300));
+        }
+        try { await res.text(); } catch (e) { }
+        return true;
+    }
+
+    // Step 4: metadata. library_file_id belongs in the attachment descriptor; the rest
+    // is informational. A failure here is NOT fatal — the turn can reference the file
+    // without it, so the caller keeps going rather than losing an uploaded file.
+    async function uploadedFileInfo(fileId) {
+        var token = await _getToken();
+        var headers = { 'Authorization': 'Bearer ' + token };
+        if (_accountId) headers['ChatGPT-Account-Id'] = _accountId;
+        var res = await fetch('/backend-api/files/' + encodeURIComponent(fileId) + '/simple',
+            { credentials: 'include', headers: headers });
+        if (!res.ok) return null;
+        try { return await res.json(); } catch (e) { return null; }
+    }
+
     // ─── Default model and effort ───────────────────
     // GPT-5.6 Sol on the thinking lane, at the picker's "High" preset.
     //
@@ -636,13 +722,45 @@
 
         var _model = (options && options.model) ? options.model : DEFAULT_MODEL;
 
+        // Attachments arrive already uploaded — main-v2 does the three-step dance and
+        // hands back descriptors. Captured shape: images make the turn 'multimodal_text'
+        // with the pointers FIRST and the text last, and every file also appears in
+        // metadata.attachments. A turn with no attachments is unchanged.
+        var _atts = (options && options.attachments) || [];
+        var _content = { content_type: 'text', parts: [message] };
+        var _msgMeta = {};
+        if (_atts.length) {
+            var _imgs = _atts.filter(function (a) { return a.isImage; });
+            if (_imgs.length) {
+                var _parts = _imgs.map(function (a) {
+                    var p = {
+                        content_type: 'image_asset_pointer',
+                        asset_pointer: 'sediment://' + a.fileId,
+                        size_bytes: a.size
+                    };
+                    if (a.width && a.height) { p.width = a.width; p.height = a.height; }
+                    return p;
+                });
+                _parts.push(message);
+                _content = { content_type: 'multimodal_text', parts: _parts };
+            }
+            _msgMeta.attachments = _atts.map(function (a) {
+                var d = { id: a.fileId, size: a.size, name: a.name,
+                    mime_type: a.mime, source: 'local', is_big_paste: false };
+                if (a.width && a.height) { d.width = a.width; d.height = a.height; }
+                if (a.libraryFileId) d.library_file_id = a.libraryFileId;
+                return d;
+            });
+            console.log('[Proxima ChatGPT] attaching ' + _atts.length + ' file(s)');
+        }
+
         var payload = {
             action: 'next',
             messages: [{
                 id: crypto.randomUUID(),
                 author: { role: 'user' },
-                content: { content_type: 'text', parts: [message] },
-                metadata: {}
+                content: _content,
+                metadata: _msgMeta
             }],
             model: _model,
 
@@ -746,6 +864,8 @@
 
     window.__proximaChatGPT = {
         send: send, newConversation: newConversation,
+        createUpload: createUpload, finalizeUpload: finalizeUpload,
+        uploadedFileInfo: uploadedFileInfo,
         // Read by the main process right after a send, because the signed URLs inside
         // expire in under three minutes.
         lastImages: function () { return _lastImages; },
