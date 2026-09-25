@@ -60,10 +60,15 @@ function resolveProvider(model) {
     return 'perplexity';
 }
 
+// null means "no opinion — let the provider engine's default stand". It used to
+// return 'standard' for anything without 'thinking' in the name, which silently
+// DOWNGRADED any reasoning model whose slug does not contain that word. gpt-6-astra-wm
+// is exactly that: it reasons, at max, and would have been reviewed at standard.
 function resolveThinkingEffort(model) {
-    if (!model) return 'standard';
+    if (!model || model.toLowerCase() === 'chatgpt') return null;
     const m = model.toLowerCase();
-    return m.includes('thinking') ? 'extended' : 'standard';
+    if (m.includes('thinking')) return 'extended';
+    return null;
 }
 
 function normalizePromptText(text) {
@@ -200,7 +205,14 @@ function queryAI(message, model, provider, opts) {
         // Build the correct payload for each provider
         function buildSendPayload() {
             if (provider === 'chatgpt') {
-                return { message, model, thinkingEffort: REVIEW_THINKING_EFFORT };
+                // A bare 'chatgpt' means "use the engine's configured default". Sending
+                // nothing is deliberate: the engine already owns DEFAULT_MODEL and
+                // DEFAULT_EFFORT, and a second copy here would drift out of step with it
+                // without anything failing.
+                const payload = { message };
+                if (model && model.toLowerCase() !== 'chatgpt') payload.model = model;
+                if (REVIEW_THINKING_EFFORT) payload.thinkingEffort = REVIEW_THINKING_EFFORT;
+                return payload;
             }
             if (provider === 'qwen') {
                 // The Qwen engine picks its own default model (qwen3.8-max); chat_type

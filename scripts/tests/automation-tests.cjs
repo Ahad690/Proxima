@@ -248,8 +248,11 @@ function testThinkingEffortWiring() {
     const mainProcess = fs.readFileSync(path.join(__dirname, '../../electron/main-v2.cjs'), 'utf8');
     const chatgptEngine = fs.readFileSync(path.join(__dirname, '../../electron/providers/chatgpt-engine.js'), 'utf8');
 
-    if (!reviewScript.includes('thinkingEffort: REVIEW_THINKING_EFFORT')) {
-        throw new Error('Review IPC payload does not include thinkingEffort');
+    // Behaviour, not spelling: the effort must reach the payload when there IS one.
+    // It is deliberately omitted when resolveThinkingEffort() has no opinion, so that
+    // the engine's own default governs rather than a second copy here.
+    if (!/payload\.thinkingEffort = REVIEW_THINKING_EFFORT/.test(reviewScript)) {
+        throw new Error('Review IPC payload does not carry thinkingEffort');
     }
     if (!repairClient.includes('return { message, model, thinkingEffort };')) {
         throw new Error('Repair IPC payload does not include thinkingEffort');
@@ -309,9 +312,16 @@ function testThinkingEffortWiring() {
             throw new Error('reviewModel is qwen but reviewThinking is false — every ' +
                 'review would run unreasoned');
         }
+    } else if (revModel.toLowerCase() === 'chatgpt') {
+        // Defers to the engine, whose own default effort is asserted above.
     } else if (revModel.indexOf('thinking') === -1) {
-        throw new Error('reviewModel "' + revModel + '" is not a thinking-lane slug and ' +
-            'is not qwen, so reviews would run at standard effort');
+        // A named chatgpt slug without 'thinking' gets no effort from
+        // resolveThinkingEffort(), so it would inherit the engine default silently.
+        // That may be fine, but it should be stated, not stumbled into: use 'chatgpt'
+        // to defer on purpose, or name a thinking-lane slug.
+        throw new Error('reviewModel "' + revModel + '" pins a chatgpt slug with no ' +
+            'effort mapping — use "chatgpt" to defer to the engine default, or a ' +
+            'thinking-lane slug');
     }
 
     console.log('✅ Thinking Effort Wiring tests passed.');
