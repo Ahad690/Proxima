@@ -805,76 +805,85 @@ async function runBatchReview(shas, options) {
         ' (' + bundle.body.length + ' bytes)' +
         (bundle.omitted.length ? ', ' + bundle.omitted.length + ' diff(s) omitted for size' : ''));
 
-    const header = [
-        'You are auditing a BATCH of ' + bundle.commits.length + ' commits pushed together.',
-        'Review them as ONE change set: a later commit may fix what an earlier one broke,',
-        'and that counts as resolved — do not report a finding that a later commit fixes.',
-        ''
-    ];
-    const tail = [
-        '', '---', '',
-        'Produce ONE report with this structure:',
-        '',
-        '## Batch Verdict',
-        '**PASS / FAIL / NEEDS WORK** — one sentence for the change set as a whole.',
-        '',
-        '## Per-Commit',
-        'One short block per commit: the short sha, its verdict, and only where there is a',
-        'real finding, the quoted line and the fix. "None found." is expected and correct.',
-        '',
-        '## Cross-Commit Issues',
-        'Problems visible only across commits: a caller updated in one and missed in',
-        'another, a helper changed after its last use, a fix later reverted. "None found."',
-        'if there are none.'
-    ];
+    // Serialise against every other review. runReview has always taken this lock;
+    // this path did not, so two pushes close together drove one browser session at
+    // once — the engine keeps a single conversation per provider, so the turns
+    // interleave and both reviews come back wrong while both report success.
+    await acquireLockWithRetry(bundle.commits[bundle.commits.length - 1].sha, log);
+    try {
+        const header = [
+            'You are auditing a BATCH of ' + bundle.commits.length + ' commits pushed together.',
+            'Review them as ONE change set: a later commit may fix what an earlier one broke,',
+            'and that counts as resolved — do not report a finding that a later commit fixes.',
+            ''
+        ];
+        const tail = [
+            '', '---', '',
+            'Produce ONE report with this structure:',
+            '',
+            '## Batch Verdict',
+            '**PASS / FAIL / NEEDS WORK** — one sentence for the change set as a whole.',
+            '',
+            '## Per-Commit',
+            'One short block per commit: the short sha, its verdict, and only where there is a',
+            'real finding, the quoted line and the fix. "None found." is expected and correct.',
+            '',
+            '## Cross-Commit Issues',
+            'Problems visible only across commits: a caller updated in one and missed in',
+            'another, a helper changed after its last use, a fix later reverted. "None found."',
+            'if there are none.'
+        ];
 
-    // Attach when the provider can take a file; fall back to inline on refusal. The
-    // fallback is safe because main-v2 FAILS an upload rather than silently sending
-    // text-only, so a caught error here means the file genuinely did not go.
-    const wantAttach = UPLOAD_CAPABLE.indexOf(REVIEW_PROVIDER) !== -1 &&
-        options.attach !== false && automationConfig.batchAttach !== 'never';
-    const inlinePrompt = header.concat(AUDIT_RULES).concat(['', '---', '', bundle.body])
-        .concat(tail).join('\n');
-    let text = null, delivery = null;
+        // Attach when the provider can take a file; fall back to inline on refusal. The
+        // fallback is safe because main-v2 FAILS an upload rather than silently sending
+        // text-only, so a caught error here means the file genuinely did not go.
+        const wantAttach = UPLOAD_CAPABLE.indexOf(REVIEW_PROVIDER) !== -1 &&
+            options.attach !== false && automationConfig.batchAttach !== 'never';
+        const inlinePrompt = header.concat(AUDIT_RULES).concat(['', '---', '', bundle.body])
+            .concat(tail).join('\n');
+        let text = null, delivery = null;
 
-    if (wantAttach) {
-        const filePrompt = header.concat(['The change set is attached as ' +
-            path.basename(bundlePath) + '. Read it in full before answering.'])
-            .concat(AUDIT_RULES).concat(tail).join('\n');
-        try {
-            text = await queryAI(filePrompt, REVIEW_MODEL, REVIEW_PROVIDER,
-                { attachments: [bundlePath] });
-            delivery = 'attachment';
-        } catch (e) {
-            log(yellow('⚠') + ' file delivery failed (' + e.message + ') — falling back to inline text');
+        if (wantAttach) {
+            const filePrompt = header.concat(['The change set is attached as ' +
+                path.basename(bundlePath) + '. Read it in full before answering.'])
+                .concat(AUDIT_RULES).concat(tail).join('\n');
+            try {
+                text = await queryAI(filePrompt, REVIEW_MODEL, REVIEW_PROVIDER,
+                    { attachments: [bundlePath] });
+                delivery = 'attachment';
+            } catch (e) {
+                log(yellow('⚠') + ' file delivery failed (' + e.message + ') — falling back to inline text');
+            }
+        } else if (UPLOAD_CAPABLE.indexOf(REVIEW_PROVIDER) === -1) {
+            log(dim('   ' + REVIEW_PROVIDER + ' has no upload path in Proxima — sending inline'));
         }
-    } else if (UPLOAD_CAPABLE.indexOf(REVIEW_PROVIDER) === -1) {
-        log(dim('   ' + REVIEW_PROVIDER + ' has no upload path in Proxima — sending inline'));
-    }
 
-    if (text === null) {
-        try {
-            text = await queryAI(inlinePrompt, REVIEW_MODEL, REVIEW_PROVIDER, {});
-            delivery = 'inline';
-        } catch (e) {
-            const errPath = path.join(REVIEW_DIR, 'error-' + stem + '.md');
-            fs.writeFileSync(errPath, '---\nbatch: ' + stem + '\ncommits: ' +
-                bundle.commits.map(function (c) { return c.shortSha; }).join(',') +
-                '\nerror: ' + e.message + '\nerror_at: ' + new Date().toISOString() +
-                '\n---\n\n# Batch Review Failed\n\n**Error:** ' + e.message + '\n', 'utf8');
-            log(red('❌') + ' batch review failed: ' + e.message);
-            return;
+        if (text === null) {
+            try {
+                text = await queryAI(inlinePrompt, REVIEW_MODEL, REVIEW_PROVIDER, {});
+                delivery = 'inline';
+            } catch (e) {
+                const errPath = path.join(REVIEW_DIR, 'error-' + stem + '.md');
+                fs.writeFileSync(errPath, '---\nbatch: ' + stem + '\ncommits: ' +
+                    bundle.commits.map(function (c) { return c.shortSha; }).join(',') +
+                    '\nerror: ' + e.message + '\nerror_at: ' + new Date().toISOString() +
+                    '\n---\n\n# Batch Review Failed\n\n**Error:** ' + e.message + '\n', 'utf8');
+                log(red('❌') + ' batch review failed: ' + e.message);
+                return;
+            }
         }
-    }
 
-    const outPath = path.join(REVIEW_DIR, stem + '.md');
-    fs.writeFileSync(outPath, '---\nbatch: ' + stem + '\ncommits: ' +
-        bundle.commits.map(function (c) { return c.shortSha; }).join(',') +
-        '\ncommit_count: ' + bundle.commits.length + '\nmodel: ' + REVIEW_MODEL +
-        '\ndelivery: ' + delivery + '\nbundle: ' + path.basename(bundlePath) +
-        '\nomitted_diffs: ' + (bundle.omitted.join(',') || 'none') +
-        '\nreviewed_at: ' + new Date().toISOString() + '\n---\n\n' + text, 'utf8');
-    log(green('✅') + ' batch review (' + delivery + ') -> ' + outPath);
+        const outPath = path.join(REVIEW_DIR, stem + '.md');
+        fs.writeFileSync(outPath, '---\nbatch: ' + stem + '\ncommits: ' +
+            bundle.commits.map(function (c) { return c.shortSha; }).join(',') +
+            '\ncommit_count: ' + bundle.commits.length + '\nmodel: ' + REVIEW_MODEL +
+            '\ndelivery: ' + delivery + '\nbundle: ' + path.basename(bundlePath) +
+            '\nomitted_diffs: ' + (bundle.omitted.join(',') || 'none') +
+            '\nreviewed_at: ' + new Date().toISOString() + '\n---\n\n' + text, 'utf8');
+        log(green('✅') + ' batch review (' + delivery + ') -> ' + outPath);
+    } finally {
+        releaseLock();
+    }
 }
 
 function spawnBatchBackground(shas) {
