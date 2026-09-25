@@ -146,6 +146,11 @@
     var _tokenExpiry = 0;
     var _accountId = null;      // ChatGPT-Account-Id, needed to resolve image assets
     var _lastImages = [];       // generated images from the most recent turn
+    // File ids attached BY US on the current turn. The stream echoes the user
+    // message back, so without this an uploaded image is collected as though the
+    // model had produced it — measured: the saved "generated" png was byte-identical
+    // to the file just uploaded.
+    var _turnUploadIds = [];
 
     // ─── SHA3-512 (pure JS, required for POW challenges) ───
 
@@ -303,6 +308,8 @@
             // "sediment://file_abc" -> "file_abc". The scheme is decoration; the download
             // endpoint takes the bare id.
             var id = String(p.asset_pointer).replace(/^[a-z]+:\/\//i, '');
+            // Ours, echoed back on the stream — not something the model generated.
+            if (_turnUploadIds.indexOf(id) !== -1) continue;
             if (into.some(function (x) { return x.id === id; })) continue;
             var meta = p.metadata || {};
             into.push({
@@ -727,6 +734,9 @@
         // with the pointers FIRST and the text last, and every file also appears in
         // metadata.attachments. A turn with no attachments is unchanged.
         var _atts = (options && options.attachments) || [];
+        // Reassigned every turn, including to empty: a stale exclusion list would
+        // silently drop a real generated image that happened to reuse an id.
+        _turnUploadIds = _atts.map(function (a) { return a.fileId; });
         var _content = { content_type: 'text', parts: [message] };
         var _msgMeta = {};
         if (_atts.length) {

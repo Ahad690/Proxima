@@ -23,13 +23,16 @@ const grab = (re, what) => {
 // Lift the real functions, with fetch/auth stubbed so no network is touched.
 const code = [
     grab(/var IMAGE_PART = '[^']+';/, 'IMAGE_PART'),
+    // Lifted too: the collector consults it to skip images WE uploaded, which the
+    // stream echoes back inside the user message.
+    grab(/var _turnUploadIds = \[\];/, '_turnUploadIds'),
     grab(/function collectImageParts\(msg, into\)[\s\S]*?\n    \}/, 'collectImageParts'),
     grab(/async function fetchConversationImages\(convId\)[\s\S]*?\n    \}/, 'fetchConversationImages')
 ].join('\n');
 
 let stubbedMessages = [];
 const makeApi = () => new Function('fetch', '_getToken', '_accountId', 'encodeURIComponent',
-    code + '\n return { fetchConversationImages: fetchConversationImages, collectImageParts: collectImageParts };')(
+    code + '\n return { fetchConversationImages: fetchConversationImages, collectImageParts: collectImageParts, setUploadIds: function (ids) { _turnUploadIds = ids; } };')(
     // fetch: first call is the conversation read
     async () => ({ ok: true, json: async () => ({ messages: stubbedMessages }) }),
     async () => 'stub-token',
@@ -96,6 +99,24 @@ const ok = (c, l) => { console.log((c ? '  PASS  ' : '  FAIL  ') + l); if (!c) f
     r = await api.fetchConversationImages('c1');
     ok(r.images.length === 0, 'an image from an earlier turn is NOT re-collected');
     ok(r.settled === true, 'and the later text turn still settles');
+
+    // 5. THE UPLOAD ECHO. Once Proxima could attach files, an image WE uploaded came
+    //    back on the stream inside the echoed user message and was collected as though
+    //    the model had produced it. Measured: the png written to chatgpt-media had the
+    //    same sha256 as the file just uploaded. Excluded by id, not by role — the role
+    //    filter is exactly what got this wrong the first time round.
+    const MINE = 'file_0000000006f8820ba0a29ec02b00c501';
+    api.setUploadIds([MINE]);
+    let collected = [];
+    api.collectImageParts(msg('user', 'multimodal_text', null, [POINTER]), collected);
+    ok(collected.length === 0, 'an image WE uploaded is not collected as generated');
+
+    // And the exclusion must not persist: a later turn generating an image with the
+    // same id would otherwise be silently dropped.
+    api.setUploadIds([]);
+    collected = [];
+    api.collectImageParts(msg('tool', 'multimodal_text', 'final', [POINTER]), collected);
+    ok(collected.length === 1, 'clearing the upload list restores normal collection');
 
     console.log(fails ? '\n' + fails + ' FAILURE(S)' : '\nall image-turn assertions passed');
     process.exit(fails ? 1 : 0);
