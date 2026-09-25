@@ -275,18 +275,43 @@ function testThinkingEffortWiring() {
         throw new Error('ChatGPT effort gate keys off options.model again — a default ' +
             'call will send no oai-last-model-config and run unreasoned');
     }
-    const cgModel = (chatgptEngine.match(/var DEFAULT_MODEL = '([^']+)'/) || [])[1];
-    if (!cgModel || cgModel.indexOf('thinking') === -1) {
-        throw new Error('ChatGPT DEFAULT_MODEL "' + cgModel + '" is not a thinking-lane ' +
-            'slug, so the effort gate will never fire');
+    // Effort must ride TOP-LEVEL and unconditionally. Captured from the real app:
+    // it sends thinking_effort beside the model and no oai-last-model-config at all.
+    // The previous assertion here demanded a slug containing 'thinking', which was
+    // true of the old name-gated block and became wrong the moment the default moved
+    // to gpt-6-astra-wm — a slug with no 'thinking' in it that still takes an effort.
+    if (!/payload\.thinking_effort\s*=/.test(chatgptEngine)) {
+        throw new Error('ChatGPT payload does not set a top-level thinking_effort');
     }
-    // Same trap one layer out: the review pipeline picks its effort from the model
-    // name, so a non-thinking reviewModel silently drops reviews to standard effort.
-    const autoCfg = fs.readFileSync(path.join(__dirname, '../lib/config.cjs'), 'utf8');
-    const revModel = (autoCfg.match(/reviewModel:\s*"([^"]+)"/) || [])[1];
-    if (!revModel || revModel.indexOf('thinking') === -1) {
-        throw new Error('reviewModel "' + revModel + '" is not a thinking-lane slug — ' +
-            'reviews would run at standard effort');
+    // Match the CODE form, not the name: the comments above the payload explain why
+    // the field was dropped, and an indexOf on the bare name matches that prose.
+    if (/payload[['"]oai-last-model-config/.test(chatgptEngine)) {
+        throw new Error('ChatGPT engine still sends oai-last-model-config — the app ' +
+            'stopped sending it, and it does not carry effort for the current models');
+    }
+    const cgEffort = (chatgptEngine.match(/var DEFAULT_EFFORT = '([^']+)'/) || [])[1];
+    const cgSeen = (chatgptEngine.match(/var EFFORTS_SEEN = \[([^\]]*)\]/) || [])[1] || '';
+    if (!cgEffort || cgSeen.indexOf("'" + cgEffort + "'") === -1) {
+        throw new Error('ChatGPT DEFAULT_EFFORT "' + cgEffort + '" is not among the ' +
+            'efforts observed on the wire (' + cgSeen + ')');
+    }
+    // Same trap one layer out: reviews must actually reason. This reads the EFFECTIVE
+    // config — loadConfig() lets a repo-root proxima-automation.config.json override the
+    // shipped default, and this repo's does (reviewModel 'qwen'). An earlier version of
+    // this check read the default and passed while the real setting was something else,
+    // which is worse than no check: it reports on a value nothing uses.
+    const effective = require('../lib/config.cjs').loadConfig();
+    const revModel = String(effective.reviewModel || '');
+    const isQwen = /^qwen|^tongyi/.test(revModel.toLowerCase());
+    if (isQwen) {
+        // Qwen reasons on a boolean, not on the model name.
+        if (effective.reviewThinking === false) {
+            throw new Error('reviewModel is qwen but reviewThinking is false — every ' +
+                'review would run unreasoned');
+        }
+    } else if (revModel.indexOf('thinking') === -1) {
+        throw new Error('reviewModel "' + revModel + '" is not a thinking-lane slug and ' +
+            'is not qwen, so reviews would run at standard effort');
     }
 
     console.log('✅ Thinking Effort Wiring tests passed.');

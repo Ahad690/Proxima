@@ -5,7 +5,9 @@
  */
 const net = require('net');
 
-const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
+// Resolved from ipc-port.json rather than assumed — see the note in proxima-review.cjs.
+const { resolvePortSync } = require('./proxima-port.cjs');
+const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || resolvePortSync();
 const IPC_HOST = '127.0.0.1';
 const SOCKET_TIMEOUT_MS = parseInt(process.env.PROXIMA_IPC_TIMEOUT_MS || '', 10) || (15 * 60 * 1000);
 const CAPTURE_RETRY_DELAY_MS = parseInt(process.env.PROXIMA_CAPTURE_RETRY_DELAY_MS || '', 10) || 2500;

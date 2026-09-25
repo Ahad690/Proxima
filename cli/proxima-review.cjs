@@ -18,7 +18,11 @@ const os = require('os');
 const { execSync, spawn } = require('child_process');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || 19222;
+// Resolved, not assumed. Proxima falls back to 19223 when 19222 is taken and records
+// the live port in ipc-port.json; hardcoding the default meant every review after such
+// a restart failed with a message blaming Proxima for being down when it was running.
+const { resolvePortSync } = require('../scripts/lib/proxima-port.cjs');
+const IPC_PORT = parseInt(process.env.AGENT_HUB_PORT) || resolvePortSync();
 const IPC_HOST = '127.0.0.1';
 
 // Load automation config if available
@@ -167,7 +171,11 @@ const dim = (t) => `${c.dim}${t}${c.reset}`;
 // Routes to the correct provider (chatgpt or perplexity) based on REVIEW_PROVIDER.
 // ChatGPT:    sendMessage with { message, model, thinkingEffort }
 // Perplexity: sendMessage with { message, modelPreference, deepSearch: false }
-function queryAI(message, model, provider) {
+// `opts.attachments` are LOCAL PATHS. main-v2 uploads them for claude/qwen before
+// sending, and refuses outright when file reference is disabled rather than quietly
+// sending a text-only turn — which is what makes the inline fallback safe to rely on.
+function queryAI(message, model, provider, opts) {
+    opts = opts || {};
     return new Promise((resolve, reject) => {
         const socket = net.createConnection({ port: IPC_PORT, host: IPC_HOST });
         let buffer = '';
@@ -208,7 +216,12 @@ function queryAI(message, model, provider) {
         }
 
         socket.on('connect', () => {
-            ipcSend('sendMessage', buildSendPayload());
+            const _payload = buildSendPayload();
+            if (opts.attachments && opts.attachments.length &&
+                (provider === 'claude' || provider === 'qwen')) {
+                _payload.attachments = opts.attachments;
+            }
+            ipcSend('sendMessage', _payload);
         });
 
         socket.on('data', (chunk) => {
@@ -449,23 +462,7 @@ async function runReview(commitRef, options = {}) {
         ``,
         `GROUND RULES — violating any of these invalidates your review:`,
         ``,
-        `1. **QUOTE-OR-DROP.** Every finding MUST quote the exact diff line(s) it refers to in a fenced code block. Not "the code does X" — show the literal code. If you can't quote it, you don't have a finding. Cut it.`,
-        ``,
-        `2. **FIX-OR-DROP.** Every finding MUST include a "Suggested fix" in a fenced code block showing the corrected code. Prose like "add validation here" is not a fix. If you cannot write the fix as code, you don't understand the problem well enough to flag it. Cut it.`,
-        ``,
-        `3. **VERIFY BEHAVIORAL CLAIMS WITH WEB SEARCH.** Before claiming what a stdlib/framework/API does ("Python's splitlines() mishandles CRLF", "React.memo doesn't deep-compare", "the From header affects SPF", "useMemo with array deps misfires"), look it up. Unverified behavioral claims are the #1 source of bogus review findings. When in doubt, do not claim.`,
-        ``,
-        `4. **NO HEDGED FINDINGS.** "May fail under certain conditions", "could cause issues", "potential race", "might not prevent rerenders" — without a concrete reproduction (specific input, sequence of calls, or state) these are noise. Cut them. If you cannot describe how to trigger the bug in one sentence, you don't have a bug.`,
-        ``,
-        `5. **NO GENERIC DEFENSIVE-CODING SUGGESTIONS.** "Add input validation", "consider error handling", "should validate types" with no concrete failure path are not findings. They are filler.`,
-        ``,
-        `6. **NEVER MIRROR THE COMMIT MESSAGE.** The message states the author's *intent*. Your job is to check the *code* against it, not paraphrase the message back.`,
-        ``,
-        `7. **NONE IS A VALID ANSWER.** If a section has no real findings, write "None found." Do NOT invent findings to fill space. A short correct review is the goal. The author shipped clean code is a legitimate, common outcome.`,
-        ``,
-        `8. **DEFAULT SCORE OF 6 IS A SMELL.** If your finding list is short, score high (8-10). Reserve 4-6 for actual correctness bugs. Do not anchor on the middle.`,
-        ``,
-        `9. **RESPECT LINE BREAKS.** Treat every newline in the diff as significant; do not collapse or rewrite multi-line sections.`,
+        ...AUDIT_RULES,
         ``,
         `---`,
         `Commit: ${shortSha}`,
@@ -676,6 +673,222 @@ function spawnBackground(sha) {
 }
 
 
+
+// ─── Shared audit rules ───────────────────────────────────────────────────────
+// One copy, used by both the per-commit and the batch prompt. Two copies of a rubric
+// drift apart, and a drifted rubric is invisible in the output — the review still
+// looks like a review.
+const AUDIT_RULES = [
+        `1. **QUOTE-OR-DROP.** Every finding MUST quote the exact diff line(s) it refers to in a fenced code block. Not "the code does X" — show the literal code. If you can't quote it, you don't have a finding. Cut it.`,
+        ``,
+        `2. **FIX-OR-DROP.** Every finding MUST include a "Suggested fix" in a fenced code block showing the corrected code. Prose like "add validation here" is not a fix. If you cannot write the fix as code, you don't understand the problem well enough to flag it. Cut it.`,
+        ``,
+        `3. **VERIFY BEHAVIORAL CLAIMS WITH WEB SEARCH.** Before claiming what a stdlib/framework/API does ("Python's splitlines() mishandles CRLF", "React.memo doesn't deep-compare", "the From header affects SPF", "useMemo with array deps misfires"), look it up. Unverified behavioral claims are the #1 source of bogus review findings. When in doubt, do not claim.`,
+        ``,
+        `4. **NO HEDGED FINDINGS.** "May fail under certain conditions", "could cause issues", "potential race", "might not prevent rerenders" — without a concrete reproduction (specific input, sequence of calls, or state) these are noise. Cut them. If you cannot describe how to trigger the bug in one sentence, you don't have a bug.`,
+        ``,
+        `5. **NO GENERIC DEFENSIVE-CODING SUGGESTIONS.** "Add input validation", "consider error handling", "should validate types" with no concrete failure path are not findings. They are filler.`,
+        ``,
+        `6. **NEVER MIRROR THE COMMIT MESSAGE.** The message states the author's *intent*. Your job is to check the *code* against it, not paraphrase the message back.`,
+        ``,
+        `7. **NONE IS A VALID ANSWER.** If a section has no real findings, write "None found." Do NOT invent findings to fill space. A short correct review is the goal. The author shipped clean code is a legitimate, common outcome.`,
+        ``,
+        `8. **DEFAULT SCORE OF 6 IS A SMELL.** If your finding list is short, score high (8-10). Reserve 4-6 for actual correctness bugs. Do not anchor on the middle.`,
+        ``,
+        `9. **RESPECT LINE BREAKS.** Treat every newline in the diff as significant; do not collapse or rewrite multi-line sections.`,
+];
+
+// ─── Batch review ─────────────────────────────────────────────────────────────
+// A push of N commits used to fan out into N windows, N AI calls and N review files:
+// N times the quota for one logical change set, and the reviewer never saw how the
+// commits related to each other.
+const BATCH_ENABLED = process.env.PROXIMA_BATCH_REVIEW
+    ? process.env.PROXIMA_BATCH_REVIEW !== '0'
+    : automationConfig.batchReviews !== false;
+const BATCH_FORMAT = (process.env.PROXIMA_BATCH_FORMAT || automationConfig.batchFormat || 'md').toLowerCase();
+// Diffs are unbounded. Cap the bundle and SAY what was dropped, rather than sending a
+// truncated document that reads complete.
+const BATCH_MAX_BYTES = Number(process.env.PROXIMA_BATCH_MAX_BYTES ||
+    automationConfig.batchMaxBytes || 350000);
+// Only these have an upload path in Proxima (claude-upload.cjs / qwen-upload.cjs).
+// ChatGPT has none, so a file request degrades to inline text there. That is a missing
+// capability, not a quota limit — a subscription does not change it.
+const UPLOAD_CAPABLE = ['claude', 'qwen'];
+
+function resolveRangeCommits(spec) {
+    const range = spec.indexOf('..') !== -1 ? spec : spec + '..HEAD';
+    const out = execSync('git rev-list --reverse ' + range, { encoding: 'utf8' }).trim();
+    return out ? out.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+}
+
+// Metadata for every commit always; diffs until the cap, then metadata-only with the
+// omission recorded IN the bundle so the reviewer knows its view is partial.
+function buildBundle(shas) {
+    const commits = [];
+    let bytes = 0;
+    const omitted = [];
+    for (const sha of shas) {
+        let info, diff = '';
+        try { info = getCommitInfo(sha); } catch (e) { continue; }
+        try { diff = getDiff(sha); } catch (e) { diff = ''; }
+        const rec = { sha: sha, shortSha: info.shortSha, author: info.author,
+            date: info.date, message: info.msg, diffBytes: diff.length, diff: diff };
+        if (bytes + diff.length > BATCH_MAX_BYTES) { rec.diff = null; omitted.push(info.shortSha); }
+        else { bytes += diff.length; }
+        commits.push(rec);
+    }
+
+    if (BATCH_FORMAT === 'json') {
+        return { ext: 'json', commits: commits, omitted: omitted, bytes: bytes,
+            body: JSON.stringify({ commit_count: commits.length, diff_bytes: bytes,
+                omitted_diffs: omitted, commits: commits }, null, 2) };
+    }
+
+    const L = [];
+    L.push('# Batch review bundle');
+    L.push('');
+    L.push('Commits: ' + commits.length + '  ·  diff bytes: ' + bytes);
+    if (omitted.length) {
+        L.push('');
+        L.push('> **Diffs omitted for size:** ' + omitted.join(', ') + '. Those commits appear with metadata only — do not report findings about their code, and say so if a verdict depends on them.');
+    }
+    L.push('');
+    commits.forEach(function (c, i) {
+        L.push('---');
+        L.push('');
+        L.push('## [' + (i + 1) + '/' + commits.length + '] ' + c.shortSha);
+        L.push('');
+        L.push('- author: ' + c.author);
+        L.push('- date: ' + c.date);
+        L.push('- stated intent (verify, do not summarise): ' + JSON.stringify(c.message));
+        L.push('');
+        if (c.diff === null) {
+            L.push('_diff omitted for size (' + c.diffBytes + ' bytes)._');
+        } else {
+            L.push('```diff');
+            L.push(c.diff);
+            L.push('```');
+        }
+        L.push('');
+    });
+    return { ext: 'md', body: L.join('\n'), commits: commits, omitted: omitted, bytes: bytes };
+}
+
+async function runBatchReview(shas, options) {
+    options = options || {};
+    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    const log = function (m) { console.log(m); logToFile(m, REVIEW_DIR); };
+
+    const bundle = buildBundle(shas);
+    if (!bundle.commits.length) { log('proxima-review: nothing to review'); return; }
+
+    const first = bundle.commits[0].shortSha;
+    const last = bundle.commits[bundle.commits.length - 1].shortSha;
+    const stem = 'batch-' + first + '-' + last;
+    // '.bundle.' keeps this off the review's own path. They collided at first: both
+    // were stem + '.md', so the review overwrote the bundle it had just been given.
+    const bundlePath = path.join(REVIEW_DIR, stem + '.bundle.' + bundle.ext);
+    fs.writeFileSync(bundlePath, bundle.body, 'utf8');
+    log(cyan('📦') + ' bundled ' + bundle.commits.length + ' commit(s) -> ' + bundlePath +
+        ' (' + bundle.body.length + ' bytes)' +
+        (bundle.omitted.length ? ', ' + bundle.omitted.length + ' diff(s) omitted for size' : ''));
+
+    const header = [
+        'You are auditing a BATCH of ' + bundle.commits.length + ' commits pushed together.',
+        'Review them as ONE change set: a later commit may fix what an earlier one broke,',
+        'and that counts as resolved — do not report a finding that a later commit fixes.',
+        ''
+    ];
+    const tail = [
+        '', '---', '',
+        'Produce ONE report with this structure:',
+        '',
+        '## Batch Verdict',
+        '**PASS / FAIL / NEEDS WORK** — one sentence for the change set as a whole.',
+        '',
+        '## Per-Commit',
+        'One short block per commit: the short sha, its verdict, and only where there is a',
+        'real finding, the quoted line and the fix. "None found." is expected and correct.',
+        '',
+        '## Cross-Commit Issues',
+        'Problems visible only across commits: a caller updated in one and missed in',
+        'another, a helper changed after its last use, a fix later reverted. "None found."',
+        'if there are none.'
+    ];
+
+    // Attach when the provider can take a file; fall back to inline on refusal. The
+    // fallback is safe because main-v2 FAILS an upload rather than silently sending
+    // text-only, so a caught error here means the file genuinely did not go.
+    const wantAttach = UPLOAD_CAPABLE.indexOf(REVIEW_PROVIDER) !== -1 &&
+        options.attach !== false && automationConfig.batchAttach !== 'never';
+    const inlinePrompt = header.concat(AUDIT_RULES).concat(['', '---', '', bundle.body])
+        .concat(tail).join('\n');
+    let text = null, delivery = null;
+
+    if (wantAttach) {
+        const filePrompt = header.concat(['The change set is attached as ' +
+            path.basename(bundlePath) + '. Read it in full before answering.'])
+            .concat(AUDIT_RULES).concat(tail).join('\n');
+        try {
+            text = await queryAI(filePrompt, REVIEW_MODEL, REVIEW_PROVIDER,
+                { attachments: [bundlePath] });
+            delivery = 'attachment';
+        } catch (e) {
+            log(yellow('⚠') + ' file delivery failed (' + e.message + ') — falling back to inline text');
+        }
+    } else if (UPLOAD_CAPABLE.indexOf(REVIEW_PROVIDER) === -1) {
+        log(dim('   ' + REVIEW_PROVIDER + ' has no upload path in Proxima — sending inline'));
+    }
+
+    if (text === null) {
+        try {
+            text = await queryAI(inlinePrompt, REVIEW_MODEL, REVIEW_PROVIDER, {});
+            delivery = 'inline';
+        } catch (e) {
+            const errPath = path.join(REVIEW_DIR, 'error-' + stem + '.md');
+            fs.writeFileSync(errPath, '---\nbatch: ' + stem + '\ncommits: ' +
+                bundle.commits.map(function (c) { return c.shortSha; }).join(',') +
+                '\nerror: ' + e.message + '\nerror_at: ' + new Date().toISOString() +
+                '\n---\n\n# Batch Review Failed\n\n**Error:** ' + e.message + '\n', 'utf8');
+            log(red('❌') + ' batch review failed: ' + e.message);
+            return;
+        }
+    }
+
+    const outPath = path.join(REVIEW_DIR, stem + '.md');
+    fs.writeFileSync(outPath, '---\nbatch: ' + stem + '\ncommits: ' +
+        bundle.commits.map(function (c) { return c.shortSha; }).join(',') +
+        '\ncommit_count: ' + bundle.commits.length + '\nmodel: ' + REVIEW_MODEL +
+        '\ndelivery: ' + delivery + '\nbundle: ' + path.basename(bundlePath) +
+        '\nomitted_diffs: ' + (bundle.omitted.join(',') || 'none') +
+        '\nreviewed_at: ' + new Date().toISOString() + '\n---\n\n' + text, 'utf8');
+    log(green('✅') + ' batch review (' + delivery + ') -> ' + outPath);
+}
+
+function spawnBatchBackground(shas) {
+    const listPath = path.join(os.tmpdir(), 'proxima-batch-' + Date.now() + '.json');
+    fs.writeFileSync(listPath, JSON.stringify(shas), 'utf8');
+    const gitRoot = findGitRoot();
+    if (!fs.existsSync(REVIEW_DIR)) fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    const self = path.resolve(__dirname, 'proxima-review.cjs');
+    if (process.platform === 'win32') {
+        const tmpScript = path.join(os.tmpdir(), 'proxima-batch-' + Date.now() + '.ps1');
+        const q = function (s) { return String(s).replace(/'/g, "''"); };
+        fs.writeFileSync(tmpScript, [
+            "Set-Location '" + q(gitRoot) + "'",
+            "node '" + q(self) + "' --batch-file '" + q(listPath) + "'",
+            "Exit 0"
+        ].join('\r\n'), 'utf8');
+        spawn('cmd.exe', ['/c', 'start', 'Proxima Batch Review',
+            'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpScript],
+            { detached: true, stdio: 'ignore' }).unref();
+    } else {
+        const out = fs.openSync(path.join(REVIEW_DIR, 'background.log'), 'a');
+        spawn(process.execPath, [self, '--batch-file', listPath],
+            { detached: true, stdio: ['ignore', out, out], cwd: gitRoot }).unref();
+    }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
     const args = process.argv.slice(2);
@@ -688,10 +901,42 @@ async function main() {
             process.exit(0);
         }
         console.log(cyan('📦') + ' ' + commits.length + ' new commit(s) to review');
-        for (const sha of commits) {
-            spawnBackground(sha);
+        // One bundle for the whole push. The old loop spent a window and a separate AI
+        // call per commit — N times the quota for a single change set.
+        if (BATCH_ENABLED && commits.length > 1) {
+            spawnBatchBackground(commits);
+        } else {
+            for (const sha of commits) {
+                spawnBackground(sha);
+            }
         }
         process.exit(0); // never block git push
+    }
+
+    // Batch worker, launched by spawnBatchBackground.
+    if (args[0] === '--batch-file') {
+        await runBatchReview(JSON.parse(fs.readFileSync(args[1], 'utf8')), {});
+        process.exit(0);
+    }
+
+    // Manual batch over an explicit range:
+    //   node cli/proxima-review.cjs --range <start>..<end>
+    //   node cli/proxima-review.cjs --from <start> [--to <end>]
+    if (args[0] === '--range' || args[0] === '--from') {
+        let shas;
+        if (args[0] === '--range') {
+            shas = resolveRangeCommits(args[1]);
+        } else {
+            const ti = args.indexOf('--to');
+            shas = resolveRangeCommits(args[1] + '..' + (ti !== -1 ? args[ti + 1] : 'HEAD'));
+        }
+        if (!shas.length) {
+            console.error(red('Error: ') + 'that range contains no commits');
+            process.exit(1);
+        }
+        console.log(cyan('📦') + ' ' + shas.length + ' commit(s) in range');
+        await runBatchReview(shas, { attach: !args.includes('--no-attach') });
+        process.exit(0);
     }
 
     // Manual run: node cli/proxima-review.cjs <sha>
@@ -726,6 +971,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+    buildBundle,
+    resolveRangeCommits,
+    runBatchReview,
     runReview,
     getCommitInfo,
     getDiff,

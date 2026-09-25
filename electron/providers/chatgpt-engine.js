@@ -33,8 +33,13 @@
     // Do not verify a slug by reading message.metadata.model_slug back and comparing:
     // a deliberately bogus 'gpt-6-nonexistent-zz' came back echoed as itself, so that
     // field confirms nothing on its own. Only the server REWRITING it is evidence.
-    var DEFAULT_MODEL = 'gpt-5-6-thinking';
-    var DEFAULT_EFFORT = 'extended';
+    var DEFAULT_MODEL = 'gpt-6-astra-wm';
+    var DEFAULT_EFFORT = 'max';
+
+    // Efforts seen on the wire. 'standard'/'extended' are the 5.6 picker's Medium/High;
+    // 'max' is what the app sends for Astra. Not a closed list — it is what has been
+    // observed, and the server has not been made to enumerate it.
+    var EFFORTS_SEEN = ['standard', 'extended', 'max'];
 
     // ─── State ───────────────────────────────────────
     var _conversationId = null;
@@ -639,19 +644,25 @@
             websocket_request_id: crypto.randomUUID()
         };
 
-        // Add model config for extended reasoning models
-        // Keyed on the RESOLVED model, not on whether the caller named one. It used to
-        // test options.model, so every default call — the common case — skipped this
-        // block entirely and ran the thinking model with no effort config at all. Same
-        // shape as the Qwen bug where thinking was simply never switched on: nothing
-        // errored, the answers just quietly came back unreasoned.
-        if (_model.indexOf('thinking') !== -1) {
-            var _effort = (options && options.thinkingEffort) ? options.thinkingEffort : DEFAULT_EFFORT;
-            payload['oai-last-model-config'] = JSON.stringify({
-                model: _model,
-                effort: _effort
-            });
-            console.log('[Proxima ChatGPT] reasoning model ' + _model + ' at effort ' + _effort);
+        // Effort is a TOP-LEVEL field, sent for every model. Captured from a real
+        // chatgpt.com turn (HAR, 2026-09-25): the app sends thinking_effort:'max' beside
+        // model:'gpt-6-astra-wm', and sends NO oai-last-model-config at all.
+        //
+        // Two earlier shapes were wrong, both failing silently rather than loudly:
+        //  - the effort went in oai-last-model-config, which the app no longer sends;
+        //  - the block was gated on the model name containing 'thinking', and
+        //    'gpt-6-astra-wm' does not contain it, so Astra would have gone out with no
+        //    effort at all.
+        // That second point is also the likely cause of the earlier reading that every
+        // gpt-6-*-wm slug 'downgrades to gpt-5-6': the slug was fine, the request was not.
+        var _effort = (options && options.thinkingEffort) ? options.thinkingEffort : DEFAULT_EFFORT;
+        if (_effort) {
+            payload.thinking_effort = _effort;
+            if (EFFORTS_SEEN.indexOf(_effort) === -1) {
+                console.warn('[Proxima ChatGPT] effort "' + _effort + '" has not been seen on ' +
+                    'the wire (known: ' + EFFORTS_SEEN.join(', ') + ') — sending it anyway');
+            }
+            console.log('[Proxima ChatGPT] model ' + _model + ' at thinking_effort ' + _effort);
         }
 
 
