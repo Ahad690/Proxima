@@ -407,11 +407,33 @@
         // The one exception: the app's uploader adds a bearer if localStorage.token is
         // set, which it is under Proxima. It was absent in the capture because that
         // session had no such key. Conditional, so we match the app either way.
+        // Attached only while it is actually alive. Measured: this JWT carries a 900
+        // second lifetime and NOTHING here refreshes it — only the web app does — so
+        // across any working session it is expired far more often than not, and every
+        // upload was buying a guaranteed rejection. Measured on the same pass:
+        // getstsToken with no Authorization header returns 200 success:true with real
+        // credentials, so cookies alone are sufficient and a dead bearer is pure
+        // downside. 30s of skew, since a token about to die mid-flight is no better.
         var hadBearer = false;
         try {
-            if (window.localStorage.token) {
-                h['Authorization'] = 'Bearer ' + window.localStorage.token;
-                hadBearer = true;
+            var raw = window.localStorage.token;
+            if (raw) {
+                var alive = true;
+                var seg = String(raw).split('.');
+                if (seg.length === 3) {
+                    try {
+                        var claims = JSON.parse(atob(seg[1].replace(/-/g, '+').replace(/_/g, '/')));
+                        if (claims && claims.exp) {
+                            alive = (claims.exp - 30) > Math.floor(Date.now() / 1000);
+                        }
+                    } catch (e) { /* unreadable — treat as alive and let the retry judge */ }
+                }
+                if (alive) {
+                    h['Authorization'] = 'Bearer ' + raw;
+                    hadBearer = true;
+                } else {
+                    console.log('[Proxima Qwen] upload bearer expired — going cookie-only');
+                }
             }
         } catch (e) { }
 
