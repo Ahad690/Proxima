@@ -143,6 +143,22 @@ function mcpToolNames(timeoutMs) {
     });
 }
 
+// Every .js/.cjs the main process loads or injects. Derived rather than typed out:
+// see the note at the call site for what the hand-maintained version missed.
+function listSources(dirs) {
+    const out = [];
+    for (const d of dirs) {
+        let entries = [];
+        try {
+            entries = fs.readdirSync(path.join(REPO, d), { withFileTypes: true });
+        } catch (e) { continue; }
+        for (const e of entries) {
+            if (e.isFile() && /\.(js|cjs)$/.test(e.name)) out.push(d + '/' + e.name);
+        }
+    }
+    return out;
+}
+
 function newestMtime(files) {
     let newest = 0, which = null;
     for (const f of files) {
@@ -218,10 +234,13 @@ function newestMtime(files) {
             'this Proxima predates the startedAt field — restart once to enable the check');
     } else {
         const started = Date.parse(status.startedAt);
-        const watched = ['electron/main-v2.cjs', 'electron/provider-api.cjs',
-            'electron/browser-manager.cjs', 'electron/providers/qwen-engine.js',
-            'electron/providers/claude-engine.js', 'electron/providers/qwen-upload.cjs',
-            'electron/providers/claude-upload.cjs'];
+        // Derived, not hand-listed. The typed-out version had drifted: it named
+        // seven files and omitted chatgpt-engine.js, gemini-engine.js,
+        // perplexity-engine.js, rest-api.cjs, ws-server.cjs and preload.cjs. Editing
+        // any of those and skipping the restart earned a confident "running code is
+        // current" — this check asserting currency it never verified, which is worse
+        // than not checking at all. Caught when a chatgpt-engine.js change passed.
+        const watched = listSources(['electron', 'electron/providers']);
         const newest = newestMtime(watched);
         if (newest.ms > started) {
             const mins = Math.round((newest.ms - started) / 60000);
