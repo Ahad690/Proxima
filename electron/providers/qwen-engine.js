@@ -407,13 +407,48 @@
         // The one exception: the app's uploader adds a bearer if localStorage.token is
         // set, which it is under Proxima. It was absent in the capture because that
         // session had no such key. Conditional, so we match the app either way.
-        try { if (window.localStorage.token) h['Authorization'] = 'Bearer ' + window.localStorage.token; } catch (e) { }
+        var hadBearer = false;
+        try {
+            if (window.localStorage.token) {
+                h['Authorization'] = 'Bearer ' + window.localStorage.token;
+                hadBearer = true;
+            }
+        } catch (e) { }
 
-        return fetch(ORIGIN + '/api/v2/files/getstsToken', {
-            method: 'POST',
-            credentials: 'include',
-            headers: h,
-            body: JSON.stringify(meta || {})
+        // That bearer goes stale on its own schedule and NOTHING here refreshes it —
+        // Proxima only reads what the web app last wrote to localStorage. When it is
+        // stale the server answers "unauthorized: Token has expired, please log in
+        // again", which reads like a dead session but is not: chat uses cookies and
+        // baxia signing, never this key, so it keeps working throughout. Measured once:
+        // an upload rejected at 14:38:32 and a chat reply delivered at 14:39:16.
+        //
+        // Retrying as-is would fail identically. But the bearer is OPTIONAL — the
+        // capture this header note describes sent none and succeeded on cookies alone —
+        // so a stale one is strictly worse than none. Drop it and try once more.
+        function post(headers) {
+            return fetch(ORIGIN + '/api/v2/files/getstsToken', {
+                method: 'POST',
+                credentials: 'include',
+                headers: headers,
+                body: JSON.stringify(meta || {})
+            });
+        }
+
+        return post(h).then(function (res) {
+            if (res.status !== 200 || !hadBearer) return res;
+            // 200 is not success on this API, so the body decides whether to retry.
+            return res.clone().text().then(function (txt) {
+                var j = null;
+                try { j = JSON.parse(txt); } catch (e) { return res; }
+                var unauthorized = j && j.success === false && j.data &&
+                    j.data.code === 'unauthorized';
+                if (!unauthorized) return res;
+                var bare = {};
+                for (var k in h) { if (k !== 'Authorization') bare[k] = h[k]; }
+                console.log('[Proxima Qwen] upload token rejected with a stale bearer — ' +
+                    'retrying on cookies alone');
+                return post(bare);
+            });
         }).then(function (res) {
             var ct = res.headers.get('content-type') || '';
             return res.text().then(function (txt) {
