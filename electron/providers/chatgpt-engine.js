@@ -33,8 +33,20 @@
     // Do not verify a slug by reading message.metadata.model_slug back and comparing:
     // a deliberately bogus 'gpt-6-nonexistent-zz' came back echoed as itself, so that
     // field confirms nothing on its own. Only the server REWRITING it is evidence.
-    var DEFAULT_MODEL = 'gpt-6-astra-wm';
-    var DEFAULT_EFFORT = 'max';
+    // gpt-6-astra-wm is NOT the default, though it is the one we want. Measured on a
+    // fresh conversation against the live engine: asking for it returns a reply whose
+    // model_slug is gpt-5-6, the INSTANT lane — a downgrade, not an upgrade — while the
+    // effort field IS honoured (the reply carries max). Same for luna/astra/sol -wm.
+    //
+    // The missing piece is the rest of the captured flow, not the payload: the app posts
+    // to /backend-api/f/conversation after a /f/conversation/prepare call whose
+    // conduit_token rides back as x-conduit-token. Implement that and this can move to
+    // 'gpt-6-astra-wm' with DEFAULT_EFFORT 'max'.
+    //
+    // Until then the thinking lane is the best that actually serves: 'extended' is the
+    // 5.6 picker's High preset, and High is its maximum.
+    var DEFAULT_MODEL = 'gpt-5-6-thinking';
+    var DEFAULT_EFFORT = 'extended';
 
     // Efforts seen on the wire. 'standard'/'extended' are the 5.6 picker's Medium/High;
     // 'max' is what the app sends for Astra. Not a closed list — it is what has been

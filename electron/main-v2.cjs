@@ -713,6 +713,17 @@ async function handleMCPRequest(request) {
                 // Qwen: real attachments, uploaded to OSS and named in the request body.
                 // Deliberately NOT routed through uploadFileToProvider — see the comment
                 // on uploadAttachmentsToQwen.
+                // ChatGPT keeps _conversationId in the engine across calls, so without this
+                // a review fired by a git push lands as extra turns inside whatever thread
+                // the engine last used. That is not hypothetical: a batch audit was found
+                // as the second user turn of a conversation titled "Reply PONG", which is
+                // why the reviews looked like they had never reached chatgpt.com at all.
+                if (provider === 'chatgpt' && data.newChat) {
+                    await browserManager.executeScript('chatgpt',
+                        'window.__proximaChatGPT ? (window.__proximaChatGPT.newConversation(), true) : false');
+                    console.log('[ChatGPT] newChat requested — conversation state cleared');
+                }
+
                 if (provider === 'qwen') {
                     // Qwen persists its conversation in the page's localStorage for 2h, so
                     // consecutive calls chain onto the same chat and keep context. That is

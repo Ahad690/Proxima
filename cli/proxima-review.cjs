@@ -209,7 +209,10 @@ function queryAI(message, model, provider, opts) {
                 // nothing is deliberate: the engine already owns DEFAULT_MODEL and
                 // DEFAULT_EFFORT, and a second copy here would drift out of step with it
                 // without anything failing.
-                const payload = { message };
+                // Its own thread, every time. Without this the audit is appended to
+                // whatever conversation the engine was last on — see the ChatGPT branch
+                // in main-v2. Qwen gets the same isolation through session:'automation'.
+                const payload = { message, newChat: true };
                 if (model && model.toLowerCase() !== 'chatgpt') payload.model = model;
                 if (REVIEW_THINKING_EFFORT) payload.thinkingEffort = REVIEW_THINKING_EFFORT;
                 return payload;

@@ -1,7 +1,7 @@
 {
   "reviewDir": "perplexity-reviews",
   "baseUrl": "http://localhost:3210",
-  "reviewModel": "chatgpt",
+  "reviewModel": "gpt-5-6-thinking",
   "repairModel": "qwen",
   "reviewThinking": true,
   "enableAutoFix": false,
