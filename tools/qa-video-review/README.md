@@ -493,6 +493,64 @@ The same evidence rides `ask_qwen` (thinking defaults **on** there too, `thinkin
 to opt out). An `ask_qwen` reply annotates itself when thinking was requested and did not
 happen — silence on that mismatch is precisely how it hid for weeks.
 
+## ChatGPT as a reviewer
+
+Proxima can attach local files to ChatGPT as of 2026-09-25, so ChatGPT is now a
+possible reviewer rather than a text-only one. Four steps, captured from the web app:
+
+```
+POST /backend-api/files                  -> { upload_url, file_id }
+PUT  <pre-signed azure blob url>         -> 201   x-ms-blob-type: BlockBlob
+POST /backend-api/files/process_upload_stream
+GET  /backend-api/files/{file_id}/simple -> library_file_id
+```
+
+The send then carries `content_type: "multimodal_text"` with the pointers **first**
+and the text **last**, each addressed as `sediment://<file_id>`. Bytes stream from
+disk to Azure out of Node rather than through `executeJavaScript` as base64 — the
+upload URL is pre-signed on a different origin and needs no cookies, unlike the image
+**download** path, which Cloudflare accepts only from inside the page.
+
+**`qwen-review.cjs` hardcodes `provider: 'qwen'` on purpose.** Qwen is the only
+provider wired into Proxima that reviews **video** — ChatGPT, Claude, Gemini and
+Perplexity do not watch an mp4. That is the whole reason this pipeline picks Qwen,
+so the hardcoding is the design rather than a limitation to route around, and
+nothing here should be "made configurable".
+
+What the new upload path changes is narrower: ChatGPT can now take **stills**.
+
+| | Qwen | ChatGPT |
+|---|---|---|
+| mp4 video | works — the reason this pipeline exists | not a reviewer for video |
+| still images | works | works (verified: read text out of a 1584×842 screenshot) |
+| reasoning proof | `thinking_summary` appears iff reasoning ran | no equivalent signal |
+
+So ChatGPT is a fallback for a **frame**, never for a recording. Feeding it an mp4
+would not fail loudly — it would produce a confident review of something it never
+watched, which is worse than an error and exactly the failure mode the rest of this
+document is about.
+
+The last row is worth keeping in view even for stills. The whole *Reasoning is on,
+and it is checked* section exists because a verdict reached without reasoning still
+arrives, still parses and still reads like judgement. Qwen lets that be **proved**
+per reply; ChatGPT takes a `thinking_effort` and returns nothing confirming it was
+honoured, so a ChatGPT still-review is an unverified one.
+
+> Separately, the **code** review pipeline (`cli/proxima-review.cjs`, a different
+> tool) does now run on ChatGPT — `reviewModel` in `proxima-automation.config.json`.
+> It reviews diffs as text and never needed an upload path.
+
+### Uploading an image no longer looks like generating one
+
+Worth knowing if you read `media[]` from a reply. The first build of the upload path
+made Proxima download its own attachment straight back and save it as a *generated*
+image — verified byte-identical, same sha256 as the uploaded file. The stream echoes
+the user turn back, and the generated-image collector was reading every message.
+Attached ids are now excluded by id. If you are on a build from before 2026-09-26 and
+see a `gen-*.png` that is suspiciously exactly your input, that is what happened.
+
+---
+
 ## Files
 
 | file | what it is |
@@ -504,6 +562,8 @@ happen — silence on that mismatch is precisely how it hid for weeks.
 | `qwen-review.cjs` | mp4 (+ stills) → Qwen 3.8 → verdict + exit code |
 | `README.md` | this |
 
-Attachment protocol underneath: `electron/providers/qwen-upload.cjs`
+Attachment protocol underneath — Qwen: `electron/providers/qwen-upload.cjs`
 (`getstsToken` → Alibaba OSS single PUT → `messages[0].files`) and
 `electron/providers/qwen-engine.js`.
+ChatGPT: `electron/providers/chatgpt-upload.cjs` (`/backend-api/files` -> Azure blob
+PUT -> `process_upload_stream`) and `electron/providers/chatgpt-engine.js`.
