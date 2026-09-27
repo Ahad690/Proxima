@@ -32,9 +32,12 @@ async function startGateway({ port = DEFAULT_PORT, host = '127.0.0.1', stateDir 
     const fileReferenceEnabled = () => stateStore.loadSettings().fileReference !== false;
 
     const handler = createHandler({ sessions, stateStore, startedAt, getFileReferenceEnabled: fileReferenceEnabled });
+    // Relocating is opt-in. By default a taken port is an error, because silently
+    // moving leaves a port fact that can point a client at the other process.
+    const allowRelocate = /^(1|true|yes)$/i.test(String(process.env.PROXIMA_GATEWAY_PORT || ''));
     const ipc = new IpcServer({ handler, stateStore, port, host });
 
-    const boundPort = await ipc.listen();
+    const boundPort = await ipc.listen({ allowRelocate });
 
     let shuttingDown = false;
     async function shutdown() {

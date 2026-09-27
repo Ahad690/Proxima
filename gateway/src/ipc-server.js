@@ -3,6 +3,7 @@
 const net = require('net');
 const { DEFAULT_PORT, FALLBACK_ATTEMPTS } = require('./state-store');
 const { toSafeError } = require('./logger');
+const { log } = require('./logger');
 const { redactString, redact } = require('./redact');
 
 /**
@@ -76,18 +77,31 @@ class IpcServer {
     }
 
     /**
-     * Bind, retrying once on the next port before failing loudly (F2).
-     * The port actually bound is written to the fact file AFTER the bind succeeds.
+     * Bind, and fail loudly if the port is taken.
+     *
+     * The previous behaviour silently moved to port+1. That is worse than failing:
+     * the port fact then points a client at whichever process won 19222, and a client
+     * probing candidates in order will happily talk to the wrong one - which, for a
+     * second instance, means the legacy Electron app answering a gateway request.
+     *
+     * A relocation is still possible, but only when explicitly asked for, so the
+     * operator knows two processes are sharing a protocol.
      */
-    async listen() {
-        const attempts = this.basePort + FALLBACK_ATTEMPTS;
+    async listen({ allowRelocate = false } = {}) {
         let lastError = null;
+        const maxPort = this.basePort + (allowRelocate ? FALLBACK_ATTEMPTS : 0);
 
-        for (let port = this.basePort; port <= this.basePort + FALLBACK_ATTEMPTS; port += 1) {
+        for (let port = this.basePort; port <= maxPort; port += 1) {
             try {
                 const bound = await this._tryListen(port);
                 this.boundPort = bound;
                 this.state.recordPortFact(bound);
+                if (port !== this.basePort) {
+                    log.warn(
+                        `relocated to port ${bound}; another process holds ${this.basePort}. ` +
+                            `Clients may reach the wrong process.`
+                    );
+                }
                 return bound;
             } catch (e) {
                 lastError = e;
@@ -96,10 +110,13 @@ class IpcServer {
             }
         }
 
+        const fact = this.state.readPortFact();
         throw new Error(
-            `Could not bind the gateway on port ${this.basePort} or ${this.basePort + 1}: ` +
-                `${redactString(lastError ? lastError.message : 'unknown error')}. ` +
-                `Another instance may be running - check ${this.state.portFactPath}.`
+            `Port ${this.basePort} is already in use` +
+                (fact && fact.pid ? ` by pid ${fact.pid}` : '') +
+                '. Stop the other Proxima, or start this one on a different port:' +
+                ` AGENT_HUB_PORT=<port> node src/index.js` +
+                ' (or set PROXIMA_GATEWAY_PORT=1 to relocate automatically).'
         );
     }
 

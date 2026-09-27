@@ -18,7 +18,26 @@ const path = require('path');
  */
 
 const DEFAULT_PORT = 19222;
-const FALLBACK_ATTEMPTS = 1; // try port, then port+1, then give up (F2)
+const FALLBACK_ATTEMPTS = 0; // no silent relocation: see IpcServer.listen
+
+/**
+ * The legacy Electron app's userData directory.
+ *
+ * Duplicated from scripts/lib/proxima-port.cjs rather than imported, because that file
+ * lives in the automation client and this module must not depend on it. The paths MUST
+ * stay identical: this is where the existing client looks for ipc-port.json, so it is
+ * the only place the gateway's port can be discovered by the tooling that is supposed
+ * to talk to it.
+ */
+function legacyUserDataDir() {
+    if (process.platform === 'win32' && process.env.APPDATA) {
+        return path.join(process.env.APPDATA, 'proxima');
+    }
+    if (process.platform === 'darwin' && process.env.HOME) {
+        return path.join(process.env.HOME, 'Library', 'Application Support', 'proxima');
+    }
+    return path.join(process.env.HOME || '.', '.config', 'proxima');
+}
 
 function defaultStateDir() {
     const override = process.env.PROXIMA_GATEWAY_STATE_DIR;
@@ -30,7 +49,6 @@ class StateStore {
     constructor(dir = defaultStateDir()) {
         this.dir = dir;
         this.settingsPath = path.join(dir, 'settings.json');
-        this.portFactPath = path.join(dir, 'ipc-port.json');
         this.profilesDir = path.join(dir, 'profiles');
         this.cookieBackupDir = path.join(dir, 'cookie-backups');
         this._ensureDirs();
@@ -64,17 +82,42 @@ class StateStore {
     // ---- port fact ----
 
     /**
+     * Where the port fact is WRITTEN.
+     *
+     * The legacy app's userData dir, not this gateway's own state dir. The existing
+     * automation client reads ipc-port.json from exactly this path, so a fact written
+     * anywhere else is invisible to it - the client would report "Proxima is not
+     * running" against a healthy gateway. Profiles and cookies stay private to the
+     * gateway's state dir; only the port is a shared fact.
+     */
+    get portFactPath() {
+        const override = process.env.PROXIMA_GATEWAY_PORT_FACT;
+        if (override) return override;
+        return path.join(legacyUserDataDir(), 'ipc-port.json');
+    }
+
+    /**
      * Read the port the running process actually bound.
      * Returns null when no process has recorded a fact (or the recorded pid is gone).
      */
     readPortFact() {
-        try {
-            const fact = JSON.parse(fs.readFileSync(this.portFactPath, 'utf8'));
-            if (!fact || typeof fact.port !== 'number') return null;
-            return fact;
-        } catch {
-            return null;
+        for (const file of this.portFactPaths()) {
+            try {
+                const fact = JSON.parse(fs.readFileSync(file, 'utf8'));
+                if (!fact || typeof fact.port !== 'number') continue;
+                return { ...fact, file };
+            } catch {
+                /* try the next location */
+            }
         }
+        return null;
+    }
+
+    /** Both locations, own state dir first so the gateway is self-sufficient. */
+    portFactPaths() {
+        const own = path.join(this.dir, 'ipc-port.json');
+        const legacy = this.portFactPath;
+        return own === legacy ? [own] : [own, legacy];
     }
 
     /**
@@ -112,7 +155,19 @@ class StateStore {
             startedAt: new Date().toISOString(),
             ...extra,
         };
-        fs.writeFileSync(this.portFactPath, JSON.stringify(fact, null, 2), 'utf8');
+        const body = JSON.stringify(fact, null, 2);
+
+        // Written to BOTH locations. The legacy location is what makes the existing
+        // automation client able to find this process at all.
+        for (const file of this.portFactPaths()) {
+            try {
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                fs.writeFileSync(file, body, 'utf8');
+            } catch {
+                /* one location failing must not stop the other */
+            }
+        }
+
         // Keep the preference in sync so it is not misleading next time, but the fact
         // remains the authority.
         try {
@@ -124,10 +179,12 @@ class StateStore {
     }
 
     clearPortFact() {
-        try {
-            fs.unlinkSync(this.portFactPath);
-        } catch {
-            /* already gone */
+        for (const file of this.portFactPaths()) {
+            try {
+                fs.unlinkSync(file);
+            } catch {
+                /* already gone */
+            }
         }
     }
 

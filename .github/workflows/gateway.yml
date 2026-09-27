@@ -103,7 +103,35 @@ jobs:
       - name: Parse every source file
         working-directory: gateway
         run: |
-          for f in src/*.js engines/*.js test/*.js; do
+          for f in src/*.js engines/*.js test/*.js bin/*.js scripts/*.cjs; do
             node --check "$f" || exit 1
           done
           echo "all files parse"
+
+      - name: Parse the PowerShell wrappers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($f in @('gateway/proxima-gw.ps1', 'gateway/proxima-gw-daemon.ps1')) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Error "$f has $($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Error "  $_" }
+              exit 1
+            }
+            Write-Output "ok $f"
+          }
+
+      - name: The CLI runs and reports a missing gateway clearly
+        working-directory: gateway
+        run: |
+          set -e
+          node bin/proxima-gw.js help | head -3
+          # Not running must be a clean non-zero exit, not a stack trace.
+          if AGENT_HUB_PORT=19996 node bin/proxima-gw.js check; then
+            echo "check exited 0 with nothing running - a script would trust that"
+            exit 1
+          fi
+          echo "check correctly failed"
