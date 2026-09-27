@@ -133,18 +133,28 @@ class EngineLoader {
                 { reason: 'engine-absent' }
             );
         }
-        return page.evaluate(
+
+        const result = await page.evaluate(
             ({ g, m, a }) => {
                 const engine = window[g];
                 if (!engine || typeof engine[m] !== 'function') {
-                    return {
-                        __error: `engine method ${g}.${m} is not a function`,
-                    };
+                    // Returned rather than thrown so the page never sees a raw throw.
+                    return { __error: `engine method ${g}.${m} is not a function` };
                 }
                 return Promise.resolve(engine[m](...a));
             },
             { g: spec.engineGlobal, m: method, a: args }
         );
+
+        // The in-page sentinel must be converted here, or a missing method would be
+        // handed back to the caller as if it were a legitimate result.
+        if (result && typeof result === 'object' && result.__error) {
+            throw new EngineError(result.__error, provider, {
+                reason: 'engine-method-missing',
+                method,
+            });
+        }
+        return result;
     }
 }
 

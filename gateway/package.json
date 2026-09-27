@@ -7,9 +7,10 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test --test-reporter=tap --test-timeout=20000 test/unit.test.js test/integration.test.js",
+    "test": "node --test --test-reporter=tap --test-timeout=20000 test/unit.test.js test/integration.test.js test/contract.test.js",
+    "test:coverage": "node --test --test-reporter=tap --experimental-test-coverage --test-timeout=20000 test/unit.test.js test/integration.test.js test/contract.test.js",
     "test:browser": "node --test --test-reporter=tap --test-timeout=60000 test/browser.test.js",
-    "test:all": "npm run test && npm run test:browser",
+    "test:all": "npm run test:coverage && npm run test:browser",
     "setup:browser": "npx playwright install --with-deps chromium",
     "test:watch": "node --test --watch test/"
   },
