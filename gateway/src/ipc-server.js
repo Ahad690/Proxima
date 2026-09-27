@@ -2,6 +2,8 @@
 
 const net = require('net');
 const { DEFAULT_PORT, FALLBACK_ATTEMPTS } = require('./state-store');
+const { toSafeError } = require('./logger');
+const { redactString } = require('./redact');
 
 /**
  * Loopback IPC server.
@@ -96,7 +98,7 @@ class IpcServer {
 
         throw new Error(
             `Could not bind the gateway on port ${this.basePort} or ${this.basePort + 1}: ` +
-                `${lastError ? lastError.message : 'unknown error'}. ` +
+                `${redactString(lastError ? lastError.message : 'unknown error')}. ` +
                 `Another instance may be running - check ${this.state.portFactPath}.`
         );
     }
@@ -172,12 +174,9 @@ class IpcServer {
             const response = await this.handler(request);
             this._write(socket, { ...response, requestId });
         } catch (e) {
-            this._write(socket, {
-                requestId,
-                success: false,
-                error: e && e.message ? e.message : String(e),
-                ...(e && e.kind ? { errorKind: e.kind } : {}),
-            });
+            // Redacted: the failure can come from anywhere in the request path, and a
+            // provider URL can carry a token in its query string.
+            this._write(socket, { requestId, ...toSafeError(e) });
         }
     }
 

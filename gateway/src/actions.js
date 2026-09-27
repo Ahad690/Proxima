@@ -3,6 +3,7 @@
 const { getProvider, isKnownProvider, PROVIDER_NAMES } = require('./providers');
 const { isPlaceholderResponse } = require('./cookie-store');
 const { stampTimestamp, allowlistOptions } = require('./session-manager');
+const { toSafeError } = require('./logger');
 
 /**
  * The 28-action contract.
@@ -289,13 +290,15 @@ function createHandler({ sessions, stateStore, startedAt, getFileReferenceEnable
         try {
             return await handler(request);
         } catch (e) {
-            // Typed engine/transport failures keep their kind so a caller can tell
-            // "the browser broke" from "the provider rejected us" (F6).
+            // F6 + redaction: keep the classification so a caller can tell "the browser
+            // broke" from "the provider rejected us", but never let a raw internal
+            // message reach the wire - a Playwright error can quote a URL carrying a
+            // token, and an engine can echo a request header back in a failure body.
             return {
                 success: false,
-                error: e?.message || String(e),
-                ...(e?.kind ? { errorKind: e.kind } : {}),
-                ...(e?.provider ? { provider: e.provider } : {}),
+                ...toSafeError(e, {
+                    ...(e?.provider ? { provider: e.provider } : {}),
+                }),
             };
         }
     };

@@ -6,6 +6,7 @@ const { EngineLoader } = require('./engine-loader');
 const { SessionManager } = require('./session-manager');
 const { IpcServer } = require('./ipc-server');
 const { createHandler } = require('./actions');
+const { log } = require('./logger');
 
 /**
  * Gateway entrypoint.
@@ -54,21 +55,22 @@ async function main() {
     const port = Number(process.env.AGENT_HUB_PORT) || DEFAULT_PORT;
     const gateway = await startGateway({ port });
 
-    process.stdout.write(
-        `[gateway] listening on 127.0.0.1:${gateway.boundPort}\n` +
-            `[gateway] state dir: ${gateway.stateStore.dir}\n` +
-            `[gateway] headless: ${gateway.stateStore.loadSettings().headless !== false}\n`
+    log.info(
+        `listening on 127.0.0.1:${gateway.boundPort} ` +
+            `state=${gateway.stateStore.dir} ` +
+            `headless=${gateway.stateStore.loadSettings().headless !== false}`
     );
 
     const stop = async (signal) => {
-        process.stdout.write(`\n[gateway] ${signal} - shutting down\n`);
+        log.info(`${signal} received, shutting down`);
         await gateway.shutdown();
         process.exit(0);
     };
     process.on('SIGINT', () => stop('SIGINT'));
     process.on('SIGTERM', () => stop('SIGTERM'));
     process.on('uncaughtException', async (e) => {
-        process.stderr.write(`[gateway] uncaught: ${e && e.stack}\n`);
+        // Via the logger, so a stack quoting a token-bearing URL is redacted.
+        log.exception(e, { phase: 'uncaughtException' });
         await gateway.shutdown();
         process.exit(1);
     });
@@ -76,7 +78,7 @@ async function main() {
 
 if (require.main === module) {
     main().catch((e) => {
-        process.stderr.write(`[gateway] failed to start: ${e && e.stack}\n`);
+        log.exception(e, { phase: 'startup' });
         process.exit(1);
     });
 }

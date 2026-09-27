@@ -10,6 +10,13 @@
  * cookies and origin clearance ride along automatically. No bearer extraction, no header
  * spoofing, no DOM scraping.
  *
+ * STATUS: SCAFFOLD. The endpoint below was NOT verified against a live session - it is
+ * a best guess at perplexity's private web API. This engine therefore carries the same
+ * `verified` guard as the other providers and refuses to issue a request until an
+ * operator has confirmed the path in a real browser. It is treated identically to the
+ * chatgpt/claude/gemini/qwen scaffolds on purpose: having one engine that looks ready
+ * while the rest refuse would misrepresent the state of the work.
+ *
  * Lifecycle:
  *   - Evaluated as an init script, so it re-runs on every document.
  *   - Must expose window.<GLOBAL> or the gateway reports an engine failure.
@@ -20,6 +27,11 @@
 
     var GLOBAL = '__proximaPerplexity';
     var ORIGIN = 'https://www.perplexity.ai';
+
+    // TODO(operator): confirm this path in a browser network tab while sending a
+    // message by hand, then set verified = true.
+    var ENDPOINTS = { send: '/api/search/completions' };
+    var verified = false;
 
     // Conversation continuity is deliberate: consecutive calls chain onto one thread.
     // reset() is how a caller forces independence, so an automated verdict never
@@ -33,6 +45,20 @@
 
     function nowIso() {
         return new Date().toISOString();
+    }
+
+    function notVerified(detail) {
+        var e = new Error(
+            'perplexity engine is a scaffold: ' + detail +
+            ' Confirm the endpoint in a live session, then set verified = true.'
+        );
+        e.kind = 'engine-unverified';
+        e.retryable = false;
+        return e;
+    }
+
+    function assertVerified(method) {
+        if (!verified || !ENDPOINTS.send) throw notVerified(method + '() has no verified endpoint');
     }
 
     function isLoggedIn() {
@@ -52,7 +78,7 @@
     }
 
     function isReady() {
-        return true; // no composer probe required for this provider
+        return verified;
     }
 
     function getTypingStatus() {
@@ -67,16 +93,20 @@
         // Distinguishing a WAF block from an ordinary auth failure is what lets a caller
         // decide between "wait and retry" and "re-login". The gateway surfaces this as a
         // distinct error kind.
+        //
+        // The body is NOT included. A provider can echo the request headers it received
+        // in an error payload, and those headers carry the credential. Truncated hard
+        // and omitted entirely rather than forwarded.
         if (status === 403 || status === 429) {
             return { kind: 'waf', retryable: true, status: status };
         }
-        if (status === 401 || status === 403) {
+        if (status === 401) {
             return { kind: 'auth', retryable: false, status: status };
         }
         if (status >= 500) {
             return { kind: 'upstream', retryable: true, status: status };
         }
-        return { kind: 'unknown', retryable: false, status: status, body: String(body || '').slice(0, 200) };
+        return { kind: 'unknown', retryable: false, status: status };
     }
 
     async function sendMessage(options) {
@@ -85,6 +115,7 @@
         if (typeof message !== 'string' || !message.trim()) {
             throw new Error('sendMessage requires a non-empty message');
         }
+        assertVerified('sendMessage');
 
         state.typing = true;
         state.lastResponse = '';
@@ -93,7 +124,7 @@
         try {
             // The only authenticated egress this system needs: same-origin, credentials
             // included. The browser attaches whatever the profile is holding.
-            var res = await fetch('/api/search/completions', {
+            var res = await fetch(ENDPOINTS.send, {
                 method: 'POST',
                 credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
@@ -107,8 +138,7 @@
             });
 
             if (!res.ok) {
-                var body = await res.text().catch(function () { return ''; });
-                var failure = classifyFailure(res.status, body);
+                var failure = classifyFailure(res.status);
                 var err = new Error(
                     'perplexity completion failed: ' + failure.kind + ' (status ' + res.status + ')'
                 );
@@ -158,6 +188,7 @@
         getTypingStatus: getTypingStatus,
         isReady: isReady,
         isLoggedIn: isLoggedIn,
-        version: '0.1.0-reference',
+        verified: function () { return verified; },
+        version: '0.1.0-scaffold',
     };
 })();
