@@ -1,0 +1,143 @@
+name: gateway
+
+on:
+  push:
+    branches: [feat/cleanroom-gateway, main]
+    paths:
+      - 'gateway/**'
+      - '.github/workflows/gateway.yml'
+  pull_request:
+    paths:
+      - 'gateway/**'
+      - '.github/workflows/gateway.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: gateway-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: unit + integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        working-directory: gateway
+        run: npm install --no-audit --no-fund
+
+      - name: Run test suite with coverage
+        working-directory: gateway
+        # shell: bash, not the default. The default Linux shell is `bash -e {0}`,
+        # which has NO pipefail - so `... | tee coverage.txt` returns tee's exit
+        # code and a failing suite still reports success. That happened: a green
+        # job with 1 of 157 tests failing. `shell: bash` is `bash -eo pipefail`.
+        shell: bash
+        run: npm run test:coverage 2>&1 | tee coverage.txt
+
+      - name: Enforce coverage floor
+        working-directory: gateway
+        # line 85 / branch 80 / funcs 80. Current: 94.24 / 83.51 / 90.73.
+        shell: bash
+        run: node scripts/check-coverage.cjs coverage.txt 85 80 80
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: gateway/coverage.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+  browser:
+    name: real chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        working-directory: gateway
+        run: npm install --no-audit --no-fund
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('gateway/package.json') }}
+
+      - name: Install Chromium
+        working-directory: gateway
+        run: npx playwright install --with-deps chromium
+
+      - name: Real-browser tests
+        working-directory: gateway
+        run: node --test --test-reporter=tap --test-timeout=60000 test/browser.test.js
+
+      - name: Upload failure artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            test-results/
+            gateway/test-results/
+          retention-days: 3
+          if-no-files-found: ignore
+
+  lint:
+    name: syntax check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Parse every source file
+        working-directory: gateway
+        run: |
+          for f in src/*.js engines/*.js test/*.js bin/*.js scripts/*.cjs; do
+            node --check "$f" || exit 1
+          done
+          echo "all files parse"
+
+      - name: Parse the PowerShell wrappers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($f in @('gateway/proxima-gw.ps1', 'gateway/proxima-gw-daemon.ps1')) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Error "$f has $($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Error "  $_" }
+              exit 1
+            }
+            Write-Output "ok $f"
+          }
+
+      - name: The CLI runs and reports a missing gateway clearly
+        working-directory: gateway
+        run: |
+          set -e
+          node bin/proxima-gw.js help | head -3
+          # Not running must be a clean non-zero exit, not a stack trace.
+          if AGENT_HUB_PORT=19996 node bin/proxima-gw.js check; then
+            echo "check exited 0 with nothing running - a script would trust that"
+            exit 1
+          fi
+          echo "check correctly failed"
