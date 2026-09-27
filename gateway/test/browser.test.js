@@ -152,9 +152,13 @@ test('a re-injected engine overwrites rather than merging', { skip }, async () =
     // Re-injection happens on every navigation, so a stale engine must not survive.
     await withBrowser(async (browser) => {
         const context = await browser.newContext();
+        await context.addInitScript({ content: ENGINES.__proximaTest });
         const page = await context.newPage();
 
         await page.goto(PAGE_HTML);
+        assert.equal(await page.evaluate(() => window.__proximaTest.marker), 'installed');
+
+        // Simulate a stale engine left behind by something else on the page.
         await page.evaluate(() => {
             window.__proximaTest = { marker: 'stale', sendMessage: () => ({}) };
         });
@@ -163,8 +167,8 @@ test('a re-injected engine overwrites rather than merging', { skip }, async () =
         await page.reload();
         assert.equal(
             await page.evaluate(() => window.__proximaTest.marker),
-            undefined,
-            'a reload must clear the stale engine, proving the init script is what provides it'
+            'installed',
+            'a reload must re-run the init script, replacing the stale engine'
         );
 
         await context.close();
@@ -187,10 +191,14 @@ test('cookies survive a real cookie jar round trip', { skip }, async () => {
             },
         ]);
 
-        const cookies = await context.cookies('claude.ai');
-        assert.equal(cookies.length, 1);
-        assert.equal(cookies[0].name, 'sessionKey');
-        assert.equal(cookies[0].value, 'real-value');
+        // Playwright's cookie filter wants full URLs, not bare domains.
+        const scoped = await context.cookies('https://claude.ai');
+        assert.equal(scoped.length, 1);
+        assert.equal(scoped[0].name, 'sessionKey');
+        assert.equal(scoped[0].value, 'real-value');
+
+        const all = await context.cookies();
+        assert.equal(all.length, 1, 'the cookie must really be in the jar');
 
         await context.close();
     });
@@ -246,7 +254,7 @@ test('the profile file round trips through a real browser restart', { skip }, as
         await ctx1.addCookies([
             { name: 'pplx_session', value: 'persisted', domain: 'perplexity.ai', path: '/', secure: true },
         ]);
-        const live = await ctx1.cookies();
+        const live = await ctx1.cookies('https://perplexity.ai');
         cookies.saveBackup('perplexity', live);
         assert.equal(evaluateAuth(live, PROVIDERS.perplexity.auth).loggedIn, true);
         await ctx1.close();

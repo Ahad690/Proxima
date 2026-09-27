@@ -55,14 +55,20 @@ function stubContext({ cookies = [], persistent = true } = {}) {
 }
 
 function stubPage({ enginePresent = true, response = 'hello from engine' } = {}) {
-    const state = { response, typing: false, sent: [], closed: false };
+    const state = { response, typing: false, sent: [], closed: false, responses: null };
+    // When `responses` is a queue, each getResponse() shifts the next value. That makes
+    // retry behaviour deterministic instead of racing a timer.
+    const nextResponse = () =>
+        Array.isArray(state.responses) && state.responses.length
+            ? state.responses.shift()
+            : state.response;
     const engine = {
         sendMessage: (p) => {
             state.sent.push(p);
             return { ok: true };
         },
         newConversation: () => ({ cleared: true }),
-        getResponse: () => state.response,
+        getResponse: () => nextResponse(),
         getTypingStatus: () => ({ typing: state.typing }),
         isReady: () => true,
     };
@@ -396,24 +402,33 @@ test('getResponseWithTyping returns a real answer on the first attempt', async (
 
 test('placeholder responses are retried, not returned (A8)', async () => {
     await withGateway(async (client, g) => {
-        // Seed a placeholder, then have the engine produce a real answer on attempt 2.
-        g.sessions._session('perplexity');
         await client.send('initProvider', 'perplexity');
         const page = g.sessions._session('perplexity').page;
-        page._state.response = 'no response captured';
+        // Deterministic: two placeholders, then a real answer. No timers.
+        page._state.responses = ['no response captured', '', 'real answer'];
 
-        const pending = client.send('getResponseWithTyping', 'perplexity', {
+        const res = await client.send('getResponseWithTyping', 'perplexity', {
             maxAttempts: 5,
-            retryDelayMs: 10,
+            retryDelayMs: 5,
         });
-        setTimeout(() => {
-            page._state.response = 'real answer';
-        }, 60);
-
-        const res = await pending;
         assert.equal(res.success, true);
         assert.equal(res.response, 'real answer');
-        assert.ok(res.attempts >= 2, `expected a retry, got attempt ${res.attempts}`);
+        assert.equal(res.attempts, 3, `expected exactly 3 attempts, got ${res.attempts}`);
+    });
+});
+
+test('a placeholder is never surfaced to the caller as an answer', async () => {
+    await withGateway(async (client, g) => {
+        await client.send('initProvider', 'perplexity');
+        const page = g.sessions._session('perplexity').page;
+        page._state.responses = ['', '   ', 'no response received'];
+
+        const res = await client.send('getResponseWithTyping', 'perplexity', {
+            maxAttempts: 3,
+            retryDelayMs: 5,
+        });
+        assert.equal(res.success, false, 'a run of placeholders must not report success');
+        assert.equal(res.attempts, 3);
     });
 });
 
