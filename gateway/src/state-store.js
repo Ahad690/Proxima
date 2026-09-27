@@ -18,7 +18,9 @@ const path = require('path');
  */
 
 const DEFAULT_PORT = 19222;
-const FALLBACK_ATTEMPTS = 0; // no silent relocation: see IpcServer.listen
+// How far the gateway MAY move if relocation is explicitly enabled. Zero would make
+// the allowRelocate option a lie: the flag would exist and do nothing.
+const FALLBACK_ATTEMPTS = 1;
 
 /**
  * The legacy Electron app's userData directory.
@@ -193,4 +195,10 @@ class StateStore {
     }
 }
 
-module.exports = { StateStore, DEFAULT_PORT, FALLBACK_ATTEMPTS, defaultStateDir };
+module.exports = {
+    StateStore,
+    DEFAULT_PORT,
+    FALLBACK_ATTEMPTS,
+    defaultStateDir,
+    legacyUserDataDir,
+};

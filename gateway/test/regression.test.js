@@ -2,6 +2,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+// The gateway writes its port fact to the legacy Electron userData dir so the
+// existing automation client can find it. Tests must never write there: it is the
+// real user profile, and several test files start servers concurrently, so they
+// would both pollute it and race each other over the same fact file.
+process.env.PROXIMA_GATEWAY_PORT_FACT = require('path').join(
+    require('os').tmpdir(),
+    `proxima-test-portfact-${process.pid}.json`
+);
 const os = require('os');
 const path = require('path');
 const fs = require('fs');

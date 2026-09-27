@@ -67,6 +67,15 @@ function usage() {
 
 // ---- argument parsing --------------------------------------------------------
 
+/**
+ * Flags that take a value.
+ *
+ * Without this, `--headless logout qwen` parses as headless="logout" with a single
+ * positional, because the parser cannot know that a following word is a command name
+ * rather than an argument. An allowlist is the only way to tell them apart.
+ */
+const VALUE_FLAGS = new Set(['cookies']);
+
 function parseArgs(argv) {
     const out = { _: [], flags: {} };
     for (let i = 0; i < argv.length; i += 1) {
@@ -74,7 +83,7 @@ function parseArgs(argv) {
         if (a.startsWith('--')) {
             const key = a.slice(2);
             const next = argv[i + 1];
-            if (next && !next.startsWith('--')) {
+            if (VALUE_FLAGS.has(key) && next && !next.startsWith('--')) {
                 out.flags[key] = next;
                 i += 1;
             } else {
@@ -109,8 +118,24 @@ function pidAlive(pid) {
     }
 }
 
+/**
+ * Per-call timeout.
+ *
+ * A CLI answers a human, so it must not hang. The default is short enough that a
+ * wedged gateway fails visibly rather than looking like the tool is thinking, and it
+ * is overridable for the one case that legitimately takes longer: opening a provider.
+ */
+const DEFAULT_TIMEOUT_MS = 15000;
+
+function timeoutMs(override) {
+    const env = Number(process.env.PROXIMA_GATEWAY_TIMEOUT_MS);
+    if (Number.isFinite(env) && env > 0) return env;
+    return override || DEFAULT_TIMEOUT_MS;
+}
+
 /** One request, one response, one socket. */
-function call(action, provider, data = {}, timeoutMs = 30000) {
+function call(action, provider, data = {}, timeout) {
+    const ms = timeoutMs(timeout);
     const { port, via } = resolvePort();
     return new Promise((resolve) => {
         const socket = net.createConnection({ port, host: '127.0.0.1' });
@@ -122,12 +147,15 @@ function call(action, provider, data = {}, timeoutMs = 30000) {
             settled = true;
             clearTimeout(timer);
             socket.destroy();
+            // unref the socket too, so a CLI that has finished its work exits even if
+            // some handle lingers. A command that does not return is worse than useless.
+            if (socket.unref) socket.unref();
             resolve(result);
         };
 
         const timer = setTimeout(() => {
-            done({ ok: false, error: `Timed out after ${timeoutMs}ms talking to port ${port}` });
-        }, timeoutMs);
+            done({ ok: false, error: `Timed out after ${ms}ms talking to port ${port}` });
+        }, ms);
         if (timer.unref) timer.unref();
 
         socket.on('error', (e) => {
@@ -196,7 +224,7 @@ async function cmdStatus() {
     }
     const res = await call('getStatus');
     if (!res.ok) {
-        fail(res.response.error || 'status failed');
+        fail(res.response?.error || res.error || 'status failed');
         return EXIT.ERROR;
     }
     const st = res.response;
@@ -237,12 +265,12 @@ async function cmdLogin(provider, flags) {
             value: { [provider]: false },
         });
         if (!set.ok) {
-            fail(set.response.error || 'could not set headless override');
+            fail(set.response?.error || 'could not set headless override');
             return EXIT.ERROR;
         }
-        const init = await call('initProvider', provider, {}, 90000);
+        const init = await call('initProvider', provider, {}, 45000);
         if (!init.ok) {
-            fail(init.response.error || 'could not open the provider');
+            fail(init.response?.error || 'could not open the provider');
             return EXIT.ERROR;
         }
         say(`${provider} is open. This setting is restart-requiring;`);
@@ -286,9 +314,9 @@ async function cmdLogin(provider, flags) {
         return EXIT.USAGE;
     }
 
-    const res = await call('setCookies', provider, { cookies }, 60000);
+    const res = await call('setCookies', provider, { cookies }, 30000);
     if (!res.ok) {
-        fail(res.response.error || 'login failed');
+        fail(res.response?.error || res.error || 'login failed');
         return EXIT.ERROR;
     }
     const r = res.response;
@@ -310,7 +338,7 @@ async function cmdLogout(provider) {
     }
     const res = await call('purgeProvider', provider);
     if (!res.ok) {
-        fail(res.response.error || 'logout failed');
+        fail(res.response?.error || res.error || 'logout failed');
         return EXIT.ERROR;
     }
     say(`${provider}: auth destroyed on disk. Next use needs a fresh login.`);
@@ -327,7 +355,7 @@ async function cmdHeadless(provider) {
         value: { [provider]: true },
     });
     if (!res.ok) {
-        fail(res.response.error || 'could not update the setting');
+        fail(res.response?.error || res.error || 'could not update the setting');
         return EXIT.ERROR;
     }
     say(`${provider}: headless. Restart the gateway to apply.`);

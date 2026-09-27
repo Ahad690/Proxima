@@ -123,9 +123,20 @@ class IpcServer {
     _tryListen(port) {
         return new Promise((resolve, reject) => {
             const server = net.createServer((socket) => this._onConnection(socket));
-            server.once('error', reject);
+            const onError = (e) => {
+                // Discard the failed server. Leaving it constructed keeps a handle on
+                // the event loop, which surfaces later as an unrelated test-file
+                // timeout rather than as the bind failure that actually happened.
+                try {
+                    server.close();
+                } catch {
+                    /* never listened, nothing to close */
+                }
+                reject(e);
+            };
+            server.once('error', onError);
             server.listen(port, this.host, () => {
-                server.removeListener('error', reject);
+                server.removeListener('error', onError);
                 this.server = server;
                 resolve(server.address().port);
             });

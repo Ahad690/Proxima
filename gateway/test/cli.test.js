@@ -23,18 +23,43 @@ function tmpState() {
     return { dir, fact: path.join(dir, 'port.json') };
 }
 
-/** Run the CLI with a captured environment. Returns { code, out, err }. */
+/**
+ * Run the CLI as a real child process.
+ *
+ * Deliberately ASYNC. The end-to-end tests serve a stub gateway from this same process,
+ * and spawnSync blocks the event loop - so the child could connect but the stub could
+ * never accept or reply, and every such test hung until its timeout. The stub needs the
+ * loop to keep turning, so the child must be awaited, not blocked on.
+ */
 function runCli(args, env = {}) {
-    const res = require('child_process').spawnSync(process.execPath, [CLI, ...args], {
-        encoding: 'utf8',
-        env: {
-            ...process.env,
-            PROXIMA_GATEWAY_STATE_DIR: path.join(os.tmpdir(), 'proxima-cli-state'),
-            ...env,
-        },
-        timeout: 20000,
+    return new Promise((resolve) => {
+        const child = spawn(process.execPath, [CLI, ...args], {
+            env: {
+                ...process.env,
+                PROXIMA_GATEWAY_STATE_DIR: path.join(os.tmpdir(), 'proxima-cli-state'),
+                // Keep the CLI's own per-call wait short so a wrong-port mistake fails
+                // the test quickly instead of eating the file's whole budget. Set
+                // through the child env, not an inline `VAR=x` prefix, which is
+                // bash-only and breaks under npm's cmd.exe on Windows.
+                PROXIMA_GATEWAY_TIMEOUT_MS: '2000',
+                ...env,
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', (c) => { out += c.toString(); });
+        child.stderr.on('data', (c) => { err += c.toString(); });
+        const killTimer = setTimeout(() => child.kill(), 15000);
+        child.on('close', (code) => {
+            clearTimeout(killTimer);
+            resolve({ code, out, err });
+        });
+        child.on('error', (e) => {
+            clearTimeout(killTimer);
+            resolve({ code: -1, out, err: err + e.message });
+        });
     });
-    return { code: res.status, out: res.stdout || '', err: res.stderr || '' };
 }
 
 // ---- argument parsing --------------------------------------------------------
@@ -80,44 +105,44 @@ test('resolvePort prefers AGENT_HUB_PORT over the recorded fact', () => {
     }
 });
 
-test('the CLI exit code is non-zero when the gateway is not running', () => {
+test('the CLI exit code is non-zero when the gateway is not running', async () => {
     const { fact } = tmpState();
-    const r = runCli(['check'], { AGENT_HUB_PORT: '19998', PROXIMA_GATEWAY_PORT_FACT: fact });
+    const r = await runCli(['check'], { AGENT_HUB_PORT: '19998', PROXIMA_GATEWAY_PORT_FACT: fact });
     assert.equal(r.code, 1, 'a script must be able to trust this exit code');
     assert.match(r.out, /NOT RUNNING/);
     // The message has to tell the operator what to do, not just that it failed.
     assert.match(r.out, /node src\\index\.js|node src\/index\.js/);
 });
 
-test('an unknown command is a usage error, not a stack trace', () => {
-    const r = runCli(['nope']);
+test('an unknown command is a usage error, not a stack trace', async () => {
+    const r = await runCli(['nope']);
     assert.equal(r.code, 2);
     assert.match(r.err, /Unknown command/);
     assert.ok(!/at Object\.|at Module\./.test(r.err), 'must not dump a stack trace at the user');
 });
 
-test('an unknown provider is rejected before any connection', () => {
-    const r = runCli(['login', 'notaprovider', '--cookies', 'x.json']);
+test('an unknown provider is rejected before any connection', async () => {
+    const r = await runCli(['login', 'notaprovider', '--cookies', 'x.json']);
     assert.equal(r.code, 2);
     assert.match(r.err, /Unknown provider/);
     assert.match(r.err, /perplexity/, 'must list the valid providers');
 });
 
-test('a missing cookie file is reported clearly', () => {
-    const r = runCli(['login', 'claude', '--cookies', 'C:\\definitely\\not\\here.json']);
+test('a missing cookie file is reported clearly', async () => {
+    const r = await runCli(['login', 'claude', '--cookies', 'C:\\definitely\\not\\here.json']);
     assert.equal(r.code, 2);
     assert.match(r.err, /No such file/);
 });
 
-test('login with no method is a usage error listing both options', () => {
-    const r = runCli(['login', 'claude']);
+test('login with no method is a usage error listing both options', async () => {
+    const r = await runCli(['login', 'claude']);
     assert.equal(r.code, 2);
     assert.match(r.err, /--cookies/);
     assert.match(r.err, /--headed/);
 });
 
-test('help exits zero and prints usage', () => {
-    const r = runCli(['help']);
+test('help exits zero and prints usage', async () => {
+    const r = await runCli(['help']);
     assert.equal(r.code, 0);
     assert.match(r.out, /USAGE/);
 });
@@ -197,7 +222,7 @@ test('status prints a row per provider and exits zero', async () => {
         isLoggedIn: (req) => ({ success: true, provider: req.provider, loggedIn: req.provider === 'claude' }),
     });
     try {
-        const r = runCli(['status'], { AGENT_HUB_PORT: String(stub.port) });
+        const r = await runCli(['status'], { AGENT_HUB_PORT: String(stub.port) });
         assert.equal(r.code, 0, r.err);
         assert.match(r.out, /PROVIDER/);
         assert.match(r.out, /claude\s+loaded\s+yes/);
@@ -207,8 +232,8 @@ test('status prints a row per provider and exits zero', async () => {
     }
 });
 
-test('status reports an unreachable gateway without a stack trace', () => {
-    const r = runCli(['status'], { AGENT_HUB_PORT: '19997' });
+test('status reports an unreachable gateway without a stack trace', async () => {
+    const r = await runCli(['status'], { AGENT_HUB_PORT: '19997' });
     assert.equal(r.code, 1);
     assert.match(r.err, /not reachable/i);
     assert.ok(!/at Object\./.test(r.err));
@@ -230,7 +255,7 @@ test('login --cookies reports success and verifies auth', async () => {
         }),
     });
     try {
-        const r = runCli(['login', 'claude', '--cookies', file], { AGENT_HUB_PORT: String(stub.port) });
+        const r = await runCli(['login', 'claude', '--cookies', file], { AGENT_HUB_PORT: String(stub.port) });
         assert.equal(r.code, 0, r.err);
         assert.match(r.out, /claude: .*authenticated/);
     } finally {
@@ -254,7 +279,7 @@ test('login reports failure when cookies are applied but do not authenticate', a
         }),
     });
     try {
-        const r = runCli(['login', 'claude', '--cookies', file], { AGENT_HUB_PORT: String(stub.port) });
+        const r = await runCli(['login', 'claude', '--cookies', file], { AGENT_HUB_PORT: String(stub.port) });
         assert.equal(r.code, 1, 'a non-authenticating login must not report success');
         assert.match(r.out, /No recognised auth cookie/);
         assert.match(r.out, /--headed/, 'must suggest the alternative');
@@ -268,7 +293,7 @@ test('logout confirms destruction on disk', async () => {
         purgeProvider: () => ({ success: true, purged: [{ provider: 'qwen', purged: true }] }),
     });
     try {
-        const r = runCli(['logout', 'qwen'], { AGENT_HUB_PORT: String(stub.port) });
+        const r = await runCli(['logout', 'qwen'], { AGENT_HUB_PORT: String(stub.port) });
         assert.equal(r.code, 0, r.err);
         assert.match(r.out, /auth destroyed on disk/);
     } finally {
@@ -281,7 +306,7 @@ test('logout propagates a server-side refusal', async () => {
         purgeProvider: () => ({ success: false, error: 'name a provider, or pass data.providers' }),
     });
     try {
-        const r = runCli(['logout', 'qwen'], { AGENT_HUB_PORT: String(stub.port) });
+        const r = await runCli(['logout', 'qwen'], { AGENT_HUB_PORT: String(stub.port) });
         assert.equal(r.code, 1, 'a refused destructive action must not exit zero');
         assert.match(r.err, /name a provider/);
     } finally {
@@ -295,7 +320,7 @@ test('login --headed sets the override and explains the restart', async () => {
         initProvider: () => ({ success: true, provider: 'chatgpt' }),
     });
     try {
-        const r = runCli(['login', 'chatgpt', '--headed'], { AGENT_HUB_PORT: String(stub.port) });
+        const r = await runCli(['login', 'chatgpt', '--headed'], { AGENT_HUB_PORT: String(stub.port) });
         assert.equal(r.code, 0, r.err);
         assert.match(r.out, /visible window/);
         assert.match(r.out, /restart-requiring/);
