@@ -233,18 +233,31 @@ test('server refuses a non-loopback bind (P7)', () => {
     );
 });
 
-test('port collision retries +1 then reports both ports (F2)', async () => {
+test('a port collision fails loudly rather than relocating (F2)', async () => {
     const s = new StateStore(tmpDir());
     const squatter = new IpcServer({ handler: async () => ({ success: true }), stateStore: s, port: 0 });
-    const taken = await squatter._tryListen(0);
-    const takenPort = squatter.server.address().port;
+    const second = new IpcServer({ handler: async () => ({ success: true }), stateStore: s, port: 0 });
 
-    const second = new IpcServer({ handler: async () => ({ success: true }), stateStore: s, port: takenPort });
-    const bound = await second.listen();
-    assert.equal(bound, takenPort + 1, 'must land on the next port');
+    try {
+        await squatter._tryListen(0);
+        const takenPort = squatter.server.address().port;
+        const colliding = new IpcServer({ handler: async () => ({ success: true }), stateStore: s, port: takenPort });
 
-    await second.close();
-    await squatter.close();
+        // Relocation is opt-in. Silently moving to port+1 would leave a fact pointing
+        // a client at whichever process won the real port.
+        await assert.rejects(() => colliding.listen(), /already in use/);
+
+        // Opting in relocates, and is explicit about it.
+        const moved = await colliding.listen({ allowRelocate: true });
+        assert.equal(moved, takenPort + 1);
+
+        await colliding.close();
+    } finally {
+        // Without this the squatter's handle stays open and the whole test FILE times
+        // out, which masks the real failure behind an unrelated one.
+        await second.close();
+        await squatter.close();
+    }
 });
 
 // ---------------------------------------------------------------- engines

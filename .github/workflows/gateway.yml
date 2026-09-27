@@ -34,11 +34,17 @@ jobs:
 
       - name: Run test suite with coverage
         working-directory: gateway
+        # shell: bash, not the default. The default Linux shell is `bash -e {0}`,
+        # which has NO pipefail - so `... | tee coverage.txt` returns tee's exit
+        # code and a failing suite still reports success. That happened: a green
+        # job with 1 of 157 tests failing. `shell: bash` is `bash -eo pipefail`.
+        shell: bash
         run: npm run test:coverage 2>&1 | tee coverage.txt
 
       - name: Enforce coverage floor
         working-directory: gateway
-        # line 85 / branch 80 / funcs 80. Current: 92.70 / 84.53 / 88.64.
+        # line 85 / branch 80 / funcs 80. Current: 94.24 / 83.51 / 90.73.
+        shell: bash
         run: node scripts/check-coverage.cjs coverage.txt 85 80 80
 
       - name: Upload coverage report

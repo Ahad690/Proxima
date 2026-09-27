@@ -174,7 +174,7 @@ function table(rows, headers) {
 
 async function cmdCheck() {
     const { port, via } = resolvePort();
-    const res = await call('ping', null, {}, 4000);
+    const res = await call('ping', null, {}, 2500);
     if (res.ok) {
         say(`gateway  RUNNING  on 127.0.0.1:${port}  (port from ${via})`);
         return EXIT.OK;
@@ -188,7 +188,7 @@ async function cmdCheck() {
 }
 
 async function cmdStatus() {
-    const health = await call('ping', null, {}, 4000);
+    const health = await call('ping', null, {}, 2500);
     if (!health.ok) {
         fail(`Gateway not reachable: ${health.error}`);
         fail('Start it with: node src\\index.js');
