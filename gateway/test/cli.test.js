@@ -147,6 +147,22 @@ test('help exits zero and prints usage', async () => {
     assert.match(r.out, /USAGE/);
 });
 
+test('--help and -h are a success, not a usage error', async () => {
+    // A non-zero exit here means `proxima-gw --help && next-thing` skips the next
+    // thing, because asking for help looked like a failure.
+    for (const args of [['--help'], ['-h']]) {
+        const r = await runCli(args);
+        assert.equal(r.code, 0, `${args[0]} must exit 0, got ${r.code}`);
+        assert.match(r.out, /USAGE/);
+    }
+});
+
+test('no arguments is a usage error and still prints usage', async () => {
+    const r = await runCli([]);
+    assert.equal(r.code, 2, 'being asked to do nothing is not a success');
+    assert.match(r.out, /USAGE/);
+});
+
 // ---- table formatting --------------------------------------------------------
 
 test('table pads columns so it is readable in a terminal', () => {

@@ -43,6 +43,8 @@ function usage() {
     return [
         'proxima-gw - control the Proxima provider gateway',
         '',
+        '  proxima-gw help        this text        proxima-gw --help',
+        '',
         'USAGE',
         '  proxima-gw check                          is the gateway running?',
         '  proxima-gw status                         per-provider state',
@@ -368,9 +370,16 @@ async function main(argv) {
     const args = parseArgs(argv);
     const cmd = args._[0];
 
-    if (!cmd || args.flags.help || cmd === 'help') {
+    // Help is a success, not a usage error. `proxima-gw --help && next-thing`
+    // must not skip the next thing because asking for help "failed".
+    const wantsHelp = cmd === 'help' || args.flags.help === true || cmd === '-h';
+    if (wantsHelp) {
         say(usage());
-        return cmd ? EXIT.OK : EXIT.USAGE;
+        return EXIT.OK;
+    }
+    if (!cmd) {
+        say(usage());
+        return EXIT.USAGE;
     }
 
     switch (cmd) {
