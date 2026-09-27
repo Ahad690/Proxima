@@ -1,0 +1,22 @@
+{
+  "name": "proxima-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headless authenticated provider gateway. Replaces the Electron runtime with Playwright Chromium.",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --test-reporter=tap --test-timeout=20000 test/unit.test.js test/integration.test.js",
+    "test:browser": "node --test --test-reporter=tap --test-timeout=60000 test/browser.test.js",
+    "test:all": "npm run test && npm run test:browser",
+    "setup:browser": "npx playwright install --with-deps chromium",
+    "test:watch": "node --test --watch test/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}
