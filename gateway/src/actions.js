@@ -4,6 +4,7 @@ const { getProvider, isKnownProvider, PROVIDER_NAMES } = require('./providers');
 const { isPlaceholderResponse } = require('./cookie-store');
 const { stampTimestamp, allowlistOptions } = require('./session-manager');
 const { toSafeError } = require('./logger');
+const { redactCookies } = require('./redact');
 
 /**
  * The 28-action contract.
@@ -47,7 +48,7 @@ function createHandler({ sessions, stateStore, startedAt, getFileReferenceEnable
             fileReferenceEnabled: fileReferenceEnabled(),
         }),
 
-        memory: async () => ({ success: true, memory: processMemoryReport() }),
+        memory: async () => ({ success: true, memory: processMemoryReport(sessions.initializedProviders()) }),
 
         initProvider: async (req) => {
             await sessions.initProvider(req.provider);
@@ -70,25 +71,31 @@ function createHandler({ sessions, stateStore, startedAt, getFileReferenceEnable
             for (const name of targets) {
                 reports.push(await sessions.unloadProvider(name));
             }
-            // Chromium reaps the renderer asynchronously; reading immediately understates
-            // the saving and reads as a failure.
-            await sleep(MEMORY_SETTLE_MS);
+            const unloaded = reports.filter((r) => r.unloaded);
+            // Only settle when something actually unloaded. Chromium reaps the renderer
+            // asynchronously, so a reading taken immediately understates the saving -
+            // but paying 1.5s for a no-op purge of five providers is a pointless 7.5s.
+            if (unloaded.length > 0) await sleep(MEMORY_SETTLE_MS);
             return {
                 success: true,
-                unloaded: reports.filter((r) => r.unloaded).map((r) => r.provider),
+                unloaded: unloaded.map((r) => r.provider),
                 reports,
                 stillLoaded: sessions.initializedProviders(),
-                memory: processMemoryReport(),
+                memory: processMemoryReport(sessions.initializedProviders()),
             };
         },
 
         purgeProvider: async (req) => {
             const targets = resolveTargets(req, sessions.initializedProviders());
+            // This is the ONE destructive operation, so a no-op must not report success.
+            if (targets.length === 0) {
+                return { success: false, error: 'name a provider, or pass data.providers' };
+            }
             const results = [];
             for (const name of targets) {
                 results.push(await sessions.purgeProvider(name));
             }
-            return { success: true, purged: results, memory: processMemoryReport() };
+            return { success: true, purged: results, memory: processMemoryReport(sessions.initializedProviders()) };
         },
 
         sendMessage: async (req) => {
@@ -130,6 +137,18 @@ function createHandler({ sessions, stateStore, startedAt, getFileReferenceEnable
 
         getResponse: async (req) => {
             const result = await sessions.getResponse(req.provider);
+            // A8: this is a single-shot probe, so a placeholder here must be reported as
+            // a failure rather than handed back as a successful empty answer. The
+            // retrying variant is getResponseWithTyping.
+            if (isPlaceholderResponse(result.response)) {
+                return {
+                    success: false,
+                    provider: req.provider,
+                    error: 'No response captured yet. Use getResponseWithTyping to retry.',
+                    errorKind: 'capture',
+                    response: result.response,
+                };
+            }
             return { success: true, ...result };
         },
 
@@ -145,11 +164,17 @@ function createHandler({ sessions, stateStore, startedAt, getFileReferenceEnable
          * bounded so a rate-limited provider cannot be hammered indefinitely.
          */
         getResponseWithTyping: async (req) => {
-            const maxAttempts = Number(req.data?.maxAttempts) > 0
-                ? Number(req.data.maxAttempts)
+            // I7: clamp rather than trust the caller. An unbounded attempt count is a
+            // denial of service on this connection's request queue, because handlers are
+            // serialised per socket. The delay needs a ceiling for the same reason and a
+            // floor so a caller cannot spin the loop.
+            const requestedAttempts = Number.parseInt(req.data?.maxAttempts, 10);
+            const requestedDelay = Number.parseInt(req.data?.retryDelayMs, 10);
+            const maxAttempts = Number.isFinite(requestedAttempts)
+                ? Math.min(Math.max(requestedAttempts, 1), CAPTURE_MAX_ATTEMPTS)
                 : CAPTURE_MAX_ATTEMPTS;
-            const delay = Number(req.data?.retryDelayMs) > 0
-                ? Number(req.data.retryDelayMs)
+            const delay = Number.isFinite(requestedDelay)
+                ? Math.min(Math.max(requestedDelay, 50), 5000)
                 : CAPTURE_RETRY_DELAY_MS;
 
             let last = '';
@@ -225,7 +250,11 @@ function createHandler({ sessions, stateStore, startedAt, getFileReferenceEnable
 
         getCookies: async (req) => {
             const result = await sessions.getCookies(req.provider);
-            return { success: true, ...result };
+            // redactCookies, not the generic redactor: a cookie value is a bare string
+            // with no "name=value" shape, so a regex pass cannot see it as a secret.
+            // Without this, every session cookie goes out in plaintext. Names, domains
+            // and expiries are preserved so the call stays useful for diagnosis.
+            return { success: true, ...result, cookies: redactCookies(result.cookies) };
         },
 
         getSettings: async () => ({ success: true, settings: stateStore.loadSettings() }),
@@ -335,14 +364,14 @@ function hasAttachments(data) {
     return true;
 }
 
-function processMemoryReport() {
+function processMemoryReport(loadedProviders = null) {
     const m = process.memoryUsage();
     return {
         rssMB: +(m.rss / 1048576).toFixed(1),
         heapUsedMB: +(m.heapUsed / 1048576).toFixed(1),
         heapTotalMB: +(m.heapTotal / 1048576).toFixed(1),
         externalMB: +(m.external / 1048576).toFixed(1),
-        loadedProviders: null,
+        loadedProviders,
     };
 }
 

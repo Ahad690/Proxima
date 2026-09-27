@@ -3,7 +3,7 @@
 const net = require('net');
 const { DEFAULT_PORT, FALLBACK_ATTEMPTS } = require('./state-store');
 const { toSafeError } = require('./logger');
-const { redactString } = require('./redact');
+const { redactString, redact } = require('./redact');
 
 /**
  * Loopback IPC server.
@@ -72,7 +72,7 @@ class IpcServer {
         this.host = host;
         this.server = null;
         this.boundPort = null;
-        this.connections = 0;
+        this.openConnections = 0;
     }
 
     /**
@@ -116,9 +116,13 @@ class IpcServer {
     }
 
     _onConnection(socket) {
-        this.connections += 1;
+        this.openConnections += 1;
         const decoder = new FrameDecoder();
         let busy = Promise.resolve();
+
+        socket.on('close', () => {
+            this.openConnections -= 1;
+        });
 
         socket.on('data', (chunk) => {
             let lines;
@@ -172,7 +176,12 @@ class IpcServer {
             }
 
             const response = await this.handler(request);
-            this._write(socket, { ...response, requestId });
+            // Redact SUCCESS responses too. getCookies returns session cookies,
+            // debugDOM can return page HTML and executeScript returns whatever the
+            // page returned - any of which can carry a credential. Previously only
+            // the failure branch was redacted, so secrets left over the wire on the
+            // paths that actually return them.
+            this._write(socket, { ...redact(response || {}), requestId });
         } catch (e) {
             // Redacted: the failure can come from anywhere in the request path, and a
             // provider URL can carry a token in its query string.

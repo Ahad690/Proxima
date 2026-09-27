@@ -501,8 +501,55 @@ test('hasEngine reports which providers are installed', () => {
 test('flushAll writes a profile file for every loaded session', async () => {
     const g = makeGateway();
     await g.sessions.initProvider('perplexity');
+    // Auth cookies must exist: flushing deliberately skips writing an empty auth store,
+    // so a file appearing with nothing in it would be noise on disk.
+    g.context._store.push({
+        name: 'pplx_session',
+        value: 'persisted',
+        domain: '.perplexity.ai',
+    });
     await g.sessions.flushAll();
-    assert.ok(fs.existsSync(g.sessions._session('perplexity').profileFile));
+    const file = g.sessions._session('perplexity').profileFile;
+    assert.ok(fs.existsSync(file), 'the profile file must be written');
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(stored.provider, 'perplexity');
+    assert.ok(
+        stored.cookies.some((c) => c.name === 'pplx_session'),
+        'and must contain the auth cookie'
+    );
+    await g.sessions.close();
+});
+
+test('flushAll does not write an empty auth store', async () => {
+    const g = makeGateway();
+    await g.sessions.initProvider('perplexity');
+    await g.sessions.flushAll();
+    const file = g.sessions._session('perplexity').profileFile;
+    assert.equal(
+        fs.existsSync(file),
+        false,
+        'a profile with no auth cookies is not worth persisting'
+    );
+    await g.sessions.close();
+});
+
+test('the profile file is scoped to the provider auth domain', async () => {
+    const g = makeGateway();
+    await g.sessions.initProvider('perplexity');
+    g.context._store.push(
+        { name: 'pplx_session', value: 'keep', domain: '.perplexity.ai' },
+        { name: 'tracking', value: 'drop', domain: '.someothertracker.test' }
+    );
+    await g.sessions.flushAll();
+    const stored = JSON.parse(
+        fs.readFileSync(g.sessions._session('perplexity').profileFile, 'utf8')
+    );
+    const names = stored.cookies.map((c) => c.name);
+    assert.ok(names.includes('pplx_session'));
+    assert.ok(
+        !names.includes('tracking'),
+        'unrelated domains must not accumulate in the auth store'
+    );
     await g.sessions.close();
 });
 

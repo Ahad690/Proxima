@@ -120,16 +120,60 @@ class CookieStore {
         return path.join(this.state.cookieBackupDir, `${provider}.json`);
     }
 
+    /**
+     * Write a file that holds credentials.
+     *
+     * The mode must be set ON the write, not after it. Calling writeFileSync then
+     * chmodSync leaves a window where the file exists at the umask default, and
+     * `mode` on a write is ignored when the file already exists - which is the common
+     * case for a profile. So: create a temp file with the restrictive mode, then
+     * rename over the target, which is atomic and carries the mode with it.
+     *
+     * On win32 Node maps chmod to a read-only attribute and a POSIX 0600 is not
+     * achievable. That is reported rather than swallowed, because the alternative is
+     * code that appears to protect a credential and does not.
+     */
+    writeSecure(file, contents) {
+        // The parent must exist. A per-provider profile directory is created lazily, so
+        // a missing mkdir here makes every flush throw into a silent catch and the
+        // auth store is never written at all.
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+
+        const tmp = `${file}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, contents, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        try {
+            fs.renameSync(tmp, file);
+        } catch (e) {
+            try {
+                fs.unlinkSync(tmp);
+            } catch {
+                /* leave no temp behind */
+            }
+            throw e;
+        }
+        this._warnIfModeUnsupported(file);
+        return file;
+    }
+
+    _warnIfModeUnsupported(file) {
+        if (process.platform !== 'win32') return;
+        if (CookieStore._winModeWarned) return;
+        CookieStore._winModeWarned = true;
+        const dir = path.dirname(file);
+        // Reported once, not thrown: the state dir is inside the user profile, so the
+        // practical exposure is limited, but the limitation should not be invisible.
+        process.emitWarning(
+            `POSIX 0600 is not enforceable on win32; credential file modes in ${dir} ` +
+                `rely on inherited directory ACLs. Move PROXIMA_GATEWAY_STATE_DIR off a ` +
+                `shared path if that is a concern.`,
+            'SecurityWarning'
+        );
+    }
+
     saveBackup(provider, cookies) {
         if (!Array.isArray(cookies) || cookies.length === 0) return null;
         const record = toBackupRecord(provider, cookies);
-        const file = this._backupPath(provider);
-        fs.writeFileSync(file, JSON.stringify(record, null, 2), 'utf8');
-        try {
-            fs.chmodSync(file, 0o600); // cookies are bearer credentials
-        } catch {
-            /* best effort on platforms without POSIX modes */
-        }
+        this.writeSecure(this._backupPath(provider), JSON.stringify(record, null, 2));
         return record;
     }
 
@@ -149,7 +193,6 @@ class CookieStore {
             /* already gone */
         }
     }
-
     /**
      * Cookies that a restore would actually install, i.e. those whose domain matches.
      * Prevents a Qwen backup from writing perplexity.ai cookies into the wrong profile.
@@ -160,17 +203,31 @@ class CookieStore {
     }
 }
 
-/** Placeholder strings that must never be surfaced to a caller as a real answer (A8). */
+/**
+ * Placeholder strings that must never be surfaced to a caller as a real answer (A8).
+ *
+ * Matched by prefix rather than exact equality: providers use variants of the same
+ * sentinel, and an exact set silently fails open on a wording it did not anticipate -
+ * which turns "no answer yet" into a delivered answer.
+ */
+const PLACEHOLDER_PREFIXES = ['', 'no response', 'no answer', 'nothing returned', '(no'];
+
+/** Values a JSON body can produce that are not answers. */
+const PLACEHOLDER_LITERALS = new Set(['null', 'undefined', 'false', 'nil', 'none']);
+
+function isPlaceholderResponse(text) {
+    if (text === null || text === undefined) return true;
+    const t = String(text).trim().toLowerCase();
+    if (t === '') return true;
+    if (PLACEHOLDER_LITERALS.has(t)) return true;
+    return PLACEHOLDER_PREFIXES.some((p) => p !== '' && t.startsWith(p));
+}
+
 const PLACEHOLDER_RESPONSES = new Set([
     '',
     'no response captured',
     'no response received',
 ]);
-
-function isPlaceholderResponse(text) {
-    if (text === null || text === undefined) return true;
-    return PLACEHOLDER_RESPONSES.has(String(text).trim().toLowerCase());
-}
 
 module.exports = {
     CookieStore,

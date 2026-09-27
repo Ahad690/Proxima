@@ -3,6 +3,7 @@
 const { getProvider, PROVIDER_NAMES } = require('./providers');
 const { evaluateAuth, normalizeImportedCookies } = require('./cookie-store');
 const { EngineLoader, EngineError, TransportError } = require('./engine-loader');
+const { redactString } = require('./redact');
 
 /**
  * Per-provider persistent browser sessions.
@@ -69,17 +70,30 @@ class SessionManager {
         this._sessions = new Map();
         this._startedAt = new Date().toISOString();
         this.activeProvider = null;
+        // Guards against concurrent first-touches leaking a context or a browser.
+        this._inflight = new Map();
+        this._browserInflight = null;
     }
 
     // ---- browser lifecycle ----
 
     async _ensureBrowser() {
         if (this._browser) return this._browser;
-        this._browser = await this.browserFactory({
+        // Without this, two concurrent first-touches launch Chromium twice and one
+        // process is orphaned with no reference to close it.
+        if (this._browserInflight) return this._browserInflight;
+        this._browserInflight = this.browserFactory({
             headless: this.settings.headless !== false,
             args: LAUNCH_ARGS,
-        });
-        return this._browser;
+        })
+            .then((b) => {
+                this._browser = b;
+                return b;
+            })
+            .finally(() => {
+                this._browserInflight = null;
+            });
+        return this._browserInflight;
     }
 
     async close() {
@@ -125,41 +139,56 @@ class SessionManager {
         const session = this._session(name);
         if (session.isOpen) return session;
 
+        // I6: without an in-flight guard, two concurrent first-touches both build a
+        // context and the second overwrites the first, leaking it permanently - it is
+        // on neither the session nor any list close() walks.
+        if (this._inflight.has(name)) return this._inflight.get(name);
+        const work = this._initProviderInner(session, headless).finally(() => {
+            this._inflight.delete(name);
+        });
+        this._inflight.set(name, work);
+        return work;
+    }
+
+    async _initProviderInner(session, headless) {
+        const { spec, name } = session;
         const browser = await this._ensureBrowser();
-        const useHeadless = headless === null
-            ? this._headlessFor(name)
-            : Boolean(headless);
+        const useHeadless = headless === null ? this._headlessFor(name) : Boolean(headless);
 
-        const userDataDir = this.state.profileDir(session.spec.partition);
+        // I6: build into locals and publish only once navigate+inject have succeeded.
+        // Publishing first left a failed provider looking INITIALIZED on about:blank,
+        // and every later initProvider short-circuited past it - poisoned for the
+        // lifetime of the process.
+        let context = null;
+        let page = null;
 
-        let context;
         try {
-            context = await browser.newContext({
-                viewport: DEFAULT_VIEWPORT,
-                userAgent: undefined, // use Chromium's real UA; do not spoof
-            });
+            context = await browser.newContext({ viewport: DEFAULT_VIEWPORT });
+            await this._attachPersistence(context, this.state.profileDir(spec.partition), session);
+            page = await context.newPage();
+
+            await this._navigateAndInject(session, { initial: true, context, page });
         } catch (e) {
+            // Never leave a context behind that nothing holds a reference to.
+            if (context) {
+                try {
+                    await context.close();
+                } catch {
+                    /* best effort */
+                }
+            }
+            session.context = null;
+            session.page = null;
             session.state = 'UNINITIALIZED';
             session.lastError = e;
-            throw new TransportError(
-                `Could not create a browser context for "${name}": ${e.message}`,
-                name,
-                { reason: 'context-failed' }
-            );
+            throw e;
         }
 
-        // Persistent storage: the profile dir IS the auth store. Cookie backup is a
-        // secondary safety net, not the primary mechanism.
-        await this._attachPersistence(context, userDataDir, session);
-
-        const page = await context.newPage();
         session.context = context;
         session.page = page;
         session.state = 'INITIALIZED';
         session.headless = useHeadless;
         session.lastError = null;
-
-        await this._navigateAndInject(session, { initial: true });
 
         const auth = await this.isLoggedIn(name);
         if (!auth.loggedIn) {
@@ -210,12 +239,26 @@ class SessionManager {
     async _flushCookies(session) {
         if (!session.context || !session.profileFile) return;
         try {
-            const cookies = await session.context.cookies();
-            writeJson(session.profileFile, {
-                provider: session.name,
-                savedAt: new Date().toISOString(),
-                cookies,
-            });
+            const all = await session.context.cookies();
+            // Scope to the provider's own auth domain. Persisting every cookie the page
+            // touched accumulates consent and tracking cookies for unrelated domains,
+            // which is both noise and extra credential-shaped material on disk.
+            const cookies = all.filter((c) =>
+                String(c.domain || '').includes(session.spec.auth.domain)
+            );
+            if (cookies.length === 0) return;
+
+            // The PRIMARY auth store, so it must be written with the same protection as
+            // the backup. It previously had no mode at all, making the file the code
+            // calls the auth store the least protected of the two.
+            this.cookies.writeSecure(
+                session.profileFile,
+                JSON.stringify(
+                    { provider: session.name, savedAt: new Date().toISOString(), cookies },
+                    null,
+                    2
+                )
+            );
             this.cookies.saveBackup(session.name, cookies);
         } catch {
             /* flush is best effort; shutdown retries */
@@ -230,32 +273,49 @@ class SessionManager {
         return this.settings.headless !== false;
     }
 
-    async _navigateAndInject(session, { initial = false } = {}) {
-        const { spec, name, page } = session;
+    async _navigateAndInject(session, { initial = false, context = null, page = null } = {}) {
+        const { spec, name } = session;
+        const ctx = context || session.context;
+        const pg = page || session.page;
         try {
-            await page.goto(spec.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await pg.goto(spec.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
         } catch (e) {
-            if (!initial) throw e;
-            throw new TransportError(
+            const err = new TransportError(
                 `Could not reach ${spec.url} for provider "${name}": ${e.message}`,
                 name,
                 { reason: 'navigation-failed' }
             );
+            if (initial) throw err;
+            // I3/I4: a later navigation failing must be visible. Swallowing it here is
+            // what let navigate() report success and then fail on the next call with an
+            // unexplained "engine not loaded".
+            throw err;
         }
 
-        // Re-inject after every navigation. The init script also fires, but an explicit
-        // install lets us probe and fail loudly rather than discovering the gap later.
         try {
-            await this.engines.install(session.context, page, name);
+            await this.engines.install(ctx, pg, name);
         } catch (e) {
-            if (e instanceof EngineError && initial) throw e;
-            if (!(e instanceof EngineError)) throw e;
-            // Non-initial injection failure is recoverable: the next navigation retries.
-            session.lastError = e;
+            if (e instanceof EngineError && !initial) {
+                // A navigation tore the engine down. Surface it: the next call would
+                // otherwise fail with a confusing error instead of the real cause.
+                session.lastError = e;
+                throw e;
+            }
+            throw e;
         }
     }
 
     // ---- auth ----
+
+    /** Auth as recorded on disk, independent of any live context. */
+    _authOnDisk(name) {
+        const spec = getProvider(name);
+        const session = this._sessions.get(name);
+        const fromDisk = (session && readJson(session.profileFile)) || {};
+        const cookies = fromDisk.cookies || [];
+        const verdict = evaluateAuth(cookies, spec.auth);
+        return { provider: name, loggedIn: verdict.loggedIn, matched: verdict.matched };
+    }
 
     async isLoggedIn(name) {
         const spec = getProvider(name);
@@ -296,18 +356,13 @@ class SessionManager {
         }
 
         // Clear the domain's existing cookies first, or the old and new sets interleave.
+        // Scoped to the auth domain so a provider's cookies cannot disturb another's.
         try {
-            const existing = await session.context.cookies(spec.auth.domain);
-            for (const c of existing) {
-                const url = `${c.secure ? 'https' : 'http'}://${c.domain.replace(/^\./, '')}${c.path || '/'}`;
-                await session.context.clearCookies({ name: c.name, domain: c.domain }).catch(async () => {
-                    // Fall back to explicit removal when the filtered clear is unsupported.
-                    await session.context.clearCookies();
-                });
-                void url;
-            }
+            await session.context.clearCookies({ domain: spec.auth.domain });
         } catch {
-            /* clearing is best effort; addCookies below is what matters */
+            // A filtered clear is not always supported; an unfiltered clear would wipe
+            // every cookie in the context, so it is deliberately NOT used as a
+            // fallback. addCookies below is what actually establishes the session.
         }
 
         let set = 0;
@@ -323,8 +378,10 @@ class SessionManager {
 
         await this._flushCookies(session);
 
-        // Reload so the new auth is actually in effect for the page's own fetches.
-        await this._navigateAndInject(session).catch(() => {});
+        // Reload so the new auth is actually in effect for the page's own fetches. A
+        // failure here is reported: silently continuing would leave the caller
+        // believing the cookies took effect when the page never re-read them.
+        await this._navigateAndInject(session);
 
         const verdict = await this.isLoggedIn(name);
         return {
@@ -371,6 +428,13 @@ class SessionManager {
         if (!session.isOpen) {
             return { provider: name, unloaded: false, reason: 'not-loaded' };
         }
+
+        // A6: auth lives on disk, so the context's cookie jar MUST be flushed before it
+        // is discarded. Without this, an operator who logged in interactively loses the
+        // session the moment the renderer is unloaded, while the response still claims
+        // authPreserved: true.
+        await this._flushCookies(session);
+
         try {
             await session.page.goto('about:blank').catch(() => {});
         } catch {
@@ -386,7 +450,16 @@ class SessionManager {
         session.state = 'UNINITIALIZED';
         session.sentThisProcess = false;
         if (this.activeProvider === name) this.activeProvider = null;
-        return { provider: name, unloaded: true, authPreserved: true };
+
+        // Report what actually happened, not what was intended. A response that claims
+        // preservation without checking is worse than no claim at all.
+        const authPreserved = this._authOnDisk(name).loggedIn;
+        return {
+            provider: name,
+            unloaded: true,
+            authPreserved,
+            ...(authPreserved ? {} : { warning: 'cookies were not on disk before unload; session may need re-auth' }),
+        };
     }
 
     /** The only operation that destroys auth. Never reachable from unloadProvider. */
@@ -463,8 +536,21 @@ class SessionManager {
 
     async navigate(name, url) {
         const session = await this._ensureLoaded(name);
-        await session.page.goto(url, { waitUntil: 'domcontentloaded' });
-        await this._navigateAndInject(session).catch(() => {});
+        // I4: wrap so a navigation failure is typed as transport, matching
+        // initProvider. Two code paths disagreeing about the same failure is exactly
+        // what the F6 engine/transport split exists to prevent.
+        try {
+            await session.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        } catch (e) {
+            throw new TransportError(
+                `Navigation to ${redactString(String(url))} failed for "${name}": ${e.message}`,
+                name,
+                { reason: 'navigation-failed' }
+            );
+        }
+        // I3: re-inject and surface a failure. Reporting success here and then failing
+        // on the next call with "engine not loaded" is worse than reporting the cause.
+        await this._navigateAndInject(session);
         return { provider: name, url };
     }
 
@@ -526,15 +612,6 @@ function readJson(file) {
         return JSON.parse(require('fs').readFileSync(file, 'utf8'));
     } catch {
         return null;
-    }
-}
-
-function writeJson(file, value) {
-    try {
-        require('fs').mkdirSync(require('path').dirname(file), { recursive: true });
-        require('fs').writeFileSync(file, JSON.stringify(value, null, 2), 'utf8');
-    } catch {
-        /* best effort */
     }
 }
 

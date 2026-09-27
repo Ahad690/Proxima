@@ -7,8 +7,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test --test-reporter=tap --test-timeout=20000 test/unit.test.js test/integration.test.js test/contract.test.js test/redact.test.js test/leak.test.js test/engines.test.js",
-    "test:coverage": "node --test --test-reporter=tap --experimental-test-coverage --test-timeout=20000 test/unit.test.js test/integration.test.js test/contract.test.js test/redact.test.js test/leak.test.js test/engines.test.js",
+    "test": "node --test --test-reporter=tap --test-timeout=20000 test/unit.test.js test/integration.test.js test/contract.test.js test/redact.test.js test/leak.test.js test/engines.test.js test/regression.test.js",
+    "test:coverage": "node --test --test-reporter=tap --experimental-test-coverage --test-timeout=20000 test/unit.test.js test/integration.test.js test/contract.test.js test/redact.test.js test/leak.test.js test/engines.test.js test/regression.test.js",
     "test:browser": "node --test --test-reporter=tap --test-timeout=60000 test/browser.test.js",
     "test:all": "npm run test:coverage && npm run test:browser",
     "coverage:check": "node scripts/check-coverage.cjs",

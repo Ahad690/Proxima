@@ -23,16 +23,40 @@ const REDACTED = '[REDACTED]';
 /** Default cap for any single redacted string. */
 const DEFAULT_MAX = 512;
 
+const { PROVIDERS } = require('./providers');
+
 /**
  * Cookie/query names whose values are credentials.
  *
  * Declared before PATTERNS because the pattern table references it at module init, and
  * a const below its use would be in the temporal dead zone on first load.
  *
- * Kept as a predicate rather than a list of literal names because providers use
- * families (__Secure-1PSID / __Secure-3PSID, pplx_*) where the suffix varies.
+ * Derived from the provider registry rather than hand-listed, because a hand-maintained
+ * list silently drifts: __cf_bm was an auth cookie in the registry but absent here, so
+ * it was neither masked nor detected. Deriving makes that class of bug impossible.
  */
-const SENSITIVE_COOKIE_NAMES = /^(?:__Secure-|__Host-)?(?:next-auth\.session-token|session-?token|sessionKey|auth|cna|ssxmod_itna|x5sec|token|sid|hsid|ssid|psid|1psid|3psid|csrf|xsrf)$|^pplx/i;
+const PROVIDER_AUTH_COOKIE_NAMES = Array.from(
+    new Set(Object.values(PROVIDERS).flatMap((p) => p.auth.cookies))
+).map((n) => n.toLowerCase());
+
+const HARDCODED_SENSITIVE_NAMES = [
+    // Cloudflare bot clearance. Not an auth cookie for any one provider, but it is
+    // bearer-grade: replaying it is enough to impersonate the session.
+    '__cf_bm',
+    'cf_clearance',
+    'csrf',
+    'xsrf',
+    'auth',
+];
+
+const SENSITIVE_COOKIE_NAMES = new RegExp(
+    '^(?:__Secure-|__Host-)?(?:' +
+        [...PROVIDER_AUTH_COOKIE_NAMES, ...HARDCODED_SENSITIVE_NAMES]
+            .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+            .join('|') +
+        ')$|^pplx',
+    'i'
+);
 
 /** Values that look like opaque credentials even without a name we recognise. */
 const OPAQUE_SECRET = /^[A-Za-z0-9._~+/=-]{24,}$/;
@@ -42,19 +66,36 @@ const OPAQUE_SECRET = /^[A-Za-z0-9._~+/=-]{24,}$/;
  * leaving surrounding context readable.
  */
 const PATTERNS = [
-    // Authorization: Bearer <token>  /  authorization="Bearer x"
+    // Authorization: [<scheme>] <value>, listed BEFORE the bare-bearer rule.
+    //
+    // The scheme is a generic word, not a fixed list: an allowlist of schemes leaks every
+    // scheme not on it, and a previous version behaved exactly that way - "Basic" passed
+    // through untouched while "ApiKey" had its scheme destroyed and kept its credential,
+    // so the line looked redacted while leaking.
+    //
+    // Running first means the bare-bearer rule finds nothing left to do, so the scheme
+    // is preserved once and the value is masked once - no double marker, and "Bearer"
+    // survives for diagnosis.
+    {
+        name: 'authorization',
+        re: /(authorization"?\s*[:=]\s*"?)(?:([A-Za-z][A-Za-z0-9_-]*)\s+)?(\[\s*redacted\s*\]|[^\s"',}]{3,})/gi,
+        repl: (m, prefix, scheme, value) => {
+            // Match the redaction marker as a first-class alternative rather than
+            // excluding it with a lookahead. A lookahead does not survive backtracking:
+            // the engine retries without the scheme group, matches the scheme word as
+            // the value, and the line is rewritten on a second pass. Matching the
+            // marker explicitly makes redaction genuinely idempotent.
+            if (/^\[\s*redacted\s*\]$/i.test(value)) {
+                return `${prefix}${scheme ? `${scheme} ` : ''}${value}`;
+            }
+            return scheme ? `${prefix}${scheme} ${REDACTED}` : `${prefix}${REDACTED}`;
+        },
+    },
+    // A bare "Bearer <token>" with no header name, e.g. in pasted cURL output.
     {
         name: 'bearer',
         re: /\b(bearer)\s+([A-Za-z0-9._~+/=-]{8,})/gi,
         repl: (_m, scheme) => `${scheme} ${REDACTED}`,
-    },
-    // Authorization: <anything>  (Basic, custom schemes).
-    // Deliberately skips a value that is already redacted, and skips the scheme word
-    // itself, so this cannot mangle a line the bearer rule has already handled.
-    {
-        name: 'authorization',
-        re: /(authorization"?\s*[:=]\s*"?)(?!bearer\b|basic\b|redacted)(\S[^"',\s}]{5,})/gi,
-        repl: (_m, prefix) => `${prefix}${REDACTED}`,
     },
     // JSON Web Tokens
     {
@@ -219,23 +260,34 @@ function redactCookies(cookies, { fingerprint: fp = true } = {}) {
  */
 function containsSecret(text) {
     if (text === null || text === undefined) return false;
-    const s = String(text);
+    // Strip existing markers first. Otherwise a value that has already been redacted
+    // still matches the shape of a credential, and the oracle reports a leak in
+    // correctly-redacted output - which is how a leak check quietly stops being one.
+    const s = String(text).split(REDACTED).join('');
     for (const rule of PATTERNS) {
         const re = new RegExp(rule.re.source, rule.re.flags);
         let m;
         while ((m = re.exec(s)) !== null) {
             if (m[0].includes(REDACTED)) continue;
-            // For name-filtered rules the predicate applies to the captured NAME.
             if (rule.nameFilter) {
+                // For name-filtered rules the predicate applies to the captured NAME.
                 const name = m[1];
                 if (typeof name === 'string' && rule.nameFilter.test(name)) return true;
+            } else if (rule.name === 'authorization') {
+                // A scheme word on its own ("Basic", "Bearer") is not a credential. The
+                // redaction pattern is deliberately broad, so the detector must be
+                // narrower than it or it flags the scheme and reports a leak in
+                // correctly-redacted output - which is how a leak check quietly stops
+                // being one. A real credential carries entropy.
+                const value = m[3] || '';
+                if (!/^[A-Za-z]{1,12}$/.test(value)) return true;
             } else {
                 return true;
             }
             if (m.index === re.lastIndex) re.lastIndex += 1;
         }
     }
-    return OPAQUE_SECRET.test(s.replace(new RegExp(REDACTED, 'g'), '').trim());
+    return OPAQUE_SECRET.test(s.trim());
 }
 
 module.exports = {
