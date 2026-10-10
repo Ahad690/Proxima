@@ -2,7 +2,7 @@
 /**
  * Send an audio file to ChatGPT and get its answer — by having the REAL web app send it.
  *
- *   node chatgpt-audio.cjs --file clip.mp3 --message "Transcribe this." [--capture out.json]
+ *   node chatgpt-audio.cjs --file clip.mp3 --message "Transcribe this." [--capture out.har]
  *
  * WHY THE APP AND NOT THE ENGINE. Measured 2026-10-10, same mp3, same question,
  * gpt-6-thinking:
@@ -22,16 +22,17 @@
  * while something else is driving ChatGPT: there is one tab.
  *
  * Output: the reply on stdout; progress on stderr. Exit 0 = a reply was read back,
- * 2 = the UI or the app refused (message says which step), 1 = transport/argument error.
+ * 2 = the UI or the app refused (message says which step and what was seen),
+ * 1 = transport/argument error, 3 = --capture refused to write (output looked unsanitized).
  *
- * --capture writes the app's requests as a HAR, sanitized INSIDE the page before anything
- * leaves it — auth/cookie/token/sentinel/conduit headers redacted, signed URLs stripped,
- * JWTs and long opaque strings in bodies masked.
+ * Recording uses the same in-page recorder and sanitizer as capture.cjs
+ * (lib/page-capture.cjs) — one copy, so the two cannot drift apart.
  */
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const { resolvePortSync } = require('../../scripts/lib/proxima-port.cjs');
+const cap = require('./lib/page-capture.cjs');
 
 const MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac',
     ogg: 'audio/ogg', oga: 'audio/ogg', flac: 'audio/flac', webm: 'audio/webm', opus: 'audio/ogg' };
@@ -75,68 +76,18 @@ async function page(port, script, ms) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The in-page driver. Kept as one function so it can be read top to bottom.
+// The in-page driver. It assumes the shared recorder is already installed, and reads its
+// log to know when the app's own upload has started and finished.
 function driverScript(b64, name, mime, message) {
     return `(async function () {
   var B64 = ${JSON.stringify(b64)}, NAME = ${JSON.stringify(name)}, MIME = ${JSON.stringify(mime)};
   var MSG = ${JSON.stringify(message)};
-  var log = [];
+  var C = window.__proximaCapture;
+  if (!C) return JSON.stringify({ step: 'start', error: 'recorder not installed' });
+  var origFetch = C.origFetch;
   var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
-
-  // ---- sanitizer: runs before anything is returned ----
-  var SECRET_HDR = /authorization|cookie|token|sentinel|proof|conduit|device|session|signature|secret|key|observation/i;
-  function cleanUrl(u) {
-    try {
-      var x = new URL(u, location.origin);
-      if (x.origin !== location.origin) return x.origin + x.pathname + (x.search ? '?<signed params removed>' : '');
-      return x.pathname + x.search;
-    } catch (e) { return String(u).split('?')[0]; }
-  }
-  function cleanText(s, max) {
-    s = String(s == null ? '' : s);
-    s = s.replace(/eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}/g, '<jwt>');
-    // Signed URLs ride in response BODIES too: upload_url carries an Azure SAS whose sig=
-    // IS the credential. Scrubbing headers and request URLs missed it — measured, the
-    // first capture shipped one with sig= intact. Strip the query from any URL that is
-    // not chatgpt.com, then mask SAS parameters anywhere they survive.
-    // Backslash excluded so a URL inside JSON-escaped text cannot swallow its own \\".
-    s = s.replace(/(https?:\\/\\/[^"'\\s?\\\\]+)\\?[^"'\\s<\\\\]*/g, function (m, base) {
-      return /^https?:\\/\\/([^\\/]*\\.)?chatgpt\\.com/.test(base) ? m : base + '?<signed params removed>';
-    });
-    s = s.replace(/\\b(sig|se|sp|sv|sr|scid|skoid|sktid|skt|ske|sks|skv|st|spr|sip)=[^&"'\\s<\\\\]*/g, '$1=<removed>');
-    s = s.replace(/("[^"]*(token|secret|signature|access_key|security|password|conduit)[^"]*"\\s*:\\s*")[^"]*"/gi, '$1<redacted>"');
-    s = s.replace(/[A-Za-z0-9+\\/=_-]{60,}/g, '<long-opaque>');
-    return s.length > max ? s.slice(0, max) + '…[' + s.length + ' chars]' : s;
-  }
-  function cleanHeaders(h) {
-    var out = {};
-    if (!h) return out;
-    var add = function (k, v) { out[k] = SECRET_HDR.test(k) ? '<redacted>' : cleanText(v, 120); };
-    if (typeof h.forEach === 'function' && !(h instanceof Array)) h.forEach(function (v, k) { add(k, v); });
-    else if (h instanceof Array) h.forEach(function (p) { add(p[0], p[1]); });
-    else Object.keys(h).forEach(function (k) { add(k, h[k]); });
-    return out;
-  }
-  var interesting = function (u) { return /backend-api|oaiusercontent/.test(String(u)); };
-
-  // ---- recorder: also how we know the app's own upload has finished ----
-  var origFetch = window.fetch;
-  window.fetch = function (input, init) {
-    var url = typeof input === 'string' ? input : (input && input.url) || String(input);
-    var entry = null;
-    if (interesting(url)) {
-      var body = init && init.body;
-      entry = { t: Date.now(), method: (init && init.method) || (input && input.method) || 'GET',
-                url: cleanUrl(url), reqHeaders: cleanHeaders(init && init.headers),
-                reqBody: typeof body === 'string' ? cleanText(body, 4000) : body ? '<binary>' : null };
-      log.push(entry);
-    }
-    var p = origFetch.apply(this, arguments);
-    if (entry) p.then(function (res) {
-      entry.status = res.status; entry.resType = res.headers.get('content-type');
-      try { res.clone().text().then(function (t) { entry.resBody = cleanText(t, 6000); }).catch(function () {}); } catch (e) {}
-    }).catch(function (e) { entry.error = String(e && e.message || e); });
-    return p;
+  var seen = function (re, status) {
+    return C.log.some(function (e) { return re.test(e.url) && (status === undefined || e.status === status); });
   };
 
   var out = { step: 'start' };
@@ -147,6 +98,7 @@ function driverScript(b64, name, mime, message) {
 
     // The app has several hidden file inputs; the image ones declare accept="image/*".
     // The general one declares no accept at all, and is the one "Add files" uses.
+    //
     // Seconds after a reload the composer is VISIBLE before the app has wired up its file
     // input, and a change event dispatched then is silently ignored: measured, a run
     // straight after a reload sat for 90s with no upload ever starting. So confirm the
@@ -164,7 +116,7 @@ function driverScript(b64, name, mime, message) {
       var ta = Date.now();
       while (Date.now() - ta < 15000) {
         await sleep(500);
-        if (log.some(function (e) { return e.method === 'POST' && /\\/backend-api\\/files$/.test(e.url); })) { started = true; break; }
+        if (C.log.some(function (e) { return e.method === 'POST' && /\\/backend-api\\/files$/.test(e.url); })) { started = true; break; }
       }
       out.attachAttempts = attempt;
     }
@@ -174,7 +126,7 @@ function driverScript(b64, name, mime, message) {
     var t0 = Date.now(), uploaded = false;
     while (Date.now() - t0 < 90000) {
       await sleep(1000);
-      if (log.some(function (e) { return /process_upload_stream/.test(e.url) && e.status === 200; })) { uploaded = true; break; }
+      if (seen(/process_upload_stream/, 200)) { uploaded = true; break; }
       if (/isn.t supported|not supported|unsupported file|can.t upload|cannot upload|too large/i.test(document.body.innerText)) {
         throw new Error('the app rejected the file: ' + document.body.innerText.slice(0, 200));
       }
@@ -211,6 +163,7 @@ function driverScript(b64, name, mime, message) {
 
     // Read the answer back from the API rather than the DOM. Poll: the assistant message
     // is persisted only after the stream finishes, and an early read finds nothing.
+    // origFetch, so the read-back is not itself recorded.
     var sess = await origFetch('/api/auth/session', { credentials: 'include' }).then(function (r) { return r.json(); });
     var h = { 'Authorization': 'Bearer ' + sess.accessToken };
     if (sess.account && sess.account.id) h['ChatGPT-Account-Id'] = sess.account.id;
@@ -241,19 +194,30 @@ function driverScript(b64, name, mime, message) {
     out.step = 'done';
   } catch (e) {
     out.error = String(e && e.message || e);
-  } finally {
-    window.fetch = origFetch;
   }
-  await sleep(1000);
-  out.log = log;
   return JSON.stringify(out);
 })()`;
+}
+
+/** Same gate as capture.cjs: second-pass scrub, parse guard, scan, then write or refuse. */
+function writeCapture(entries, origin, out) {
+    let text = cap.scrub(JSON.stringify(cap.toHar(entries, { origin, startedAt: Date.now() }), null, 2), origin);
+    JSON.parse(text);
+    const hits = cap.scan(text);
+    if (hits.length) {
+        console.error('[chatgpt-audio] REFUSED to write the capture — it still looks unsanitized:');
+        hits.forEach((x) => console.error('    ' + x.check + ' x' + x.count));
+        return false;
+    }
+    fs.writeFileSync(out, text);
+    console.error('[chatgpt-audio] sanitized capture (' + entries.length + ' requests, scan clean): ' + out);
+    return true;
 }
 
 (async () => {
     const args = parseArgs(process.argv);
     if (args.help || !args.file || !args.message) {
-        console.error('usage: node chatgpt-audio.cjs --file <audio> --message "<question>" [--capture out.json]');
+        console.error('usage: node chatgpt-audio.cjs --file <audio> --message "<question>" [--capture out.har]');
         process.exit(args.help ? 0 : 1);
     }
     if (!fs.existsSync(args.file)) { console.error('file not found: ' + args.file); process.exit(1); }
@@ -278,34 +242,32 @@ function driverScript(b64, name, mime, message) {
     // Visible is not wired up. Give the app a moment to finish booting before driving it.
     await sleep(4000);
 
+    await page(port, cap.pageScript('capInstall(location.origin, 8000)'), 15000);
+
     console.error('[chatgpt-audio] attaching ' + path.basename(args.file) + ' (' + mime + ') and sending');
     const t0 = Date.now();
-    const raw = await page(port, driverScript(b64, path.basename(args.file), mime, args.message), args.timeoutMs);
-    const o = JSON.parse(raw);
+    let o;
+    try {
+        o = JSON.parse(await page(port, driverScript(b64, path.basename(args.file), mime, args.message), args.timeoutMs));
+    } finally {
+        // Collect whatever the recorder saw, then always take it back out of the page.
+        var drained = await page(port, cap.pageDrainScript(true, 5000), 30000).then((v) => JSON.parse(v)).catch(() => null);
+        await page(port, cap.pageScript('capUninstall()'), 15000).catch(() => {});
+    }
+    const entries = (drained && drained.entries) || [];
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
 
-    if (args.capture) {
-        const har = { log: { version: '1.2', creator: { name: 'proxima chatgpt-audio', version: '1' },
-            comment: 'Sanitized in-page: auth/cookie/token headers redacted, signed URLs stripped, JWTs masked.',
-            entries: (o.log || []).map((e) => ({
-                startedDateTime: new Date(e.t).toISOString(),
-                request: { method: e.method, url: e.url,
-                    headers: Object.keys(e.reqHeaders || {}).map((k) => ({ name: k, value: e.reqHeaders[k] })),
-                    postData: e.reqBody ? { mimeType: '', text: e.reqBody } : undefined },
-                response: { status: e.status || 0, content: { mimeType: e.resType || '', text: e.resBody || '' } }
-            })) } };
-        fs.writeFileSync(args.capture, JSON.stringify(har, null, 2));
-        console.error('[chatgpt-audio] sanitized capture: ' + args.capture);
-    }
+    let captureOk = true;
+    if (args.capture && entries.length) captureOk = writeCapture(entries, drained.origin, args.capture);
 
     if (o.error) {
         console.error('[chatgpt-audio] FAILED at step "' + o.step + '": ' + o.error);
         // What the app did get as far as, so a failure is diagnosable without a rerun.
-        (o.log || []).forEach((e) => console.error('    seen: ' + e.method + ' ' + (e.status || '...') + ' ' + e.url.slice(0, 90)));
+        entries.forEach((e) => console.error('    seen: ' + e.method + ' ' + (e.status || '...') + ' ' + String(e.url).slice(0, 90)));
         process.exit(2);
     }
     console.error('[chatgpt-audio] ' + secs + 's | model ' + o.model + ' | thread ' + o.conversationId +
         ' | audio pointer stored: ' + o.audioPointer);
     process.stdout.write(o.reply + '\n\n_conversation_id: ' + o.conversationId + '_\n');
-    process.exit(0);
+    process.exit(captureOk ? 0 : 3);
 })().catch((e) => { console.error('[chatgpt-audio] ' + e.message); process.exit(1); });

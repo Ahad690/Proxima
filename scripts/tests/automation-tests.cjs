@@ -538,16 +538,18 @@ function testChatGPTUpload() {
     console.log('✅ ChatGPT Upload Shapes tests passed.');
 }
 
-// chatgpt-audio.cjs labels its --capture output sanitized. Its first version leaked an
-// Azure SAS sig= from a response body; the fix then corrupted JSON-escaped text. Own file.
-function testChatGPTAudioSanitizer() {
-    console.log('Testing ChatGPT Audio Capture Sanitizer...');
+// capture.cjs and chatgpt-audio.cjs both label their output sanitized, through ONE shared
+// sanitizer (tools/orchestrate/lib/page-capture.cjs). Its ChatGPT-only predecessor leaked
+// an Azure SAS sig= from a response body, and its first fix corrupted JSON-escaped text;
+// this pins those plus the Qwen/Gemini/Claude credential and PII shapes. Own file.
+function testPageCapture() {
+    console.log('Testing Page Capture Sanitizer...');
     const r = require('child_process').spawnSync(process.execPath,
-        [path.join(__dirname, 'chatgpt-audio-sanitizer-test.cjs')], { encoding: 'utf8' });
+        [path.join(__dirname, 'page-capture-test.cjs')], { encoding: 'utf8' });
     if (r.status !== 0) {
-        throw new Error('chatgpt-audio-sanitizer-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
+        throw new Error('page-capture-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
     }
-    console.log('✅ ChatGPT Audio Capture Sanitizer tests passed.');
+    console.log('✅ Page Capture Sanitizer tests passed.');
 }
 
 try {
@@ -564,7 +566,7 @@ try {
     testChatGPTImageTurn();
     testClaudeModelDefault();
     testChatGPTUpload();
-    testChatGPTAudioSanitizer();
+    testPageCapture();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');
