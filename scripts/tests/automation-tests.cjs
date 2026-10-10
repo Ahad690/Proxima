@@ -538,6 +538,18 @@ function testChatGPTUpload() {
     console.log('✅ ChatGPT Upload Shapes tests passed.');
 }
 
+// chatgpt-audio.cjs labels its --capture output sanitized. Its first version leaked an
+// Azure SAS sig= from a response body; the fix then corrupted JSON-escaped text. Own file.
+function testChatGPTAudioSanitizer() {
+    console.log('Testing ChatGPT Audio Capture Sanitizer...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'chatgpt-audio-sanitizer-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('chatgpt-audio-sanitizer-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
+    }
+    console.log('✅ ChatGPT Audio Capture Sanitizer tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
@@ -552,6 +564,7 @@ try {
     testChatGPTImageTurn();
     testClaudeModelDefault();
     testChatGPTUpload();
+    testChatGPTAudioSanitizer();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');
