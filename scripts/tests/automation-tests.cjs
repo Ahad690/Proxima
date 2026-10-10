@@ -538,6 +538,20 @@ function testChatGPTUpload() {
     console.log('✅ ChatGPT Upload Shapes tests passed.');
 }
 
+// capture.cjs and chatgpt-audio.cjs both label their output sanitized, through ONE shared
+// sanitizer (tools/orchestrate/lib/page-capture.cjs). Its ChatGPT-only predecessor leaked
+// an Azure SAS sig= from a response body, and its first fix corrupted JSON-escaped text;
+// this pins those plus the Qwen/Gemini/Claude credential and PII shapes. Own file.
+function testPageCapture() {
+    console.log('Testing Page Capture Sanitizer...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'page-capture-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('page-capture-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
+    }
+    console.log('✅ Page Capture Sanitizer tests passed.');
+}
+
 try {
     testReviewParser();
     testSafetyValidator();
@@ -552,6 +566,7 @@ try {
     testChatGPTImageTurn();
     testClaudeModelDefault();
     testChatGPTUpload();
+    testPageCapture();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
     console.error('\n❌ Test failed:');

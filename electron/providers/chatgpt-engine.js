@@ -97,42 +97,33 @@
     }
 
     // ─── Default model and effort ───────────────────
-    // GPT-5.6 Sol on the thinking lane, at the picker's "High" preset.
+    // GPT-6 on the thinking lane, at 'max'.
     //
-    // Read off /backend-api/models -> versions[id=5.6].intelligence_presets, which is
-    // where the app encodes what each picker entry actually sends:
-    //   Instant  gpt-5-6-instant
-    //   Medium   gpt-5-6-thinking   thinking_effort 'standard'
-    //   High     gpt-5-6-thinking   thinking_effort 'extended'
-    // So 'extended' IS high — it is not a third level above it.
+    // Read off /backend-api/models on 2026-10-10. The picker's latest version is GPT-6,
+    // and versions[latest].intelligence_presets records what each entry sends:
+    //   Instant  gpt-6-instant
+    //   Medium   gpt-6-thinking   thinking_effort 'standard'
+    //   High     gpt-6-thinking   thinking_effort 'extended'
+    // 'max' is not a picker preset, but gpt-6-thinking accepts it without error and the
+    // reply records it. Whether it reasons harder than 'extended' is NOT established:
+    // on an easy question all three levels finished in the same ~1s. It is the default
+    // because max thinking was asked for, not because it measured better.
     //
-    // NOT gpt-6-sol-wm. That slug is listed by /backend-api/models and looks like the
-    // obvious pick for "GPT-6 Sol", but it is in no versions[].slugs and this account
-    // cannot use it: asking for it returns a reply whose model_slug is gpt-5-6 — the
-    // INSTANT lane. Measured, all four downgrading identically:
-    //   gpt-6-sol-wm   -> gpt-5-6     gpt-6-luna-wm  -> gpt-5-6
-    //   gpt-6-astra-wm -> gpt-5-6     gpt-5.6-sol-wm -> gpt-5-6
-    // Defaulting to it would have silently removed thinking altogether. The 5.6 family
-    // is itself branded "Sol" (gpt-5-6* all carry the title "GPT-5.6 Sol"), which is
-    // where the name confusion comes from.
+    // NOT gpt-6-astra-wm or gpt-6.1-sol-wm, though they rank higher (Astra leads the
+    // published GPT-6 benchmarks). This account cannot use them: asking for either
+    // returns a reply whose model_slug is rewritten to gpt-6. That is not a Proxima gap.
+    // The user's own thread, sent by the real web app through the full
+    // /f/conversation + prepare/conduit_token flow, asked for gpt-6-astra-wm at max and
+    // was served gpt-5-6 (2026-09-25, before GPT-6 shipped). Astra is reported as
+    // Pro-tier, and this account's plan is 'personal'. If the plan changes, re-probe:
+    // the rewrite is the signal, and it would stop happening.
     //
-    // Do not verify a slug by reading message.metadata.model_slug back and comparing:
-    // a deliberately bogus 'gpt-6-nonexistent-zz' came back echoed as itself, so that
-    // field confirms nothing on its own. Only the server REWRITING it is evidence.
-    // gpt-6-astra-wm is NOT the default, though it is the one we want. Measured on a
-    // fresh conversation against the live engine: asking for it returns a reply whose
-    // model_slug is gpt-5-6, the INSTANT lane — a downgrade, not an upgrade — while the
-    // effort field IS honoured (the reply carries max). Same for luna/astra/sol -wm.
-    //
-    // The missing piece is the rest of the captured flow, not the payload: the app posts
-    // to /backend-api/f/conversation after a /f/conversation/prepare call whose
-    // conduit_token rides back as x-conduit-token. Implement that and this can move to
-    // 'gpt-6-astra-wm' with DEFAULT_EFFORT 'max'.
-    //
-    // Until then the thinking lane is the best that actually serves: 'extended' is the
-    // 5.6 picker's High preset, and High is its maximum.
-    var DEFAULT_MODEL = 'gpt-5-6-thinking';
-    var DEFAULT_EFFORT = 'extended';
+    // Reading model_slug back proves nothing on its own: an unknown slug such as
+    // 'gpt-6-nonexistent-zz' is echoed as itself, and so is thinking_effort. Only a
+    // REWRITE is evidence, and what it is evidence of is a downgrade. A listed,
+    // picker-offered slug that comes back unchanged is genuinely served.
+    var DEFAULT_MODEL = 'gpt-6-thinking';
+    var DEFAULT_EFFORT = 'max';
 
     // Efforts seen on the wire. 'standard'/'extended' are the 5.6 picker's Medium/High;
     // 'max' is what the app sends for Astra. Not a closed list — it is what has been
