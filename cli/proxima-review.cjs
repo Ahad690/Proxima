@@ -46,7 +46,11 @@ const REVIEW_MODEL = process.env.PROXIMA_REVIEW_MODEL || automationConfig.review
 const REVIEW_THINKING = automationConfig.reviewThinking !== false;
 const REVIEW_PROVIDER = process.env.PROXIMA_REVIEW_PROVIDER || resolveProvider(REVIEW_MODEL);
 const REVIEW_DIR = process.env.PROXIMA_REVIEW_DIR || automationConfig.reviewDir || path.join(findGitRoot(), 'perplexity-reviews');
-const REVIEW_THINKING_EFFORT = process.env.PROXIMA_REVIEW_THINKING_EFFORT || resolveThinkingEffort(REVIEW_MODEL);
+// reviewThinkingEffort in the config wins over the name-derived guess, which can only
+// ever produce 'extended' (any slug containing "thinking") — so 'max' was unreachable
+// from configuration before this key existed.
+const REVIEW_THINKING_EFFORT = process.env.PROXIMA_REVIEW_THINKING_EFFORT ||
+    automationConfig.reviewThinkingEffort || resolveThinkingEffort(REVIEW_MODEL);
 
 function resolveProvider(model) {
     const m = model.toLowerCase();
