@@ -23,11 +23,12 @@ function testConfigFile() {
     const cfg = loadConfig({ repoRoot: REPO });
 
     assert.strictEqual(cfg.effort, 'high', 'default effort should be high');
-    assert.ok(Array.isArray(cfg.models) && cfg.models.length >= 2, 'chain needs at least two models');
-    assert.strictEqual(cfg.models[0], 'claude-mythos-5-2', 'primary should be Mythos 5.2');
-    assert.strictEqual(cfg.models[1], 'claude-opus-5-5', 'secondary should be Opus 5.5');
+    assert.ok(Array.isArray(cfg.models) && cfg.models.length >= 1, 'chain needs at least one model');
+    assert.strictEqual(cfg.models[0], 'claude-opus-5-5', 'default should be Opus 5.5');
+    assert.strictEqual(cfg.models.indexOf('claude-mythos-5-2'), -1,
+        'Mythos should be opt-in, not the shipped default');
     assert.strictEqual(cfg.autoLatest, true, 'autoLatest should be on by default');
-    assert.deepStrictEqual(cfg.families, ['mythos', 'opus'], 'family order should be mythos then opus');
+    assert.deepStrictEqual(cfg.families, ['opus'], 'only the Opus family is on by default');
 }
 
 function testMergeChain() {
