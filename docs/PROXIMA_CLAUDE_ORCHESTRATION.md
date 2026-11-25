@@ -426,13 +426,14 @@ All provider chains live in `models.json` at the repository root. Claude's secti
   "claude": {
     "effort": "high",
     "autoLatest": true,
-    "models": ["claude-opus-5-5"]
+    "models": ["claude-mythos-5-2", "claude-opus-5-5"]
   }
 }
 ```
 
-Within a family, the highest `major.minor` is tried first. The first family in `models`
-is the default; add `claude-mythos-5-2` before `claude-opus-5-5` only if you want it.
+Within a family, the highest `major.minor` is tried first. In Proxima's **Settings**
+page, choose the Claude primary and fallback; the default is Mythos 5.2 with Opus 5.5
+as the fallback. Selecting **Auto** makes the first family in `models.json` the default.
 The engine advances to the next entry only when the API returns
 `403 permission_error/model_not_available`; a
 generic 403 (auth or session) is surfaced immediately, and an explicit `--model` disables

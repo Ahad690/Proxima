@@ -139,7 +139,7 @@ Proxima is a local AI gateway that connects multiple AI providers to your develo
 </tr>
 <tr>
 <td><strong>🎚️</strong></td>
-<td><strong>Configurable provider models</strong><br><code>models.json</code> sets ordered model chains per provider. Claude defaults to Opus 5.5 at high effort; add Mythos 5.2 before it to opt in. Each family is tried newest-first and the last model that answered is kept as the fallback. Claude can also resolve the newest active model from <code>GET /v1/models</code>.</td>
+<td><strong>Configurable provider models</strong><br>Pick the Claude primary and fallback in Settings — the default is Mythos 5.2 with Opus 5.5 as fallback. <code>models.json</code> holds the ordered chains for every provider; each family is tried newest-first and the last model that answered is kept as the fallback. Claude can also resolve the newest active model from <code>GET /v1/models</code>.</td>
 </tr>
 <tr>
 <td><strong>🎛️</strong></td>
@@ -365,16 +365,17 @@ All provider chains live in `models.json`:
 
 ```json
 {
-  "claude": { "effort": "high", "models": ["claude-opus-5-5"] },
+  "claude": { "effort": "high", "models": ["claude-mythos-5-2", "claude-opus-5-5"] },
   "chatgpt": { "effort": "max", "models": ["gpt-6-thinking", "gpt-5-6-thinking"] },
   "qwen": { "models": ["qwen3.8-max", "qwen3.7-max"] }
 }
 ```
 
 Within a family, the highest `major.minor` is tried first, so adding
-`gpt-6.2-thinking` to the list upgrades ChatGPT without a code change. The first family
-in a provider's list is the default; to use Mythos 5.2, put `claude-mythos-5-2` before
-Opus. The last model that answered is remembered as the fallback. Claude advances on
+`gpt-6.2-thinking` to the list upgrades ChatGPT without a code change. For Claude, the
+Settings page chooses the primary and fallback directly; with **Auto**, the first family
+in `models.json` is the default. The last model that answered is remembered as the
+fallback. Claude advances on
 `403 permission_error/model_not_available`; ChatGPT and Qwen advance on a
 model-unavailable error from their engines. An explicit `model` / `--model` disables the
 chain. Gemini and Perplexity are unchanged: their engines do not take a versioned model

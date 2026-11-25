@@ -23,12 +23,11 @@ function testConfigFile() {
     const cfg = loadConfig({ repoRoot: REPO });
 
     assert.strictEqual(cfg.effort, 'high', 'default effort should be high');
-    assert.ok(Array.isArray(cfg.models) && cfg.models.length >= 1, 'chain needs at least one model');
-    assert.strictEqual(cfg.models[0], 'claude-opus-5-5', 'default should be Opus 5.5');
-    assert.strictEqual(cfg.models.indexOf('claude-mythos-5-2'), -1,
-        'Mythos should be opt-in, not the shipped default');
+    assert.ok(Array.isArray(cfg.models) && cfg.models.length >= 2, 'chain needs primary and fallback');
+    assert.strictEqual(cfg.models[0], 'claude-mythos-5-2', 'default primary should be Mythos 5.2');
+    assert.strictEqual(cfg.models[1], 'claude-opus-5-5', 'default fallback should be Opus 5.5');
     assert.strictEqual(cfg.autoLatest, true, 'autoLatest should be on by default');
-    assert.deepStrictEqual(cfg.families, ['opus'], 'only the Opus family is on by default');
+    assert.deepStrictEqual(cfg.families, ['mythos', 'opus'], 'family order should be mythos then opus');
 }
 
 function testMergeChain() {
@@ -319,7 +318,8 @@ async function testEngineConversationRecovery() {
         'a pinned 404 must not retry');
 }
 
-function testWiring() {    console.log('Testing main-process and MCP wiring...');
+function testWiring() {
+    console.log('Testing main-process, settings UI and MCP wiring...');
 
     const main = fs.readFileSync(path.join(REPO, 'electron/main-v2.cjs'), 'utf8');
     assert.ok(main.indexOf("require('./claude-models.cjs')") !== -1,
@@ -344,6 +344,24 @@ function testWiring() {    console.log('Testing main-process and MCP wiring...')
         'main-v2 must centralise provider model option injection');
     assert.ok((main.match(/applyProviderModelOptions\(/g) || []).length >= 3,
         'both the normal send and sendMessageWithFile must use the helper');
+    assert.ok(main.indexOf('function buildClaudeChain') !== -1,
+        'main-v2 must build the chain from the settings selection');
+    assert.ok(main.indexOf('loadSettings().claudeModels') !== -1,
+        'main-v2 must read the settings-page selection');
+    assert.ok(main.indexOf("primary: 'claude-mythos-5-2'") !== -1,
+        'default settings must select Mythos 5.2');
+    assert.ok(main.indexOf("fallback: 'claude-opus-5-5'") !== -1,
+        'default settings must select Opus 5.5 as fallback');
+
+    const ui = fs.readFileSync(path.join(REPO, 'electron/index-v2.html'), 'utf8');
+    assert.ok(ui.indexOf('id="claude-primary"') !== -1,
+        'Settings page must expose the primary model select');
+    assert.ok(ui.indexOf('id="claude-fallback"') !== -1,
+        'Settings page must expose the fallback model select');
+    assert.ok(ui.indexOf('function saveClaudeModels') !== -1,
+        'Settings page must persist the selection');
+    assert.ok(ui.indexOf('function populateClaudeModels') !== -1,
+        'Settings page must load the selection');
 
     const mcp = fs.readFileSync(path.join(REPO, 'src/mcp-server-v3.js'), 'utf8');
     assert.ok(mcp.indexOf('models.json') !== -1,

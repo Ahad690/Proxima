@@ -103,6 +103,27 @@ setInterval(() => {
     modelRegistry.reload();
 }, 6 * 60 * 60 * 1000).unref();
 
+// Build the Claude chain from the Settings selections. "auto" follows models.json and
+// the Anthropic resolver; "none" means no fallback. Explicit ids win over auto.
+function buildClaudeChain(prefs) {
+    const primary = prefs && prefs.primary && prefs.primary !== 'auto' ? prefs.primary : null;
+    const fallbackMode = prefs && prefs.fallback ? prefs.fallback : 'none';
+    const fallback = fallbackMode !== 'none' && fallbackMode !== 'auto' ? fallbackMode : null;
+    const auto = claudeModels.getChain();
+    const chain = [];
+    const add = (id) => { if (id && chain.indexOf(id) === -1) chain.push(id); };
+
+    if (primary) add(primary);
+    if (!primary) {
+        for (const id of auto) add(id);
+    }
+    if (fallback) add(fallback);
+    if (primary && fallbackMode === 'auto') {
+        for (const id of auto) add(id);
+    }
+    return chain;
+}
+
 // Shared by sendMessage and the older sendMessageWithFile route. An explicit caller
 // model wins; otherwise the provider's ordered chain and effort apply.
 function applyProviderModelOptions(provider, options, data) {
@@ -112,7 +133,8 @@ function applyProviderModelOptions(provider, options, data) {
         if (data && data.model) {
             options.model = data.model;
         } else {
-            const chain = modelRegistry.mergeChain('claude', claudeModels.getChain());
+            const prefs = loadSettings().claudeModels;
+            const chain = modelRegistry.mergeChain('claude', buildClaudeChain(prefs));
             if (chain.length) options.modelChain = chain;
         }
         if (!options.effort) {
@@ -181,6 +203,12 @@ const defaultSettings = {
         claude: { enabled: false, loggedIn: false },
         gemini: { enabled: true, loggedIn: false },
         qwen: { enabled: false, loggedIn: false }
+    },
+    // Settings-page selection for the Claude chain. "auto" follows models.json and
+    // the Anthropic resolver; "none" disables the fallback. An explicit id wins.
+    claudeModels: {
+        primary: 'claude-mythos-5-2',
+        fallback: 'claude-opus-5-5'
     },
     ipcPort: 19222, // Port for MCP server IPC communication
     theme: 'dark',

@@ -3,6 +3,7 @@
     "effort": "high",
     "autoLatest": true,
     "models": [
+      "claude-mythos-5-2",
       "claude-opus-5-5"
     ]
   },

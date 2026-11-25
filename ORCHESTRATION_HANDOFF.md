@@ -180,9 +180,10 @@ Three things that decide whether the review is trustworthy, all learned the hard
   Per-request `effort` writes through to the conversation; `thinking_mode` does not.
 - Wire model ids: `claude-mythos-5-2`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`,
   `claude-fable-5`, `claude-opus-4-8` and `claude-haiku-4-5-20251001` — that last one breaks
-  the pattern, so **never guess an id from a picker label**. The default chain is in
-  `models.json` (Opus 5.5 by default; add Mythos 5.2 before it to opt in) at `high`
-  effort; the engine falls through only on `model_not_available`.
+  the pattern, so **never guess an id from a picker label**. The default chain is
+  selected on the Settings page (Mythos 5.2 with Opus 5.5 as fallback); `models.json`
+  holds the same pair at `high` effort. The engine falls through only on
+  `model_not_available`.
 - Uploads go to `wiggle/upload-file` (multipart, field name exactly `file`). The response's
   `file_kind` is decided by **server-side content sniffing** and picks the slot: images and
   PDFs → `files: [uuid]`, text → `attachments: [{extracted_content}]`.
