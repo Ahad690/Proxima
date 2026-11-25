@@ -25,6 +25,8 @@
         "cli": "node cli/proxima-cli.cjs",
         "review": "node cli/proxima-review.cjs",
         "review:local": "node cli/proxima-review.cjs",
+        "claude:models": "node scripts/claude-models.cjs",
+        "models": "node scripts/models.cjs",
         "repair:local": "node scripts/proxima-repair.cjs",
         "loop:local": "node scripts/proxima-loop.cjs",
         "loop:local:push": "node scripts/proxima-loop.cjs --push",
@@ -48,6 +50,7 @@
             "cli/**/*",
             "sdk/**/*",
             "assets/**/*",
+            "models.json",
             "node_modules/**/*",
             "package.json"
         ],

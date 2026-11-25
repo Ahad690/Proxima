@@ -276,7 +276,10 @@
     }
 
     // ─── Defaults, model and effort ─────────────────
-    // Opus 5.5 at high effort. Both are PER-REQUEST: verified by sending
+    // The real default is the ordered chain in models.json, passed in as
+    // options.modelChain. DEFAULT_MODEL below is only the last resort for a caller
+    // that passes neither a model nor a chain. Both model and effort are PER-REQUEST:
+    // verified by sending
     // model:'claude-sonnet-5' into a conversation whose own stored model was
     // claude-opus-5 — message_start echoed claude-sonnet-5 and the conversation's
     // stored model did not change. So this pins what Proxima sends without fighting
@@ -285,6 +288,7 @@
     // Pass model:null / effort:null to fall back to the account+conversation default.
     // Wire-confirmed ids (picker switched, message sent, model read back off
     // message_start — not derived from labels):
+    //   Mythos 5.2 claude-mythos-5-2
     //   Opus 5.5   claude-opus-5-5
     //   Opus 5     claude-opus-5
     //   Sonnet 5   claude-sonnet-5
@@ -460,6 +464,153 @@
     function lastMeta() { return _lastMeta; }
 
     // ─── Send Message ───────────────────────────────
+    // A 403 is overloaded: it means "this model is not in your plan" AND "your
+    // session is bad". Only the first should advance the chain. The body is the
+    // only discriminator the API gives us.
+    function _isModelUnavailable(status, body) {
+        if (status !== 403 && status !== 400) return false;
+        var s = String(body || '').toLowerCase();
+        if (s.indexOf('model_not_available') !== -1) return true;
+        if (s.indexOf('model') === -1) return false;
+        return s.indexOf('not available') !== -1 ||
+            s.indexOf('not found') !== -1 ||
+            s.indexOf('invalid model') !== -1 ||
+            s.indexOf('unsupported model') !== -1 ||
+            s.indexOf('model is not supported') !== -1;
+    }
+
+    function _modelChain(options) {
+        var chain = [];
+        // An explicit model is a caller decision. Do not silently substitute it.
+        if (options.model) {
+            chain = [options.model];
+        } else if (Array.isArray(options.modelChain)) {
+            for (var i = 0; i < options.modelChain.length; i++) {
+                var m = options.modelChain[i];
+                if (m && typeof m === 'string' && chain.indexOf(m) === -1) chain.push(m);
+            }
+        }
+        if (!chain.length) chain = [DEFAULT_MODEL];
+        return chain;
+    }
+
+    // One model's turn: fetch, handle conversation expiry, parse. An unavailable
+    // model throws an error flagged modelUnavailable so the caller can advance the
+    // chain; every other failure is terminal for the turn.
+    async function _sendAttempt(orgId, message, options) {
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function() { controller.abort(); }, TIMEOUT);
+
+        var res;
+        try {
+            res = await fetch('/api/organizations/' + orgId + '/chat_conversations/' + _convId + '/completion', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                },
+                body: _completionBody(message, options),
+                signal: controller.signal
+            });
+        } catch (e) {
+            clearTimeout(timeoutId);
+            throw e;
+        }
+
+        if (!res.ok) {
+            clearTimeout(timeoutId);
+            var errBody = await res.text().catch(function() { return ''; });
+
+            // Conversation expired or deleted — create new and retry the SAME model.
+            if (res.status === 404 || res.status === 410) {
+                // Recreating is right for "any conversation" and WRONG for "this
+                // conversation": a caller resuming a supervisor thread would get a
+                // blank one and never be told the history was lost.
+                if (_pinned) {
+                    throw new Error('Claude: pinned conversation ' + _convId +
+                        ' is gone (' + res.status + '). Not creating a replacement — ' +
+                        'the caller asked for this specific thread.');
+                }
+                console.log('[Proxima Claude] Conversation expired, creating new one...');
+                _convId = await _createConversation(orgId, message);
+
+                var retryController = new AbortController();
+                var retryTimeoutId = setTimeout(function() { retryController.abort(); }, TIMEOUT);
+
+                var retryRes;
+                try {
+                    retryRes = await fetch('/api/organizations/' + orgId + '/chat_conversations/' + _convId + '/completion', {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'text/event-stream'
+                        },
+                        body: _completionBody(message, options),
+                        signal: retryController.signal
+                    });
+                } catch (e) {
+                    clearTimeout(retryTimeoutId);
+                    throw e;
+                }
+                res = retryRes;
+
+                if (!res.ok) {
+                    clearTimeout(retryTimeoutId);
+                    var retryBody = await res.text().catch(function() { return ''; });
+                    if (_isModelUnavailable(res.status, retryBody)) {
+                        var retryErr = new Error('Claude: model ' + options.model +
+                            ' is not available (' + res.status + ')');
+                        retryErr.modelUnavailable = true;
+                        throw retryErr;
+                    }
+                    throw new Error('Claude completion failed on retry (' + res.status + '): ' +
+                        retryBody.substring(0, 200));
+                }
+
+                var retryResult;
+                try {
+                    retryResult = await _parseStream(res);
+                } finally {
+                    clearTimeout(retryTimeoutId);
+                }
+                _lastMeta = { artifacts: retryResult.artifacts,
+                    model: retryResult.meta.model || options.model,
+                    stopReason: retryResult.meta.stopReason, limit: retryResult.meta.limit,
+                    format: retryResult.meta.format, conversationId: _convId,
+                    toolCalls: retryResult.meta.toolCalls || [] };
+                return retryResult.text;
+            }
+
+            if (_isModelUnavailable(res.status, errBody)) {
+                var modelErr = new Error('Claude: model ' + options.model +
+                    ' is not available (' + res.status + ')');
+                modelErr.modelUnavailable = true;
+                throw modelErr;
+            }
+
+            if (res.status === 429) throw new Error('Claude rate limited');
+            throw new Error('Claude completion failed (' + res.status + '): ' + errBody.substring(0, 200));
+        }
+
+        var r;
+        try {
+            r = await _parseStream(res);
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        _lastMeta = { artifacts: r.artifacts, model: r.meta.model || options.model,
+            stopReason: r.meta.stopReason, limit: r.meta.limit,
+            format: r.meta.format, conversationId: _convId,
+            toolCalls: r.meta.toolCalls || [] };
+        if (r.artifacts.length) {
+            console.log('[Proxima Claude] ' + r.artifacts.length + ' artifact(s): ' +
+                r.artifacts.map(function (a) { return a.path + ' (' + a.fileText.length + 'B)'; }).join(', '));
+        }
+        return r.text;
+    }
+
     async function send(message, options) {
         options = options || {};
         var orgId = await _getOrgId();
@@ -478,88 +629,36 @@
                 (_pinned ? ' (pinned)' : ''));
         }
 
+        var chain = _modelChain(options);
         try {
-            var controller = new AbortController();
-            var timeoutId = setTimeout(function() { controller.abort(); }, TIMEOUT);
-
-            var res = await fetch('/api/organizations/' + orgId + '/chat_conversations/' + _convId + '/completion', {
-                method: 'POST',
-                credentials: 'include',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'text/event-stream'
-                },
-                body: _completionBody(message, options),
-                signal: controller.signal
-            });
-
-            if (!res.ok) {
-                clearTimeout(timeoutId);
-                var errBody = await res.text().catch(function() { return ''; });
-
-                // Conversation expired or deleted — create new and retry
-                if (res.status === 404 || res.status === 410) {
-                    // Recreating is right for "any conversation" and WRONG for "this
-                    // conversation": a caller resuming a supervisor thread would get a
-                    // blank one and never be told the history was lost.
-                    if (_pinned) {
-                        throw new Error('Claude: pinned conversation ' + _convId +
-                            ' is gone (' + res.status + '). Not creating a replacement — ' +
-                            'the caller asked for this specific thread.');
+            for (var i = 0; i < chain.length; i++) {
+                var model = chain[i];
+                var attempt = Object.assign({}, options, { model: model });
+                try {
+                    return await _sendAttempt(orgId, message, attempt);
+                } catch (e) {
+                    if (e && e.modelUnavailable) {
+                        if (i < chain.length - 1) {
+                            console.log('[Proxima Claude] ' + model +
+                                ' unavailable; trying ' + chain[i + 1]);
+                            continue;
+                        }
+                        var allErr = new Error('Claude: none of the configured models are available (' +
+                            chain.join(', ') + '). Last error: ' + e.message);
+                        allErr.modelUnavailable = true;
+                        throw allErr;
                     }
-                    console.log('[Proxima Claude] Conversation expired, creating new one...');
-                    _convId = await _createConversation(orgId, message);
-
-                    var retryController = new AbortController();
-                    var retryTimeoutId = setTimeout(function() { retryController.abort(); }, TIMEOUT);
-
-                    res = await fetch('/api/organizations/' + orgId + '/chat_conversations/' + _convId + '/completion', {
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Accept': 'text/event-stream'
-                        },
-                        body: _completionBody(message, options),
-                        signal: retryController.signal
-                    });
-
-                    if (!res.ok) {
-                        clearTimeout(retryTimeoutId);
-                        throw new Error('Claude completion failed on retry (' + res.status + ')');
-                    }
-
-                    var r = await _parseStream(res);
-                    clearTimeout(retryTimeoutId);
-                    _lastMeta = { artifacts: r.artifacts, model: r.meta.model,
-                        stopReason: r.meta.stopReason, limit: r.meta.limit,
-                        format: r.meta.format, conversationId: _convId,
-                        toolCalls: r.meta.toolCalls || [] };
-                    return r.text;
+                    throw e;
                 }
-
-                if (res.status === 429) throw new Error('Claude rate limited');
-                throw new Error('Claude completion failed (' + res.status + '): ' + errBody.substring(0, 200));
             }
-
-            var r = await _parseStream(res);
-            clearTimeout(timeoutId);
-            _lastMeta = { artifacts: r.artifacts, model: r.meta.model,
-                stopReason: r.meta.stopReason, limit: r.meta.limit,
-                format: r.meta.format, conversationId: _convId,
-                toolCalls: r.meta.toolCalls || [] };
-            if (r.artifacts.length) {
-            console.log('[Proxima Claude] ' + r.artifacts.length + ' artifact(s): ' +
-                r.artifacts.map(function (a) { return a.path + ' (' + a.fileText.length + 'B)'; }).join(', '));
-            }
-            return r.text;
-        } catch(e) {
+        } catch (e) {
             // Reset on conversation-related errors so next call creates fresh
             if (e.message && (e.message.includes('404') || e.message.includes('410'))) {
                 _convId = null;
             }
             throw e;
         }
+        throw new Error('Claude: no model available');
     }
 
 

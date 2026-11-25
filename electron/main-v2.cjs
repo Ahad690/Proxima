@@ -12,6 +12,8 @@ const providerAPI = require('./provider-api.cjs');
 const qwenUpload = require('./providers/qwen-upload.cjs');
 const claudeUpload = require('./providers/claude-upload.cjs');
 const chatgptUpload = require('./providers/chatgpt-upload.cjs');
+const { createResolver: createClaudeModelResolver } = require('./claude-models.cjs');
+const { createRegistry: createModelRegistry } = require('./model-registry.cjs');
 
 // Add timestamps to console logs
 const originalLog = console.log;
@@ -63,6 +65,99 @@ app.on('ready', () => {
 const userDataPath = app.getPath('userData');
 const settingsPath = path.join(userDataPath, 'settings.json');
 const enabledProvidersPath = path.join(userDataPath, 'enabled-providers.json');
+
+// Claude model chain: the claude section of models.json, plus the official Anthropic Models API when
+// ANTHROPIC_API_KEY is present. Refresh runs in the background so a slow or missing key
+// never delays startup; getChain() is synchronous and falls back to the config.
+const claudeModels = createClaudeModelResolver({
+    userDataPath: userDataPath,
+    repoRoot: path.join(__dirname, '..'),
+    env: process.env,
+    logger: console
+});
+claudeModels.refresh().catch((e) => {
+    console.error('[claude-models] refresh failed: ' + e.message);
+});
+// Keep a long-running app current without adding a network call to any send path.
+setInterval(() => {
+    claudeModels.refresh().catch((e) => {
+        console.error('[claude-models] refresh failed: ' + e.message);
+    });
+}, 6 * 60 * 60 * 1000).unref();
+
+// Universal provider chains. Claude also uses the Anthropic Models API resolver above;
+// this registry adds version ordering and the last-working fallback for every provider
+// whose engine accepts a model id (Claude, ChatGPT, Qwen).
+const modelRegistry = createModelRegistry({
+    userDataPath: userDataPath,
+    repoRoot: path.join(__dirname, '..'),
+    env: process.env,
+    logger: console
+});
+const modelChains = modelRegistry.describe().providers;
+console.log('[model-registry] ' + Object.keys(modelChains).map((p) => {
+    const chain = modelChains[p].chain;
+    return p + ': ' + (chain.length ? chain.join(' -> ') : '(engine default)');
+}).join(' | '));
+setInterval(() => {
+    modelRegistry.reload();
+}, 6 * 60 * 60 * 1000).unref();
+
+// Shared by sendMessage and the older sendMessageWithFile route. An explicit caller
+// model wins; otherwise the provider's ordered chain and effort apply.
+function applyProviderModelOptions(provider, options, data) {
+    options = options || {};
+
+    if (provider === 'claude') {
+        if (data && data.model) {
+            options.model = data.model;
+        } else {
+            const chain = modelRegistry.mergeChain('claude', claudeModels.getChain());
+            if (chain.length) options.modelChain = chain;
+        }
+        if (!options.effort) {
+            options.effort = (data && data.effort) || claudeModels.getEffort();
+        }
+        return options;
+    }
+
+    if (provider === 'chatgpt' || provider === 'qwen') {
+        // Qwen's preflight checks the model against the attachment type. A text-only
+        // fallback would accept the upload and then ignore the file, so media calls
+        // use the first model only and skip the chain.
+        if (provider === 'qwen' && data &&
+            (data.attachments || data.filePath ||
+                (Array.isArray(data.files) && data.files.length))) {
+            if (data.model) {
+                options.model = data.model;
+            } else {
+                const chain = modelRegistry.getChain('qwen');
+                if (chain.length) options.model = chain[0];
+            }
+            const thinking = modelRegistry.getThinking(provider);
+            if (options.thinking === undefined && typeof thinking === 'boolean') {
+                options.thinking = thinking;
+            }
+            return options;
+        }
+
+        if (data && data.model) {
+            options.model = data.model;
+        } else {
+            const chain = modelRegistry.getChain(provider);
+            if (chain.length) options.modelChain = chain;
+        }
+        const effort = modelRegistry.getEffort(provider);
+        if (provider === 'chatgpt' && !options.thinkingEffort && effort) {
+            options.thinkingEffort = effort;
+        }
+        if (provider === 'qwen' && options.thinking === undefined) {
+            const thinking = modelRegistry.getThinking(provider);
+            if (typeof thinking === 'boolean') options.thinking = thinking;
+        }
+    }
+    return options;
+}
 
 let mainWindow;
 let browserManager;
@@ -655,13 +750,15 @@ async function handleMCPRequest(request) {
 
             case 'sendMessage':
                 // Extract options — Perplexity uses modelPreference, ChatGPT uses model,
-                // Claude uses model + thinkingMode (pins a specific claude.ai model)
+                // Claude uses model + effort, and modelChain when no explicit model was
+                // given (the models.json fallback chain).
                 // This is an ALLOWLIST — anything not named here is silently dropped
                 // before it reaches the engine. Add new per-provider options here or
                 // they will appear to be ignored with no error anywhere.
                 // qwen: autoSearch -> feature_config.auto_search, thinking -> thinking_enabled,
                 //       files -> messages[0].files (OSS descriptors, see uploadAttachmentsToQwen)
                 const sendOptions = { modelPreference: data.modelPreference, model: data.model, thinkingEffort: data.thinkingEffort, thinkingMode: data.thinkingMode, autoSearch: data.autoSearch, thinking: data.thinking, chatType: data.chatType, researchMode: data.researchMode, files: data.files, conversationId: data.conversationId, newChat: data.newChat, session: data.session, effort: data.effort, renderingMode: data.renderingMode };
+                applyProviderModelOptions(provider, sendOptions, data);
                 console.error('[MCP] sendMessage options:', JSON.stringify(sendOptions));
 
                 // Stamp every outgoing prompt with the wall-clock time, for every
@@ -842,6 +939,9 @@ async function handleMCPRequest(request) {
                             .catch(() => null);
                         let parsedMeta = null;
                         try { parsedMeta = meta ? JSON.parse(meta) : null; } catch (e) { parsedMeta = null; }
+                        if (parsedMeta && parsedMeta.model) {
+                            modelRegistry.rememberWorking('claude', parsedMeta.model);
+                        }
                         const conversationId = (parsedMeta && parsedMeta.conversationId) ||
                             await browserManager.executeScript('claude',
                                 'window.__proximaClaude && window.__proximaClaude.getConversation ? window.__proximaClaude.getConversation() : null')
@@ -919,14 +1019,17 @@ async function handleMCPRequest(request) {
                         // the OSS PUT either completed or threw, so the retry/verify
                         // loop the DOM path needs below has nothing to do here.
                         const staged = _qwenPendingAttachments.splice(0, _qwenPendingAttachments.length);
-                        const uploaded = await uploadAttachmentsToQwen(qwenAttachmentPaths(data), data.model);
+                        const uploaded = await uploadAttachmentsToQwen(qwenAttachmentPaths(data),
+                            msgOptions.model || data.model);
                         const attached = staged.concat(uploaded);
                         // Second allowlist, same trap as the one in sendMessage: an option
                         // missing here is dropped with no error. session in particular —
                         // without it this route silently sends into the shared 'default'
                         // conversation, whatever the caller asked for.
                         const qOptions = {
-                            chatType: data.chatType, thinking: data.thinking, model: data.model,
+                            chatType: data.chatType,
+                            thinking: msgOptions.thinking !== undefined ? msgOptions.thinking : data.thinking,
+                            model: msgOptions.model || data.model,
                             session: data.session, conversationId: data.conversationId,
                             autoSearch: data.autoSearch, researchMode: data.researchMode
                         };
@@ -983,7 +1086,8 @@ async function handleMCPRequest(request) {
                     }
 
 
-                    const msgResult = await sendMessageToProvider(provider, data.message);
+                    const msgOptions = applyProviderModelOptions(provider, {}, data);
+                    const msgResult = await sendMessageToProvider(provider, data.message, false, msgOptions);
                     // Use engine response if available, only DOM-poll when engine didn't return content
                     let finalResponse = '';
                     if (msgResult && msgResult.response && msgResult.response.length > 0) {
@@ -1195,13 +1299,44 @@ async function sendMessageToProvider(provider, message, forceDOM = false, option
     // API-first approach — direct fetch + SSE, skip when forceDOM=true
     if (!forceDOM) {
         try {
-            console.log(`[${provider}] Trying API-first approach...options: ${JSON.stringify(options)}`);
-            const apiResponse = await providerAPI.sendViaAPI(provider, webContents, message, options);
-            if (apiResponse && apiResponse.length > 0) {
-                console.log(`[${provider}] ✔ API response captured (${apiResponse.length} chars)`);
-                _apiResponseCache[provider] = apiResponse;
-                return { response: apiResponse };
+            // Claude's engine owns its chain. ChatGPT and Qwen accept one model per
+            // call, so their chain is walked here, before the DOM fallback. A model
+            // error advances the chain; a session/network error keeps the old DOM path.
+            const chain = (provider === 'chatgpt' || provider === 'qwen') &&
+                Array.isArray(options.modelChain) && options.modelChain.length
+                ? options.modelChain
+                : null;
+            const attempts = chain || [null];
+            let apiResponse = null;
+
+            for (let i = 0; i < attempts.length; i++) {
+                const model = attempts[i];
+                const attemptOptions = chain
+                    ? Object.assign({}, options, { model: model, modelChain: null })
+                    : options;
+                console.log(`[${provider}] Trying API-first approach...options: ${JSON.stringify(attemptOptions)}`);
+                apiResponse = await providerAPI.sendViaAPI(provider, webContents, message, attemptOptions);
+
+                if (apiResponse && apiResponse.length > 0) {
+                    console.log(`[${provider}] ✔ API response captured (${apiResponse.length} chars)`);
+                    if (chain) modelRegistry.rememberWorking(provider, model);
+                    _apiResponseCache[provider] = apiResponse;
+                    return chain ? { response: apiResponse, model: model } : { response: apiResponse };
+                }
+
+                const lastError = providerAPI.lastError(provider) || '';
+                if (modelRegistry.isModelUnavailableError(lastError)) {
+                    if (chain && i < attempts.length - 1) {
+                        console.log(`[${provider}] model ${model} unavailable — trying ${attempts[i + 1]}`);
+                        continue;
+                    }
+                    throw new Error(lastError || ('No configured ' + provider + ' model is available'));
+                }
+
+                // Not a model problem: preserve the existing empty/pending handling.
+                break;
             }
+
             // ChatGPT sometimes starts generation but returns an early empty API body.
             // In this case, be patient and let getResponseWithTyping capture the response
             // instead of re-sending via DOM (which can duplicate prompts).
@@ -1213,6 +1348,9 @@ async function sendMessageToProvider(provider, message, forceDOM = false, option
             console.log(`[${provider}] API returned empty — falling back to DOM`);
             delete _apiResponseCache[provider];
         } catch (apiErr) {
+            // A model-unavailable error is terminal: typing into the page would use
+            // whatever model the UI happens to have selected, not the requested one.
+            if (modelRegistry.isModelUnavailableError(apiErr.message)) throw apiErr;
             console.log(`[${provider}] API failed: ${apiErr.message} — falling back to DOM`);
             delete _apiResponseCache[provider];
         }
