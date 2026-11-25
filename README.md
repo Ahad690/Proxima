@@ -4,23 +4,23 @@
 
 # Proxima
 
-**4 AI providers. 1 local server. No API keys.**
+**5 AI providers. 1 local server. No API keys.**
 
-Use ChatGPT, Claude, Gemini & Perplexity directly inside your coding tools — through your existing accounts.
+Use ChatGPT, Claude, Gemini, Qwen & Perplexity directly inside your coding tools — through your existing accounts.
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-4.1.0-blue)](https://github.com/Zen4-bit/Proxima/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/Zen4-bit/Proxima/releases)
-[![MCP Tools](https://img.shields.io/badge/MCP_tools-45%2B-green)](https://github.com/Zen4-bit/Proxima#mcp-tools)
+[![Version](https://img.shields.io/badge/version-4.2.0-blue)](https://github.com/Ahad690/Proxima/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/Ahad690/Proxima/releases)
+[![MCP Tools](https://img.shields.io/badge/MCP_tools-57-green)](https://github.com/Ahad690/Proxima#mcp-tools)
 [![License](https://img.shields.io/badge/license-Non--Commercial-red)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-proximamcp.in-blue)](https://www.proximamcp.in)
 [![Docs](https://img.shields.io/badge/Docs-Documentation-orange)](https://www.proximamcp.in/documentation)
-[![Stars](https://img.shields.io/github/stars/Zen4-bit/Proxima?style=social)](https://github.com/Zen4-bit/Proxima/stargazers)
+[![Stars](https://img.shields.io/github/stars/Ahad690/Proxima?style=social)](https://github.com/Ahad690/Proxima/stargazers)
 
 <br>
 
-[Getting Started](#getting-started) · [CLI](#cli-tool) · [REST API](#rest-api) · [WebSocket](#websocket) · [SDKs](#sdks) · [MCP Tools](#mcp-tools)
+[Getting Started](#getting-started) · [CLI](#cli-tool) · [Orchestration](#claude-orchestration-loop) · [Automation](#local-review-automation) · [REST API](#rest-api) · [WebSocket](#websocket) · [SDKs](#sdks) · [MCP Tools](#mcp-tools)
 
 </div>
 
@@ -73,12 +73,16 @@ Proxima is a local AI gateway that connects multiple AI providers to your develo
 <td>Everything through <code>/v1/chat/completions</code> — no separate URLs</td>
 </tr>
 <tr>
-<td>🤖 <strong>4 AI Providers</strong></td>
-<td>ChatGPT, Claude, Gemini, Perplexity — any model, any task</td>
+<td>🤖 <strong>5 AI Providers</strong></td>
+<td>ChatGPT, Claude, Gemini, Qwen, Perplexity — any model, any task</td>
 </tr>
 <tr>
 <td>⚡ <strong>Provider Engines</strong></td>
-<td>Native browser-level communication — 3–10x faster, more reliable</td>
+<td>Native browser-level communication with SSE streaming and automatic DOM fallback where the provider supports it</td>
+</tr>
+<tr>
+<td>🎛️ <strong>Claude Orchestration</strong></td>
+<td>Use a Claude thread as a supervisor while your coding agent does the tool work — see <a href="docs/PROXIMA_CLAUDE_ORCHESTRATION.md">the guide</a></td>
 </tr>
 <tr>
 <td>🖥️ <strong>CLI Tool</strong></td>
@@ -89,7 +93,7 @@ Proxima is a local AI gateway that connects multiple AI providers to your develo
 <td>Real-time streaming at <code>ws://localhost:3210/ws</code></td>
 </tr>
 <tr>
-<td>🧰 <strong>45+ MCP Tools</strong></td>
+<td>🧰 <strong>57 MCP Tools</strong></td>
 <td>Search, code, translate, analyze, debate, audit — all via MCP</td>
 </tr>
 <tr>
@@ -118,55 +122,55 @@ Proxima is a local AI gateway that connects multiple AI providers to your develo
 
 ---
 
-## What's New in v4.1.0
+## What's New in v4.2.0
 
 <table>
 <tr>
-<td width="40"><strong>🔥</strong></td>
-<td><strong>Provider Engine System</strong><br>Proxima now uses native browser-level communication with AI providers — no DOM scraping. Responses are 3–10x faster and far more stable, with SSE streaming support and automatic fallback mechanisms.</td>
+<td width="40"><strong>🖥️</strong></td>
+<td><strong>Qwen joins as a fifth provider</strong><br>Qwen 3.8 is available as an API-first provider with real image, video, audio, and document attachments, plus image generation and editing. It runs on the same cookie session as the Qwen website and has no DOM fallback — if the API path fails, it fails loudly instead of typing into the page.</td>
 </tr>
 <tr>
-<td><strong>⚡</strong></td>
-<td><strong>CLI Tool</strong><br>Run <code>proxima ask</code>, <code>proxima fix</code>, <code>proxima debate</code> from any terminal. Pipe errors straight from your build output. Supports file context, git diff piping, and JSON output for scripts.</td>
-</tr>
-<tr>
-<td><strong>🔌</strong></td>
-<td><strong>WebSocket Server</strong><br>Real-time streaming AI at <code>ws://localhost:3210/ws</code>. Bidirectional communication with status updates, request tracking, and keepalive. Useful for apps, scripts, anything that needs live output.</td>
-</tr>
-<tr>
-<td><strong>🛠️</strong></td>
-<td><strong>15 New MCP Tools</strong><br><code>chain_query</code>, <code>solve</code>, <code>debate</code>, <code>security_audit</code>, <code>verify</code>, <code>fix_error</code>, <code>build_architecture</code>, <code>write_tests</code>, <code>explain_error</code>, <code>convert_code</code>, <code>ask_selected</code>, <code>conversation_export</code>, <code>ask_perplexity</code>, <code>github_search</code>, <code>get_ui_reference</code></td>
+<td><strong>📎</strong></td>
+<td><strong>Real file attachments</strong><br>Claude and Qwen accept actual files through MCP — images, PDFs, video, audio, and documents — not just text pasted into a prompt. ChatGPT file upload is wired in the app. A failed upload fails the call instead of quietly sending a text-only turn.</td>
 </tr>
 <tr>
 <td><strong>📄</strong></td>
-<td><strong>Interactive API Docs</strong><br>Live documentation at <code>/docs</code>, <code>/cli</code>, <code>/ws</code> — with a working chat widget to test queries directly in your browser.</td>
+<td><strong>Claude threads and artifacts</strong><br>Address a Claude conversation by id or URL so a thread survives a restart, and pull files the model created or edited back to disk with <code>claude_artifacts</code>.</td>
 </tr>
 <tr>
-<td><strong>🎯</strong></td>
-<td><strong>Multi-Model Queries</strong><br><code>model: "all"</code> queries every provider at once. <code>model: ["claude", "chatgpt"]</code> targets specific ones. Compare responses side-by-side from multiple AI providers in a single request.</td>
+<td><strong>🎚️</strong></td>
+<td><strong>Configurable provider models</strong><br>Pick the Claude primary and fallback in Settings — the default is Mythos 5.2 with Opus 5.5 as fallback. <code>models.json</code> holds the ordered chains for every provider; each family is tried newest-first and the last model that answered is kept as the fallback. Claude can also resolve the newest active model from <code>GET /v1/models</code>.</td>
 </tr>
 <tr>
-<td><strong>📤</strong></td>
-<td><strong>Conversation Export</strong><br>Export full conversation history from any provider using <code>conversation_export</code>. Continue working on AI agent projects, revisit ideas discussed with providers, and build on previous plans without losing context.</td>
+<td><strong>🎛️</strong></td>
+<td><strong>Claude orchestration loop</strong><br>Run a Claude thread as a supervisor while your coding agent does the tool work. One Claude turn per checkpoint instead of one per tool call. The <a href="docs/PROXIMA_CLAUDE_ORCHESTRATION.md">orchestration guide</a> covers the CLI, message contract, attachments, and state file.</td>
 </tr>
 <tr>
-<td><strong>🛡️</strong></td>
-<td><strong>New REST API Functions</strong><br>New <code>security_audit</code> and <code>debate</code> functions added to the REST API endpoint. File upload support via <code>file</code> field in request body.</td>
+<td><strong>🔍</strong></td>
+<td><strong>Local review automation</strong><br>A pre-push hook queues a code review, and the local loop can generate patches, validate them, run tests, and push a bot branch. Review-only by default; repair is opt-in.</td>
+</tr>
+<tr>
+<td><strong>🎬</strong></td>
+<td><strong>Video-reviewed UI testing</strong><br>Record a browser run, send the video to Qwen, and get a machine-readable verdict. Catches rendering and interaction bugs that assertions miss. See <a href="tools/qa-video-review/README.md">tools/qa-video-review</a>.</td>
+</tr>
+<tr>
+<td><strong>🧠</strong></td>
+<td><strong>Provider memory unloading</strong><br>Unload provider renderers to reclaim RAM and reload them on demand, without losing the signed-in session.</td>
 </tr>
 </table>
 
 <br>
 
 **Bug fixes & improvements:**
-- 🔧 Staggered multi-provider queries — prevents UI freezes during parallel requests
-- 🔧 Smart provider selection — routes coding tasks to Claude, research to Perplexity
-- 🔧 Response caching with TTL (5 min) and automatic eviction (max 100 entries)
-- 🔧 Rate limit handling — detects 429 responses, auto-recovery on expired sessions
-- 🔧 Engine auto-injection on page navigation with duplicate guard
-- 🔧 Claude conversation auto-recovery (handles 404/410 expired sessions)
-- 🔧 ChatGPT SHA3-512 proof-of-work challenge solver
-- 🔧 10MB body size limit on REST API with CORS headers
-- 🔧 Socket leak prevention on IPC reconnect
+- 🔧 ChatGPT and Qwen attachment uploads stream from disk instead of inflating files through the renderer
+- 🔧 Claude edited files are transported after edit, not just newly created files
+- 🔧 Per-caller Qwen conversation state — callers no longer share one chat pointer
+- 🔧 Supervisor stdout retries are bounded; a stalled pipe no longer busy-spins
+- 🔧 Preflight catches a running Electron process older than its source
+- 🔧 Review automation serialises through a global lock and batches one review per push
+
+The provider engine system, CLI, WebSocket streaming, and multi-model queries introduced
+in v4.1.0 remain documented below.
 
 ---
 
@@ -192,7 +196,7 @@ Download the latest release and run the installer.
 
 <br>
 
-[Download Proxima v4.1.0 →](https://github.com/Zen4-bit/Proxima/releases)
+[Download Proxima v4.2.0 →](https://github.com/Ahad690/Proxima/releases)
 
 </td>
 <td width="50%">
@@ -200,8 +204,9 @@ Download the latest release and run the installer.
 **Run from Source (Windows / macOS / Linux)**
 
 ```bash
-git clone https://github.com/Zen4-bit/Proxima.git
+git clone https://github.com/Ahad690/Proxima.git
 cd Proxima
+git checkout ahad/provider-work   # v4.2.0 work; omit once merged to main
 npm install
 npm start
 ```
@@ -210,7 +215,7 @@ npm start
 </tr>
 </table>
 
-> Electron will open the Proxima window. Log in to your AI providers, enable REST API in Settings, and you're ready.
+> Electron will open the Proxima window. Log in to your AI providers, enable the ones you want in Settings (Claude and Qwen start disabled), enable REST API, and you're ready.
 
 <br>
 
@@ -249,28 +254,35 @@ npm start
 
 <table>
 <tr>
-<td align="center" width="25%">
+<td align="center" width="20%">
 <br>
 <strong>ChatGPT</strong>
 <br>
 OpenAI's GPT
 <br><br>
 </td>
-<td align="center" width="25%">
+<td align="center" width="20%">
 <br>
 <strong>Claude</strong>
 <br>
 Anthropic's Claude
 <br><br>
 </td>
-<td align="center" width="25%">
+<td align="center" width="20%">
 <br>
 <strong>Gemini</strong>
 <br>
 Google's Gemini
 <br><br>
 </td>
-<td align="center" width="25%">
+<td align="center" width="20%">
+<br>
+<strong>Qwen</strong>
+<br>
+Alibaba's Qwen 3.8
+<br><br>
+</td>
+<td align="center" width="20%">
 <br>
 <strong>Perplexity</strong>
 <br>
@@ -280,7 +292,7 @@ Web search & research
 </tr>
 </table>
 
-Each provider runs through a dedicated **engine script** that handles communication at the browser level. Responses are streamed via SSE using your existing login. If an engine can't connect, Proxima falls back to DOM-based interaction automatically.
+Each provider runs through a dedicated **engine script** that handles communication at the browser level. Responses are streamed via SSE using your existing login. ChatGPT, Claude, Gemini, and Perplexity fall back to DOM-based interaction if their engine cannot connect; a Claude call pinned to a specific conversation fails instead of falling back, so it cannot answer in the wrong thread. **Qwen has no DOM fallback** — it is API-first, and a failed API path raises an error rather than typing into the page.
 
 <br>
 
@@ -289,9 +301,9 @@ Each provider runs through a dedicated **engine script** that handles communicat
 
 ## How It Works
 
-In v4.1.0, Proxima uses a **Provider Engine System** instead of DOM scraping.
+In v4.2.0, Proxima uses a **Provider Engine System** instead of DOM scraping.
 
-When you send a query, Proxima uses a lightweight engine script within the provider's browser tab. That script handles communication at the browser level and streams the response back via SSE. If the engine fails for any reason, Proxima automatically falls back to DOM-based interaction — so it keeps working either way.
+When you send a query, Proxima uses a lightweight engine script within the provider's browser tab. That script handles communication at the browser level and streams the response back via SSE. If the engine fails and the provider has a DOM path, Proxima falls back to DOM-based interaction. Qwen is the exception: it is API-only, so a failure is reported instead of being retyped into the page.
 
 ```
 Your editor → MCP tool call → Proxima local server
@@ -310,9 +322,74 @@ Your editor → MCP tool call → Proxima local server
 <tr><td><code>chatgpt-engine.js</code></td><td>ChatGPT</td><td>Handles proof-of-work challenges, streams via SSE</td></tr>
 <tr><td><code>claude-engine.js</code></td><td>Claude</td><td>Org-level auth handling, SSE streaming, auto-recovery</td></tr>
 <tr><td><code>gemini-engine.js</code></td><td>Gemini</td><td>SSE streaming with auto-reconnect</td></tr>
+<tr><td><code>qwen-engine.js</code></td><td>Qwen</td><td>API-first, per-caller conversation state, signed requests; no DOM fallback</td></tr>
 <tr><td><code>perplexity-engine.js</code></td><td>Perplexity</td><td>SSE streaming</td></tr>
 </table>
 
+---
+
+## Claude Orchestration Loop
+
+Proxima can drive a long-lived Claude thread as a **supervisor** while your coding agent
+does the tool work. The agent runs tools, tests, and deploys locally; Claude is called
+only at checkpoints, so one Claude turn can cover dozens of tool calls.
+
+The supervisor has no tools of its own — it sees only the message and the files you
+attach — so evidence travels as real files, not summaries.
+
+```bash
+# First turn: start the thread and remember its id
+node tools/orchestrate/supervisor.cjs \
+  --message-file turn1.md --new --state ./supervisor-state.json > reply1.md
+
+# Later turns: resume the remembered thread
+node tools/orchestrate/supervisor.cjs \
+  --message-file turn2.md --state ./supervisor-state.json
+
+# Attach the evidence the supervisor should judge
+node tools/orchestrate/supervisor.cjs \
+  --message-file turn3.md \
+  --attach ./artifacts/diff.patch \
+  --attach ./artifacts/test-output.txt \
+  --state ./supervisor-state.json
+```
+
+Proxima must be running and logged in to Claude. On Windows, keep each command on one
+line — `\` is not a continuation character in cmd or PowerShell. See
+[docs/PROXIMA_CLAUDE_ORCHESTRATION.md](docs/PROXIMA_CLAUDE_ORCHESTRATION.md) for the
+message contract, attachment rules, state-file behaviour, and troubleshooting.
+
+### Model configuration
+
+All provider chains live in `models.json`:
+
+```json
+{
+  "claude": { "effort": "high", "models": ["claude-mythos-5-2", "claude-opus-5-5"] },
+  "chatgpt": { "effort": "max", "models": ["gpt-6-thinking", "gpt-5-6-thinking"] },
+  "qwen": { "models": ["qwen3.8-max", "qwen3.7-max"] }
+}
+```
+
+Within a family, the highest `major.minor` is tried first, so adding
+`gpt-6.2-thinking` to the list upgrades ChatGPT without a code change. For Claude, the
+Settings page chooses the primary and fallback directly; with **Auto**, the first family
+in `models.json` is the default. The last model that answered is remembered as the
+fallback. Claude advances on
+`403 permission_error/model_not_available`; ChatGPT and Qwen advance on a
+model-unavailable error from their engines. An explicit `model` / `--model` disables the
+chain. Gemini and Perplexity are unchanged: their engines do not take a versioned model
+id.
+
+With `ANTHROPIC_API_KEY` set, Claude's `autoLatest` uses `GET /v1/models` to replace each
+Claude family with the newest active id. Without a key, the file is the source of truth —
+the claude.ai web session itself has no models-list endpoint. `npm run models` prints every
+provider chain; `npm run claude:models` resolves the Anthropic API for Claude, and
+`npm run claude:models -- --write` updates the `claude` section of `models.json` without
+touching the other providers. `PROXIMA_MODELS` overrides the path, and a `models.json` in
+Proxima's user-data directory wins over the repo copy.
+
+---
 
 ## CLI Tool
 
@@ -377,6 +454,9 @@ proxima debate "tabs vs spaces"
 proxima audit "SELECT * FROM users WHERE id=" + req.query.id
 proxima brainstorm "features for a dev productivity tool"
 
+# Analyze a URL or a block of text
+proxima analyze "https://example.com"
+
 # Translate
 proxima translate "Hello world" --to Hindi
 
@@ -409,13 +489,50 @@ proxima ask "What does this do?" --file src/server.js
 
 <table>
 <tr><th>Flag</th><th>What it does</th></tr>
-<tr><td><code>-m</code> / <code>--model</code></td><td>Override provider (<code>claude</code>, <code>chatgpt</code>, <code>gemini</code>, <code>perplexity</code>, <code>auto</code>)</td></tr>
-<tr><td><code>--json</code></td><td>Raw JSON output for scripting</td></tr>
+<tr><td><code>-m</code> / <code>--model</code></td><td>Override provider (<code>claude</code>, <code>chatgpt</code>, <code>gemini</code>, <code>qwen</code>, <code>perplexity</code>, <code>auto</code>)</td></tr>
 <tr><td><code>-l</code> / <code>--lang</code></td><td>Specify code language</td></tr>
 <tr><td><code>--file</code></td><td>Include a file as context</td></tr>
 <tr><td><code>--to</code></td><td>Target language for translate</td></tr>
 <tr><td><code>--from</code></td><td>Source language for translate</td></tr>
 </table>
+
+---
+
+## Local Review Automation
+
+Proxima ships a local review loop that uses the same browser sessions — no API keys and
+no cloud runner.
+
+```bash
+# Install the pre-push hook in the current repo
+npm run hooks:install
+
+# Review one commit manually
+npm run review -- <sha>
+
+# Review-only loop (the default: no patches applied)
+npm run loop:local
+
+# Let the loop generate and apply patches for this run
+node scripts/proxima-loop.cjs --auto-fix
+```
+
+Reviews are written to `perplexity-reviews/<shortSha>.md`. The loop defaults to
+review-only (`enableAutoFix: false` in `proxima-automation.config.json`); repair, tests,
+and bot branches are opt-in. Bot branches use `proxima/fix-<shortSha>-iter-<n>`.
+
+See [docs/local-automation.md](docs/local-automation.md) for configuration and recovery.
+
+Environment overrides for a single run:
+
+| Variable | Effect |
+|---|---|
+| `PROXIMA_SKIP_REVIEW=1` | Skip the review for this push |
+| `PROXIMA_REVIEW_MODEL` | Override the review model |
+| `PROXIMA_REPAIR_MODEL` | Override the repair model |
+| `PROXIMA_REVIEW_DIR` | Write reviews to another directory |
+| `PROXIMA_BASE_URL` | Point the loop at a different Proxima REST URL |
+| `PROXIMA_IPC_PORT` | Use a specific Proxima IPC port |
 
 ---
 
@@ -681,10 +798,11 @@ ws.onmessage = (e) => {
 
 <table>
 <tr><th>Tool</th><th>What it does</th></tr>
-<tr><td><code>ask_chatgpt</code></td><td>Query ChatGPT (supports file upload)</td></tr>
-<tr><td><code>ask_claude</code></td><td>Query Claude (supports file upload)</td></tr>
-<tr><td><code>ask_gemini</code></td><td>Query Gemini (supports file upload)</td></tr>
-<tr><td><code>ask_perplexity</code></td><td>Query Perplexity (supports file upload)</td></tr>
+<tr><td><code>ask_chatgpt</code></td><td>Query ChatGPT (file context via <code>files</code>)</td></tr>
+<tr><td><code>ask_claude</code></td><td>Query Claude (real file attachments; resume a thread by id)</td></tr>
+<tr><td><code>ask_gemini</code></td><td>Query Gemini (file context via <code>files</code>)</td></tr>
+<tr><td><code>ask_qwen</code></td><td>Query Qwen 3.8 (real image/video/audio/document attachments; image generation and editing)</td></tr>
+<tr><td><code>ask_perplexity</code></td><td>Query Perplexity</td></tr>
 <tr><td><code>ask_all_ais</code></td><td>Send same query to all providers at once</td></tr>
 <tr><td><code>ask_selected</code></td><td>Pick specific providers to query</td></tr>
 <tr><td><code>compare_ais</code></td><td>Get and compare responses side by side</td></tr>
@@ -785,6 +903,8 @@ ws.onmessage = (e) => {
 <tr><td><code>new_conversation</code></td><td>Reset conversation context</td></tr>
 <tr><td><code>clear_cache</code></td><td>Clear response cache</td></tr>
 <tr><td><code>conversation_export</code></td><td>Export full conversation history</td></tr>
+<tr><td><code>claude_conversation</code></td><td>Inspect a Claude thread by id or URL</td></tr>
+<tr><td><code>claude_artifacts</code></td><td>Download files a Claude thread created or edited to disk</td></tr>
 </table>
 
 ---
@@ -794,7 +914,8 @@ ws.onmessage = (e) => {
 Since Proxima works without API keys, a few things worth knowing:
 
 - **No credentials stored.** Proxima uses your existing browser session cookies — the same way you're already logged in.
-- **Nothing leaves your machine** except the queries you send to AI providers you're logged into.
+- **Nothing leaves your machine** except the queries and files you send to AI providers you're logged into.
+- **Attachments are real uploads.** A file you attach to Claude, ChatGPT, or Qwen is uploaded to that provider, exactly as if you had attached it in the provider's web UI. Redact secrets first.
 - **Runs on localhost.** The MCP server, REST API, and WebSocket are all local. Nothing is exposed to the internet.
 - **No telemetry.** Proxima doesn't collect or send any usage data anywhere.
 - **Sessions are yours.** If you log out from a provider's website or clear browser data, you'll need to log in again through Proxima.
@@ -810,6 +931,8 @@ Proxima/
 ├── electron/
 │   ├── main-v2.cjs                  # Electron main process
 │   ├── browser-manager.cjs          # Browser session management
+│   ├── claude-models.cjs            # Claude config + Anthropic latest-version resolver
+│   ├── model-registry.cjs           # Universal family/version chains + last-working state
 │   ├── rest-api.cjs                 # REST API server (OpenAI-compatible)
 │   ├── ws-server.cjs                # WebSocket server
 │   ├── provider-api.cjs             # Provider engine injection manager
@@ -817,18 +940,34 @@ Proxima/
 │   ├── preload.cjs                  # Renderer preload bridge
 │   └── providers/
 │       ├── chatgpt-engine.js        # SHA3-512 POW + SSE streaming
+│       ├── chatgpt-upload.cjs       # ChatGPT attachment upload
 │       ├── claude-engine.js         # Org auth + SSE streaming
+│       ├── claude-upload.cjs        # Claude attachment upload
 │       ├── gemini-engine.js         # Session SSE streaming
+│       ├── qwen-engine.js           # API-first Qwen 3.8 engine (no DOM fallback)
+│       ├── qwen-upload.cjs          # Qwen OSS attachment upload
 │       └── perplexity-engine.js     # SSE streaming
 ├── cli/
-│   └── proxima-cli.cjs              # Terminal CLI
+│   ├── proxima-cli.cjs              # Terminal CLI
+│   ├── proxima-review.cjs           # Code review (manual or pre-push hook)
+│   └── install-hooks.cjs            # Git hook installer
+├── scripts/
+│   ├── proxima-loop.cjs             # Review / repair / test loop
+│   └── proxima-repair.cjs           # Patch generation and validation
+├── tools/
+│   ├── orchestrate/
+│   │   ├── supervisor.cjs           # Claude checkpoint CLI
+│   │   └── preflight.cjs            # Readiness checks
+│   └── qa-video-review/             # Record a run, review it with Qwen
 ├── src/
-│   ├── mcp-server-v3.js             # MCP server (50+ tools)
+│   ├── mcp-server-v3.js             # MCP server (57 tools)
 │   └── enabled-providers.json       # Provider config
 ├── sdk/
 │   ├── proxima.py                   # Python SDK
 │   └── proxima.js                   # JavaScript SDK
-├── assets/                          # Icons, screenshots, demo
+├── docs/                            # Orchestration and automation guides
+├── assets/                          # Icons and demo assets
+├── models.json                      # Per-provider model chains and effort
 └── package.json
 ```
 
@@ -837,12 +976,25 @@ Proxima/
 ## Troubleshooting
 
 **Windows Firewall prompt on first launch**
-<br>Proxima runs on `localhost:19223` and `localhost:3210`. Click Allow — it only accepts local connections.
+<br>Proxima listens on localhost for the app IPC port (19222, or 19223 if 19222 is taken) and for the REST API on 3210. Click Allow — it only accepts local connections.
 
 **Provider shows "Not logged in"**
 <br>Each provider has a different login method:
 - **ChatGPT, Claude, Perplexity** — click the provider tab and log in using OTP (email code). Google Sign-In is restricted in embedded browsers by Google's policy.
+- **Qwen** — open the Qwen tab and sign in. The engine uses the resulting `chat.qwen.ai` cookie session.
 - **Gemini** — uses cookie-based authentication. Log in to Google in your regular browser first, then Proxima picks up the session automatically.
+
+**Qwen sends hang, or preflight reports "Qwen WAF" / "Qwen signing"**
+<br>A slider CAPTCHA is pending or the signing SDK has not booted. Open the Qwen tab, solve the slider if one is shown, then reload the tab and wait about ten seconds. Unsigned requests are what plant the CAPTCHA in the first place.
+
+**A source change behaves like a broken feature**
+<br>Anything in `electron/**`, and the provider engines, only takes effect after Proxima restarts. Run `node tools/orchestrate/preflight.cjs`; its "running code is current" check tells a stale process apart from a real bug.
+
+**Orchestration: `MCP server exited` or the thread id is not saved**
+<br>Run preflight first. If the state file stays empty after a successful first turn, the reply did not contain the `_conversation_id` marker — check the reply tail and the Claude tab. Full troubleshooting is in [docs/PROXIMA_CLAUDE_ORCHESTRATION.md](docs/PROXIMA_CLAUDE_ORCHESTRATION.md).
+
+**Review automation: the pre-push hook does not fire**
+<br>Run `npm run hooks:install` from the repository root, then confirm `.git/hooks/pre-push` exists. Reviews are written to `perplexity-reviews/`.
 
 **REST API not responding**
 <br>Check that REST API is enabled in Settings → REST API & CLI section. Visit `http://localhost:3210` in your browser to verify.
@@ -873,7 +1025,7 @@ Personal, non-commercial use only. See [LICENSE](LICENSE) for details.
 
 <br>
 
-**Proxima v4.1.0** — One API, All AI Models ⚡
+**Proxima v4.2.0** — One API, All AI Models ⚡
 
 Made by [Zen4-bit](https://github.com/Zen4-bit)
 

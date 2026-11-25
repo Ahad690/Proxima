@@ -1150,6 +1150,50 @@
                 </div>
             </div>
 
+            <!-- Claude Model Settings -->
+            <div class="settings-section">
+                <h2 class="settings-title"><span class="section-icon"
+                        style="background: linear-gradient(135deg, #d97706, #f59e0b);">C</span> Claude Models</h2>
+                <p style="color: #b3b3b3; margin-bottom: 16px; font-size: 0.95rem; line-height: 1.5;">
+                    Pick the primary model and the fallback used when it is unavailable.
+                    <strong>Auto</strong> follows <code>models.json</code> and, when
+                    <code>ANTHROPIC_API_KEY</code> is set, the newest active model from the
+                    Anthropic Models API.
+                </p>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px;">
+                    <label style="display: flex; flex-direction: column; gap: 8px; color: #d1d5db; font-size: 0.9rem;">
+                        Primary model
+                        <select id="claude-primary" onchange="saveClaudeModels()"
+                            style="background: #12122a; color: #f9fafb; border: 1px solid rgba(255,255,255,0.16); border-radius: 8px; padding: 10px 12px; font-size: 0.95rem;">
+                            <option value="auto">Auto (models.json / latest)</option>
+                            <option value="claude-mythos-5-2">Mythos 5.2 (expensive)</option>
+                            <option value="claude-opus-5-5">Opus 5.5</option>
+                            <option value="claude-opus-5">Opus 5</option>
+                            <option value="claude-sonnet-5">Sonnet 5</option>
+                            <option value="claude-fable-5">Fable 5</option>
+                            <option value="claude-opus-4-8">Opus 4.8</option>
+                            <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                        </select>
+                    </label>
+                    <label style="display: flex; flex-direction: column; gap: 8px; color: #d1d5db; font-size: 0.9rem;">
+                        Fallback model
+                        <select id="claude-fallback" onchange="saveClaudeModels()"
+                            style="background: #12122a; color: #f9fafb; border: 1px solid rgba(255,255,255,0.16); border-radius: 8px; padding: 10px 12px; font-size: 0.95rem;">
+                            <option value="none">None</option>
+                            <option value="auto">Auto (models.json / latest)</option>
+                            <option value="claude-opus-5-5">Opus 5.5</option>
+                            <option value="claude-mythos-5-2">Mythos 5.2 (expensive)</option>
+                            <option value="claude-opus-5">Opus 5</option>
+                            <option value="claude-sonnet-5">Sonnet 5</option>
+                            <option value="claude-fable-5">Fable 5</option>
+                            <option value="claude-opus-4-8">Opus 4.8</option>
+                            <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                        </select>
+                    </label>
+                </div>
+                <div id="claude-models-status" style="margin-top: 12px; color: #9ca3af; font-size: 0.85rem;"></div>
+            </div>
+
             <!-- MCP Configuration -->
             <div class="settings-section">
                 <h2 class="settings-title"><span class="section-icon"
@@ -1332,9 +1376,55 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));</code>
         let currentTab = null;
         let providerStatus = {};
 
+        // Claude model settings
+        function setClaudeSelectValue(select, value) {
+            if (!value) return;
+            if (!Array.from(select.options).some((o) => o.value === value)) {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = value;
+                select.appendChild(option);
+            }
+            select.value = value;
+        }
+
+        function claudeModelLabel(select, value) {
+            const option = Array.from(select.options).find((o) => o.value === value);
+            return option ? option.textContent : value;
+        }
+
+        function populateClaudeModels() {
+            const prefs = (settings && settings.claudeModels) || {};
+            const primary = document.getElementById('claude-primary');
+            const fallback = document.getElementById('claude-fallback');
+            if (!primary || !fallback) return;
+            setClaudeSelectValue(primary, prefs.primary || 'claude-mythos-5-2');
+            setClaudeSelectValue(fallback, prefs.fallback || 'claude-opus-5-5');
+        }
+
+        async function saveClaudeModels() {
+            const primary = document.getElementById('claude-primary');
+            const fallback = document.getElementById('claude-fallback');
+            const status = document.getElementById('claude-models-status');
+            if (!primary || !fallback) return;
+            if (!settings.claudeModels) settings.claudeModels = {};
+            settings.claudeModels.primary = primary.value;
+            settings.claudeModels.fallback = fallback.value;
+            try {
+                await agentHub.saveSettings(settings);
+                status.textContent =
+                    'Saved — primary: ' + claudeModelLabel(primary, primary.value) +
+                    ' · fallback: ' + claudeModelLabel(fallback, fallback.value) +
+                    '. Applies to the next request.';
+            } catch (e) {
+                status.textContent = 'Could not save: ' + (e && e.message || e);
+            }
+        }
+
         // Initialize
         async function init() {
             settings = await agentHub.getSettings();
+            populateClaudeModels();
             updateUI();
             loadMcpConfig();
             loadRestApiState();

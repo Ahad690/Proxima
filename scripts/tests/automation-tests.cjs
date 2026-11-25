@@ -485,44 +485,31 @@ function testChatGPTImageTurn() {
 }
 
 
-// The Claude default model is stated in THREE places that nothing forces to agree:
-// the engine constant, the wire-confirmed id list beside it, and the ask_claude tool
-// description that every agent reads to learn what the default is. Bumping the engine
-// and leaving the description behind does not break a single call — it just tells
-// every caller the wrong thing, which is the quietest kind of wrong. So pin them
-// together rather than pinning one id.
-function testClaudeModelDefault() {
-    console.log('Testing Claude Model Default...');
-
-    const engine = fs.readFileSync(path.join(__dirname, '../../electron/providers/claude-engine.js'), 'utf8');
-    const mcp = fs.readFileSync(path.join(__dirname, '../../src/mcp-server-v3.js'), 'utf8');
-
-    const model = (engine.match(/var DEFAULT_MODEL = '([^']+)'/) || [])[1];
-    const effort = (engine.match(/var DEFAULT_EFFORT = '([^']+)'/) || [])[1];
-    if (!model) throw new Error('could not read DEFAULT_MODEL out of claude-engine.js');
-    if (!effort) throw new Error('could not read DEFAULT_EFFORT out of claude-engine.js');
-
-    // The default has to be an id someone actually saw echoed off message_start.
-    // An unavailable id costs a 403 on EVERY call, so a typo here is total outage.
-    const block = engine.slice(engine.indexOf('Wire-confirmed ids'), engine.indexOf('That last one is why'));
-    if (block.indexOf(model) === -1) {
-        throw new Error('DEFAULT_MODEL "' + model + '" is not in the wire-confirmed id list');
+// The Claude model default now lives in models.json, with a runtime fallback
+// chain and optional Anthropic Models API discovery. The behavioural and wiring tests
+// are their own file so they can be run directly:
+//   node scripts/tests/claude-models-test.cjs
+function testClaudeModels() {
+    console.log('Testing Claude Model Config and Fallback...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'claude-models-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('claude-models-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
     }
-    if (engine.indexOf("EFFORTS = [") === -1 || engine.indexOf("'" + effort + "'") === -1) {
-        throw new Error('DEFAULT_EFFORT "' + effort + '" is not one of the server-quoted efforts');
-    }
+    console.log('Claude Model Config tests passed.');
+}
 
-    // What ask_claude advertises must be what the engine actually sends.
-    if (mcp.indexOf('Defaults to ' + model + '.') === -1) {
-        throw new Error('ask_claude model description does not advertise the engine default (' +
-            model + ') — engine and tool description have drifted');
+// Universal family/version ordering and the last-working fallback used by ChatGPT and
+// Qwen. Own file so it can be run directly:
+//   node scripts/tests/model-registry-test.cjs
+function testModelRegistry() {
+    console.log('Testing Universal Model Registry...');
+    const r = require('child_process').spawnSync(process.execPath,
+        [path.join(__dirname, 'model-registry-test.cjs')], { encoding: 'utf8' });
+    if (r.status !== 0) {
+        throw new Error('model-registry-test failed:\n' + (r.stdout || '') + (r.stderr || ''));
     }
-    if (mcp.indexOf('Reasoning effort. Defaults to ' + effort + '.') === -1) {
-        throw new Error('ask_claude effort description does not advertise the engine default (' +
-            effort + ')');
-    }
-
-    console.log('✅ Claude Model Default tests passed (' + model + ' @ ' + effort + ').');
+    console.log('Universal Model Registry tests passed.');
 }
 
 // The attachment shapes came from one HAR capture and nothing at runtime validates
@@ -550,7 +537,8 @@ try {
     testClaudeReconcile();
     testQwenMedia();
     testChatGPTImageTurn();
-    testClaudeModelDefault();
+    testClaudeModels();
+    testModelRegistry();
     testChatGPTUpload();
     console.log('\n✨ All automation tests passed!');
 } catch (e) {
