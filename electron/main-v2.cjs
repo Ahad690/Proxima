@@ -134,8 +134,15 @@ function applyProviderModelOptions(provider, options, data) {
             options.model = data.model;
         } else {
             const prefs = loadSettings().claudeModels;
-            const chain = modelRegistry.mergeChain('claude', buildClaudeChain(prefs));
-            if (chain.length) options.modelChain = chain;
+            const chain = buildClaudeChain(prefs);
+            // An explicit Settings choice is honored exactly; the last-working
+            // fallback only augments the automatic (Auto / None) chain.
+            const explicit = !!(prefs && (
+                (prefs.primary && prefs.primary !== 'auto') ||
+                (prefs.fallback && prefs.fallback !== 'none' && prefs.fallback !== 'auto')
+            ));
+            const finalChain = explicit ? chain : modelRegistry.mergeChain('claude', chain);
+            if (finalChain.length) options.modelChain = finalChain;
         }
         if (!options.effort) {
             options.effort = (data && data.effort) || claudeModels.getEffort();
